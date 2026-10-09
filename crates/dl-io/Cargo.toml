@@ -1,0 +1,11 @@
+[package]
+name = "dl-io"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+dl-journal.workspace = true
+dl-segment.workspace = true
+

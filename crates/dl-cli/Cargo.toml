@@ -1,0 +1,21 @@
+[package]
+name = "dl-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+dl-engine.workspace = true
+dl-ipc.workspace = true
+dl-filename.workspace = true
+dl-model.workspace = true
+dl-testserver.workspace = true
+
+[[bin]]
+name = "dl-cli"
+path = "src/main.rs"
+

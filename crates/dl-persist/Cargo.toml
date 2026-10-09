@@ -1,0 +1,15 @@
+[package]
+name = "dl-persist"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+dl-error.workspace = true
+dl-model.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

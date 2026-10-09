@@ -1,0 +1,33 @@
+[package]
+name = "dl-app"
+version.workspace = true
+edition.workspace = true
+description = "Anything Downloader 桌面应用（Tauri 壳）"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+dirs.workspace = true
+dl-engine.workspace = true
+dl-ipc.workspace = true
+dl-net.workspace = true
+dl-model.workspace = true
+dl-error.workspace = true
+dl-filename.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

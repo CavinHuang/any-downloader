@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Anything Downloader",
+  "version": "0.4.1",
+  "description": "嗅探网页媒体资源并推送到 Anything Downloader 下载",
+  "permissions": [
+    "downloads.ui",
+    "downloads",
+    "webRequest",
+    "nativeMessaging",
+    "storage",
+    "contextMenus",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Anything Downloader",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwgR0402kwLKfhaYD/GDRTi08/YVELXzztGBTrpCuqbUaJ6dSQVitkxuKpA7tRdWeEIaTbLsPb2xFirRgsDLZRl6OarMH+KblJQqbKn8expZKmE4kW0R744Ucbtvqj6ruQ4jl9cExoMM1zkcjLOASJC55dYICvuyEPcCNcvZ6WCkVudn+eYBuZL2uUfOECayXdm6lxJLdQEWgIHS/Cxh2G9ZHRpex97yTtq5Y/Y1UalPrfNfJbpif/AORcxP5UwjFEu1zAthUU2zTTS0Bc6RYClw6QYCFqr7i0CUABMDEMBkgnprf5ppAql3s3xWBm6XXab2qIJwTX2nfY1if8CZ3QQIDAQAB",
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "dl-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+tracing.workspace = true
+dl-error.workspace = true
+dl-filename.workspace = true
+dl-model.workspace = true
+

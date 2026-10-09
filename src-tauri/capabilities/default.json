@@ -1,0 +1,7 @@
+{
+  "$schema": "https://schema.tauri.app/capability/2",
+  "identifier": "default",
+  "description": "主窗口默认能力（事件 + 核心 API）",
+  "windows": ["main"],
+  "permissions": ["core:default", "notification:default", "opener:default", "dialog:default", "clipboard-manager:allow-read-text"]
+}

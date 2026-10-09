@@ -1,0 +1,12 @@
+[package]
+name = "dl-journal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

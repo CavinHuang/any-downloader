@@ -1,0 +1,13 @@
+[package]
+name = "dl-filename"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+url.workspace = true
+dl-error.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

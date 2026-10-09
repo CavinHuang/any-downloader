@@ -1,0 +1,13 @@
+[package]
+name = "dl-model"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+dl-error.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

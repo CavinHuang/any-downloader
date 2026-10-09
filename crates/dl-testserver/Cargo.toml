@@ -1,0 +1,8 @@
+[package]
+name = "dl-testserver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xxhash-rust.workspace = true
+

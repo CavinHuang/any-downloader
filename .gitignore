@@ -1,0 +1,10 @@
+/target
+*.db
+*.db-wal
+*.db-shm
+*.dlctrl
+.smoke/
+*.pem
+extension/.key-info.txt
+node_modules/
+src-tauri/binaries/
