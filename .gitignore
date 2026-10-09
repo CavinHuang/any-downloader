@@ -8,3 +8,5 @@
 extension/.key-info.txt
 node_modules/
 src-tauri/binaries/
+ui/dist/
+src-tauri/gen/schemas/
