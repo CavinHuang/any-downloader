@@ -56,6 +56,24 @@
     .pill.err { background: var(--err-soft); color: var(--err); font-weight: 600; }
 
     .tabs2 { display: flex; gap: 4px; padding: 10px 14px 8px; }
+    .site-card {
+      margin: 10px 14px 0; padding: 9px 12px;
+      background: linear-gradient(90deg, var(--accent-soft), var(--violet-soft));
+      border: 1px solid var(--accent); border-radius: 10px;
+    }
+    .site-card.hidden { display: none; }
+    .pastebar { display: flex; gap: 6px; padding: 8px 14px 0; }
+    #paste-input {
+      flex: 1; border: 1px solid var(--border); border-radius: 8px;
+      padding: 5px 9px; font-size: 12px; background: var(--panel); color: var(--text);
+      min-width: 0;
+    }
+    #paste-input:focus { outline: none; border-color: var(--accent); }
+    #paste-go { flex: none; }
+    #paste-result { padding: 4px 14px 0; font-size: 11px; color: var(--muted); min-height: 15px; }
+    .site-row { display: flex; align-items: center; gap: 8px; }
+    #site-name { font-weight: 700; font-size: 12.5px; color: var(--accent); }
+    #site-counts { font-size: 11px; color: var(--muted); flex: 1; }
     .tab2 {
       flex: 1; border: 1px solid var(--border); border-radius: 8px;
       background: var(--panel); padding: 5px 0; font-size: 12px; color: var(--muted);
@@ -83,6 +101,16 @@
       transition: border-color 0.15s;
     }
     .item:hover { border-color: var(--accent); }
+    .item { display: flex; align-items: flex-start; gap: 8px; }
+    .item input[type="checkbox"] {
+      width: 15px; height: 15px; margin: 2px 0 0; flex: none; accent-color: var(--accent); cursor: pointer;
+    }
+    .item .mid { flex: 1; min-width: 0; }
+    .item .meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+    .item .meta .size { margin-left: 0; }
+    .item .actions { margin-top: 7px; }
+    .item.selected { border-color: var(--accent); background: var(--accent-soft); }
+    .chip-f.select.on { color: var(--accent); border-color: var(--accent); font-weight: 600; }
     .name {
       font-weight: 600; font-size: 12.5px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -161,7 +189,22 @@
     <img src="icons/48.png" alt="" />
     <b>Anything Downloader</b>
     <span id="status" class="pill">检查主程序…</span>
+    <button id="btn-settings" class="icon-btn" title="嗅探设置">⚙</button>
   </header>
+
+  <div id="site-card" class="site-card hidden">
+    <div class="site-row">
+      <span id="site-name"></span>
+      <span id="site-counts"></span>
+      <button id="site-push" class="primary">一键推送</button>
+    </div>
+  </div>
+
+  <div class="pastebar">
+    <input id="paste-input" type="text" placeholder="粘贴抖音/小红书分享口令或链接…" />
+    <button id="paste-go" class="primary">解析下载</button>
+  </div>
+  <div id="paste-result"></div>
 
   <div class="tabs2">
     <button id="tab-res" class="tab2 active">本页资源</button>
@@ -170,7 +213,38 @@
 
   <div id="res-wrap">
     <div class="filters" id="filters"></div>
+    <div class="filters" id="tools">
+      <button id="btn-scan" class="chip-f push-all">主动嗅探页面</button>
+      <span id="scan-result" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <div id="batchbar" class="filters hidden">
+      <span id="sel-n" style="font-size:11px;color:var(--muted);align-self:center"></span>
+      <span style="font-size:11px;color:var(--muted);align-self:center">已选中</span>
+      <button id="sel-cancel" class="chip-f">取消</button>
+      <button id="sel-push" class="chip-f push-all">推送到主程序</button>
+    </div>
     <div id="list"><div class="empty">本页暂未嗅探到资源</div></div>
+  </div>
+
+  <div id="settings" class="settings hidden">
+    <div class="set-title">嗅探资源类型</div>
+    <label><input type="checkbox" data-type="video" /> 视频（含 HLS 分段）</label>
+    <label><input type="checkbox" data-type="audio" /> 音频</label>
+    <label><input type="checkbox" data-type="archive" /> 压缩包</label>
+    <label><input type="checkbox" data-type="doc" /> 文档（pdf/epub 等）</label>
+    <label><input type="checkbox" data-type="binary" /> 软件（exe/apk/dmg…）</label>
+    <label><input type="checkbox" data-type="image" /> 图片（默认关，噪音多）</label>
+    <div class="set-title">平台适配器</div>
+    <label><input type="checkbox" data-adapter="douyin" /> 抖音</label>
+    <label><input type="checkbox" data-adapter="xhs" /> 小红书</label>
+    <label><input type="checkbox" data-adapter="x" /> X (Twitter)</label>
+    <label><input type="checkbox" data-adapter="wechat-article" /> 微信文章图片</label>
+    <label><input type="checkbox" data-adapter="channels" /> 视频号（自动解密）</label>
+    <label><input type="checkbox" data-adapter="articles" /> 文章（12 站排版/Markdown/图片）</label>
+    <div class="set-title">其他</div>
+    <label>最小文件大小（MB，HLS 除外）</label>
+    <input type="number" id="set-minsize" min="0" style="width:100%" />
+    <div class="set-note">仅影响本扩展嗅探；修改即时生效</div>
   </div>
   <div id="tasks" class="hidden">
     <div id="tasks-stats"></div>

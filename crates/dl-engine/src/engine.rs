@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::driver::DownloadOptions;
 use dl_error::{DownloadError, ErrorKind, Res};
-use dl_model::{new_task_id, now_ms, CreateTask, Task, TaskKind, TaskStatus};
+use dl_model::{
+    new_task_id, now_ms, CreateContentTask, CreateTask, Task, TaskKind, TaskStatus,
+};
 use dl_persist::Db;
 
 /// 引擎事件（100ms 聚合节流见 http.rs 的 emit_progress）。
@@ -333,8 +335,24 @@ impl Engine {
             }
             _ => None,
         };
-        // URL 特征启发：.m3u8/.m3u 直链自动归为 HLS（驱动内清单探测确认）
+        // URL 特征启发：.m3u8/.m3u 直链自动归为 HLS（驱动内清单探测确认）；
+        // YouTube 归为 yt-dlp 托管（PO Token/SABR 风控由 yt-dlp 应对）
         let kind = c.kind.or_else(|| {
+            let host_ok = url::Url::parse(&c.url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+                .map(|h| {
+                    h == "youtube.com"
+                        || h == "www.youtube.com"
+                        || h == "m.youtube.com"
+                        || h == "music.youtube.com"
+                        || h.ends_with(".youtube.com")
+                        || h == "youtu.be"
+                })
+                .unwrap_or(false);
+            if host_ok {
+                return Some(TaskKind::Ytdlp);
+            }
             if url::Url::parse(&c.url)
                 .ok()
                 .and_then(|u| {
@@ -377,11 +395,148 @@ impl Engine {
                 .and_then(crate::checksum::parse_checksum)
                 .map(|(algo, hex)| format!("{algo}:{hex}")),
             mirrors_json,
+            postprocess_json: Self::normalize_postprocess(&c.postprocess),
             error: None,
             created_at: now,
             updated_at: now,
         };
         self.db.insert_task(task.clone()).await?;
+        Ok(task)
+    }
+
+    /// 内容任务上限（与 dl-ipc 请求帧上限一致；防御直连 IPC 的超大载荷）。
+    pub const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
+
+    /// 内容任务（站点适配层文章导出，docs/MEDIA-ADAPTERS.md §11）：
+    /// 扩展生成的 HTML/Markdown 直接落盘为已完成任务——无下载阶段，
+    /// 状态直达 Done（状态机不变量由 insert 直写保证，不经 transition）。
+    pub async fn create_content_task(&self, c: CreateContentTask) -> Res<Task> {
+        if c.content.len() > Self::MAX_CONTENT_BYTES {
+            return Err(DownloadError::new(
+                ErrorKind::InvalidParams,
+                format!("content too large (max {} bytes)", Self::MAX_CONTENT_BYTES),
+            ));
+        }
+        if c.filename.trim().is_empty() {
+            return Err(DownloadError::new(
+                ErrorKind::InvalidParams,
+                "filename is required".to_string(),
+            ));
+        }
+        if let Some(src) = c.source_url.as_deref() {
+            if !src.starts_with("http://") && !src.starts_with("https://") {
+                return Err(DownloadError::new(
+                    ErrorKind::InvalidParams,
+                    "source_url must be http(s)".to_string(),
+                ));
+            }
+        }
+        if let Some(d) = c.dir.as_deref() {
+            // 目录穿越防护：合集目录由扩展拼接，段级 ".." 一律拒绝
+            if d.split(['/', '\\']).any(|seg| seg == "..") {
+                return Err(DownloadError::new(
+                    ErrorKind::InvalidParams,
+                    "dir must not contain '..' segments".to_string(),
+                ));
+            }
+        }
+        // 目录解析：显式 dir（文章合集模式）> default_dir 设置 > 系统下载目录；
+        // 无显式 dir 时保留 auto_categorize → 「文档」语义
+        let base = match c.dir.as_deref() {
+            Some(d) if !d.trim().is_empty() => d.to_string(),
+            _ => {
+                let base = self
+                    .get_setting("default_dir")
+                    .await?
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        dirs::download_dir()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_else(|| crate::data_dir().display().to_string())
+                    });
+                let auto = self
+                    .get_setting("auto_categorize")
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "on")
+                    .unwrap_or(false);
+                if auto {
+                    format!("{base}{sep}文档", sep = std::path::MAIN_SEPARATOR)
+                } else {
+                    base
+                }
+            }
+        };
+        let dir_path = std::path::PathBuf::from(&base);
+        tokio::fs::create_dir_all(&dir_path).await.map_err(|e| {
+            DownloadError::new(
+                ErrorKind::FileAccessDenied,
+                format!("create dir {}: {e}", dir_path.display()),
+            )
+        })?;
+
+        let clean = dl_filename::sanitize(&c.filename);
+        let target = dl_filename::resolve_conflict(
+            &dir_path,
+            &clean,
+            dl_filename::ConflictPolicy::Rename,
+        )?
+        .ok_or_else(|| {
+            DownloadError::new(
+                ErrorKind::NameConflict {
+                    path: dir_path.join(&clean).display().to_string(),
+                },
+                "target already exists".to_string(),
+            )
+        })?;
+        let bytes = c.content.as_bytes();
+        tokio::fs::write(&target, bytes).await.map_err(|e| {
+            DownloadError::new(
+                ErrorKind::FileAccessDenied,
+                format!("write {}: {e}", target.display()),
+            )
+        })?;
+
+        let now = now_ms();
+        let task = Task {
+            id: new_task_id(),
+            // 有原文链接记原文（UI 展示/跳转真实来源页）；否则落盘路径占位。
+            // 内容任务不参与续传/去重，url 仅展示语义。
+            url: c.source_url.unwrap_or_else(|| format!("content://{}", target.display())),
+            final_url: None,
+            filename: Some(
+                target
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&clean)
+                    .to_string(),
+            ),
+            dir: Some(base),
+            total_bytes: Some(bytes.len() as u64),
+            etag: None,
+            last_modified: None,
+            mime: c.mime,
+            kind: TaskKind::Content,
+            status: TaskStatus::Done,
+            priority: 0,
+            headers_ref: None,
+            headers_json: None,
+            downloaded_bytes: bytes.len() as u64,
+            variants_json: None,
+            checksum: None,
+            mirrors_json: None,
+            postprocess_json: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.db.insert_task(task.clone()).await?;
+        // GUI 列表靠事件刷新；内容任务无状态迁移，直接广播终态
+        self.emit(EngineEvent::StateChanged {
+            task_id: task.id.clone(),
+            status: TaskStatus::Done,
+        });
         Ok(task)
     }
 
@@ -590,6 +745,24 @@ impl Engine {
         })
     }
 
+    /// 后处理归一化：只接受 isaac64-xor 且 seed 非空；空列表 → None。
+    fn normalize_postprocess(steps: &Option<Vec<dl_model::PostProcess>>) -> Option<String> {
+        let list = steps.as_deref().unwrap_or_default();
+        let mut out: Vec<dl_model::PostProcess> = Vec::new();
+        for st in list {
+            if st.seed.trim().is_empty() {
+                continue;
+            }
+            out.push(dl_model::PostProcess {
+                algo: match st.algo {
+                    a @ dl_model::PostProcessAlgo::Isaac64Xor => a,
+                },
+                seed: st.seed.trim().to_string(),
+            });
+        }
+        (!out.is_empty()).then(|| dl_model::PostProcess::as_json(&out))
+    }
+
     pub(crate) async fn record_probe(
         &self,
         id: &str,
@@ -654,6 +827,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_content_task_writes_file_and_marks_done() {
+        let env = test_engine().await;
+        // 必须显式指定目录：缺省目录解析会落到系统下载目录（真实用户目录）
+        let dir = env._dir.path().join("out");
+        env.engine
+            .set_setting("default_dir", dir.display().to_string().as_str())
+            .await
+            .unwrap();
+        let t = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "测试文章.html".into(),
+                mime: Some("text/html;charset=utf-8".into()),
+                content: "<!DOCTYPE html><html><body>正文</body></html>".into(),
+                dir: None,
+                source_url: Some("https://blog.csdn.net/u/a/1".into()),
+            })
+            .await
+            .unwrap();
+        // 内容任务直达 Done，无下载阶段
+        assert_eq!(t.status, TaskStatus::Done);
+        assert_eq!(t.kind, TaskKind::Content);
+        assert_eq!(t.filename.as_deref(), Some("测试文章.html"));
+        assert_eq!(t.total_bytes, Some(t.downloaded_bytes));
+        assert_eq!(t.mime.as_deref(), Some("text/html;charset=utf-8"));
+        // 原文链接记录进 url（UI 展示真实来源页）
+        assert_eq!(t.url, "https://blog.csdn.net/u/a/1");
+        // 文件确实落盘且内容一致
+        let path = std::path::Path::new(t.dir.as_ref().unwrap()).join(t.filename.as_ref().unwrap());
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains("正文"));
+        // 列表可见（GUI 任务面板来源）
+        let list = env.engine.list_tasks(Some(TaskStatus::Done)).await.unwrap();
+        assert!(list.iter().any(|x| x.id == t.id));
+    }
+
+    #[tokio::test]
+    async fn create_content_task_collection_dir_and_source_url() {
+        // 文章合集模式：显式 dir = <default_dir>/<标题>/，文档与图片同目录
+        let env = test_engine().await;
+        let base = env._dir.path().join("dl");
+        let coll = base.join("我的文章");
+        let t = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "我的文章.html".into(),
+                mime: None,
+                content: "<p>x</p>".into(),
+                dir: Some(coll.display().to_string()),
+                source_url: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.dir.as_deref(), Some(coll.display().to_string().as_str()));
+        // 无原文链接：url 记 content://<落盘路径> 占位
+        assert!(t.url.starts_with("content://"));
+        let path = std::path::Path::new(t.dir.as_ref().unwrap()).join("我的文章.html");
+        assert!(path.exists());
+
+        // 防护：dir 含 ".." 段、source_url 非 http(s) → 拒绝
+        let err = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "x.html".into(),
+                mime: None,
+                content: "x".into(),
+                dir: Some(base.join("..\\evil").display().to_string()),
+                source_url: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidParams);
+        let err = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "x.html".into(),
+                mime: None,
+                content: "x".into(),
+                dir: None,
+                source_url: Some("javascript:alert(1)".into()),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn create_content_task_renames_on_conflict_and_sanitizes() {
+        let env = test_engine().await;
+        let dir = env._dir.path().join("out");
+        env.engine
+            .set_setting("default_dir", dir.display().to_string().as_str())
+            .await
+            .unwrap();
+        let mk = |name: &str| CreateContentTask {
+            filename: name.into(),
+            mime: None,
+            content: "x".into(),
+            dir: None,
+            source_url: None,
+        };
+        let a = env.engine.create_content_task(mk("a.md")).await.unwrap();
+        let b = env
+            .engine
+            .create_content_task(mk("a.md"))
+            .await
+            .unwrap();
+        assert_eq!(b.filename.as_deref(), Some("a (1).md"), "冲突自动重命名");
+        assert_ne!(a.id, b.id);
+        // 文件名清洗：路径成分与非法字符
+        let c = env
+            .engine
+            .create_content_task(mk("..\\evil<name>.md"))
+            .await
+            .unwrap();
+        assert!(!c.filename.as_ref().unwrap().contains("..\\"));
+        assert!(!c.filename.as_ref().unwrap().contains('<'));
+    }
+
+    #[tokio::test]
+    async fn create_content_task_rejects_oversize_and_blank_name() {
+        let env = test_engine().await;
+        let err = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "big.html".into(),
+                mime: None,
+                content: "x".repeat(Engine::MAX_CONTENT_BYTES + 1),
+                dir: None,
+                source_url: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidParams);
+
+        let err = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "   ".into(),
+                mime: None,
+                content: "x".into(),
+                dir: None,
+                source_url: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidParams);
+    }
+
+    #[tokio::test]
     async fn m3u8_url_autodetects_hls_kind() {
         let env = test_engine().await;
         let t = env
@@ -662,6 +985,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.kind, TaskKind::Hls);
+    }
+
+    #[tokio::test]
+    async fn youtube_url_autodetects_ytdlp_kind() {
+        let env = test_engine().await;
+        for url in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://m.youtube.com/shorts/abcdefghijk",
+        ] {
+            let t = env.engine.create_task(CreateTask::of(url)).await.unwrap();
+            assert_eq!(t.kind, TaskKind::Ytdlp, "{url}");
+        }
+        // 非 YouTube 不受影响
+        let t = env
+            .engine
+            .create_task(CreateTask::of("https://vimeo.com/12345"))
+            .await
+            .unwrap();
+        assert_eq!(t.kind, TaskKind::Http);
     }
 
     #[tokio::test]
@@ -729,6 +1072,7 @@ mod tests {
                 headers: None,
                 checksum: None,
                 mirrors: None,
+                postprocess: None,
             })
             .await
             .unwrap();

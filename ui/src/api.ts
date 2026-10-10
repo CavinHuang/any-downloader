@@ -12,7 +12,7 @@ export interface Task {
   etag: string | null;
   last_modified: string | null;
   mime: string | null;
-  kind: "http" | "hls";
+  kind: "http" | "hls" | "content";
   status: TaskStatus;
   priority: number;
   headers_ref: string | null;
@@ -32,6 +32,7 @@ export type TaskStatus =
   | "waiting_retry"
   | "merging"
   | "verifying"
+  | "decrypting"
   | "done"
   | "failed"
   | "canceled";
@@ -70,6 +71,7 @@ export interface Settings {
   after_done: string | null;
   clipboard_monitor: string | null;
   ffmpeg_path: string | null;
+  yt_dlp_path: string | null;
   max_concurrent: string | null;
   max_auto_retry: string | null;
   auto_categorize: string | null;
@@ -80,6 +82,7 @@ const running = new Set([
   "downloading",
   "merging",
   "verifying",
+  "decrypting",
 ]);
 
 export const isActive = (s: TaskStatus) => running.has(s);

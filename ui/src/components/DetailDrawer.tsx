@@ -21,7 +21,7 @@ export function DetailDrawer({
   onRemoved: () => void;
 }) {
   const err = task.error as Record<string, unknown> | null;
-  const active = ["probing", "downloading", "merging", "verifying"].includes(
+  const active = ["probing", "downloading", "merging", "verifying", "decrypting"].includes(
     task.status
   );
   const [name, setName] = useState(task.filename ?? "");

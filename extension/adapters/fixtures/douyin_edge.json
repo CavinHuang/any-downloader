@@ -1,0 +1,50 @@
+{
+  "aweme_list": [
+    {
+      "aweme_id": "7400000000000000001",
+      "desc": "play_addr 全空，download_addr 兜底",
+      "video": {
+        "play_addr": { "uri": "", "url_list": [] },
+        "download_addr": { "uri": "v0d00dl0001", "url_list": [] }
+      }
+    },
+    {
+      "aweme_id": "7400000000000000002",
+      "desc": "uri 为空，url_list 抽 video_id 重拼",
+      "video": {
+        "play_addr": {
+          "uri": "",
+          "url_list": ["https://www.douyin.com/aweme/v1/play/?faid=2&video_id=v0d00vid0002&line=0"]
+        }
+      }
+    },
+    {
+      "aweme_id": "7400000000000000003",
+      "desc": "bit_rate 无 gear_name，按分辨率短边标注",
+      "video": {
+        "play_addr": { "uri": "v0d00g3", "url_list": [] },
+        "bit_rate": [
+          { "bitrate": 1500, "play_addr": { "uri": "v0d00g3hi", "url_list": [], "width": 1080, "height": 1920 } },
+          { "bitrate": 800, "gear": "low_adapt", "play_addr": { "uri": "v0d00g3lo", "url_list": [], "width": 540, "height": 960 } }
+        ]
+      }
+    },
+    {
+      "aweme_id": "7400000000000000004",
+      "desc": "图集：含空 url_list 图与 livephoto",
+      "images": [
+        { "url_list": [] },
+        {
+          "url_list": ["https://p3-sign.douyinpic.com/c.jpeg"],
+          "video": { "play_addr": { "uri": "v0d00lp2", "url_list": [] } }
+        },
+        { "url_list": ["https://p3-sign.douyinpic.com/d.jpeg", "https://p9-sign.douyinpic.com/d_full.jpeg"] }
+      ]
+    },
+    {
+      "aweme_id": "7400000000000000005",
+      "desc": "无任何可播媒体 → 0 资源",
+      "video": { "play_addr": { "uri": "", "url_list": [] } }
+    }
+  ]
+}

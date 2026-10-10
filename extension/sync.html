@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>文章同步 · Anything Downloader</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 16px; background: #f1f5f9; color: #0f172a;
+      font: 14px/1.6 system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header { margin-bottom: 12px; }
+    header h1 { font-size: 18px; margin: 0; display: inline-block; }
+    header .sub { color: #64748b; font-size: 12px; margin-left: 10px; }
+    .cols { display: flex; gap: 12px; align-items: flex-start; }
+    .left { flex: 1.2; min-width: 0; }
+    .right { flex: 1; min-width: 300px; }
+    fieldset {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+      margin: 0 0 12px; padding: 10px 12px;
+    }
+    legend { font-weight: 600; font-size: 13px; color: #334155; padding: 0 6px; }
+    select, input[type="text"], input[type="password"], input[type="url"] {
+      width: 100%; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 7px;
+      font: inherit; background: #fff; color: #0f172a;
+    }
+    textarea {
+      width: 100%; height: 320px; resize: vertical; border: 1px solid #cbd5e1;
+      border-radius: 7px; padding: 8px; font: 12.5px/1.7 ui-monospace, Consolas, monospace;
+      color: #0f172a; background: #fff;
+    }
+    button {
+      border: none; border-radius: 7px; padding: 6px 14px; cursor: pointer;
+      font: inherit; font-weight: 600; background: #f1f5f9; color: #2563eb;
+    }
+    button.primary { background: #2563eb; color: #fff; }
+    button.mini { padding: 2px 10px; font-size: 12px; color: #b91c1c; }
+    button:disabled { opacity: .55; cursor: default; }
+    .rowline { display: flex; gap: 8px; margin: 6px 0; align-items: center; }
+    .rowline > :first-child { flex: 1; min-width: 0; }
+    .opts label { margin-right: 18px; font-size: 13px; }
+    .hint { color: #94a3b8; font-size: 12px; margin: 4px 0 0; }
+    .warn { color: #b45309; font-size: 12px; margin: 6px 0 0; }
+    .group { font-weight: 600; color: #475569; font-size: 12px; margin: 8px 0 2px; }
+    .plat {
+      display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px;
+    }
+    .plat:hover { background: #f8fafc; }
+    .plat .fmt { color: #94a3b8; font-size: 11px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 0 4px; }
+    .badge { margin-left: auto; font-size: 12px; color: #94a3b8; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge.ok { color: #15803d; }
+    .badge.no { color: #cbd5e1; }
+    .row { display: flex; gap: 8px; padding: 6px 4px; border-bottom: 1px dashed #e2e8f0; align-items: baseline; }
+    .row .nm { font-weight: 600; min-width: 64px; }
+    .row .st.pending { color: #94a3b8; }
+    .row .st.starting { color: #2563eb; }
+    .row .st.completed { color: #15803d; }
+    .row .st.failed { color: #b91c1c; }
+    .row .lnk { color: #2563eb; text-decoration: none; word-break: break-all; }
+    .row .lnk:hover { text-decoration: underline; }
+    .hitem { padding: 6px 0; border-bottom: 1px dashed #e2e8f0; }
+    .htitle { font-weight: 600; font-size: 13px; }
+    .htime { color: #94a3b8; font-weight: 400; font-size: 11px; margin-left: 8px; }
+    .hline { font-size: 12px; color: #475569; padding-left: 10px; word-break: break-all; }
+    .hline a { color: #2563eb; text-decoration: none; }
+    .hline a:hover { text-decoration: underline; }
+    .hempty { color: #cbd5e1; font-size: 12px; padding: 6px 0; }
+    .cmsrow { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
+    .cmsrow span { flex: 1; min-width: 0; word-break: break-all; }
+    #cmsForm { display: none; margin-top: 8px; border-top: 1px dashed #e2e8f0; padding-top: 8px; }
+    #cmsForm .rowline label { width: 88px; flex: none; color: #475569; }
+    #srcInfo { display: none; color: #64748b; font-size: 12px; margin-top: 6px; }
+    #toast {
+      display: none; position: fixed; left: 50%; top: 20px; transform: translateX(-50%);
+      background: #0f172a; color: #fff; padding: 8px 16px; border-radius: 8px;
+      font-size: 13px; z-index: 99; box-shadow: 0 4px 14px rgba(15, 23, 42, .3);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>文章同步</h1>
+    <span class="sub">使用浏览器中已登录的账号同步，数据不会经过任何第三方服务器</span>
+  </header>
+
+  <div class="cols">
+    <section class="left">
+      <fieldset>
+        <legend>来源文章</legend>
+        <div class="rowline">
+          <select id="srcTabs"></select>
+          <button id="btnRefreshTabs">刷新</button>
+          <button id="btnExtract" class="primary">提取文章</button>
+        </div>
+        <div id="srcInfo"></div>
+        <p class="hint">支持站点：微信文章 / CSDN / 知乎专栏 / 掘金 / 简书 / 博客园 / 51CTO / 脚本之家 / php中文网 / 思否 / 开源中国 / Medium</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>目标标题</legend>
+        <input type="text" id="title" placeholder="文章标题" />
+      </fieldset>
+
+      <fieldset>
+        <legend>正文（Markdown，可编辑）</legend>
+        <textarea id="md" spellcheck="false" placeholder="点击「提取文章」自动填充；也可直接粘贴 Markdown"></textarea>
+        <p class="hint">未编辑时 HTML 平台复用提取的净化排版；编辑后将用基础渲染器生成 HTML（知乎/简书/CMS）。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>选项</legend>
+        <div class="opts">
+          <label><input type="checkbox" id="draftOnly" checked /> 仅保存为草稿（不直接发布）</label>
+          <label><input type="checkbox" id="uploadImgs" /> 上传图片到平台（默认关闭，保留原始图片链接）</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>同步目标</legend>
+        <div class="rowline"><span class="hint" style="margin:0">未登录的平台会同步失败并明确报错；登录检测在扩展页直接发起，带各自站点 Cookie。</span><button id="btnDetect">重新检测登录</button></div>
+        <div id="platforms"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>自建站账号（WordPress / Typecho / MetaWeblog）</legend>
+        <div class="rowline"><span class="hint" style="margin:0">Typecho 端点自动使用 /action/xmlrpc；MetaWeblog 可自定义端点。</span><button id="btnCmsAdd">添加账号</button></div>
+        <div id="cmsList"></div>
+        <div id="cmsForm">
+          <div class="rowline"><label>类型</label>
+            <select id="cmsType">
+              <option value="wordpress">WordPress（xmlrpc.php）</option>
+              <option value="typecho">Typecho（/action/xmlrpc）</option>
+              <option value="metaweblog">MetaWeblog（通用）</option>
+            </select>
+          </div>
+          <div class="rowline"><label>备注名称</label><input type="text" id="cmsName" placeholder="选填" /></div>
+          <div class="rowline"><label>站点地址</label><input type="url" id="cmsUrl" placeholder="https://blog.example.com" /></div>
+          <div class="rowline"><label>用户名</label><input type="text" id="cmsUser" /></div>
+          <div class="rowline"><label>密码</label><input type="password" id="cmsPwd" placeholder="WordPress 建议使用应用密码" /></div>
+          <div class="rowline" id="cmsEndpointWrap" style="display:none"><label>XML-RPC 端点</label><input type="url" id="cmsEndpoint" placeholder="选填，默认 {站点}/xmlrpc.php" /></div>
+          <div class="rowline">
+            <button id="btnCmsSave" class="primary">保存账号</button>
+            <button id="btnCmsCancel">取消</button>
+          </div>
+        </div>
+        <p class="warn">注意：账号密码以明文保存在本机扩展存储（chrome.storage.local），仅用于 XML-RPC 发布请求，请评估本机安全环境后再启用。</p>
+      </fieldset>
+    </section>
+
+    <section class="right">
+      <fieldset>
+        <legend>发布状态</legend>
+        <div class="rowline">
+          <span class="hint" style="margin:0">并发 3 个平台，单平台 10 分钟超时；失败不中断其他平台。</span>
+          <button id="btnSync" class="primary">开始同步</button>
+          <button id="btnCancel">取消</button>
+        </div>
+        <div id="status"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>同步历史（本机保留最近 30 条）</legend>
+        <div class="rowline" style="justify-content:flex-end"><button id="btnClearHistory" class="mini">清空历史</button></div>
+        <div id="history"></div>
+      </fieldset>
+    </section>
+  </div>
+
+  <div id="toast"></div>
+
+  <!-- 复用既有适配层（types → core → turndown → articles，与 content script 同序） -->
+  <script src="adapters/types.js"></script>
+  <script src="adapters/core.js"></script>
+  <script src="adapters/turndown.js"></script>
+  <script src="adapters/articles.js"></script>
+  <!-- 文章同步子系统（纯函数层 → 编排层 → UI） -->
+  <script src="sync/xmlrpc.js"></script>
+  <script src="sync/payloads.js"></script>
+  <script src="sync/markdown-images.js"></script>
+  <script src="sync/mdhtml.js"></script>
+  <script src="sync/platforms.js"></script>
+  <script src="sync/engine.js"></script>
+  <script src="sync/sync.js"></script>
+</body>
+</html>

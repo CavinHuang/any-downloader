@@ -315,6 +315,7 @@ async fn mirror_fallback_when_primary_dies() {
     let t = engine
         .create_task(CreateTask {
             mirrors: Some(vec![backup.url()]),
+            postprocess: None,
             ..CreateTask::of(primary.url())
         })
         .await
@@ -344,6 +345,7 @@ async fn dual_mirrors_round_robin() {
     let t = engine
         .create_task(CreateTask {
             mirrors: Some(vec![s2.url()]),
+            postprocess: None,
             ..CreateTask::of(s1.url())
         })
         .await

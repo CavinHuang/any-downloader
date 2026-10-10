@@ -1,0 +1,52 @@
+{
+  "data": {
+    "tweet_result": {
+      "result": {
+        "rest_id": "1700000000000000001",
+        "core": {
+          "user_results": {
+            "result": {
+              "legacy": { "screen_name": "testuser" }
+            }
+          }
+        },
+        "legacy": {
+          "full_text": "测试推文 with media https://t.co/xyz",
+          "extended_entities": {
+            "media": [
+              {
+                "type": "photo",
+                "media_url_https": "https://pbs.twimg.com/media/abc123.jpg",
+                "sizes": {}
+              },
+              {
+                "type": "video",
+                "video_info": {
+                  "variants": [
+                    { "content_type": "application/x-mpegURL", "url": "https://video.twimg.com/.../pl.m3u8", "bitrate": 0 },
+                    { "content_type": "video/mp4", "url": "https://video.twimg.com/.../720x1280/vid1.mp4", "bitrate": 1280000 },
+                    { "content_type": "video/mp4", "url": "https://video.twimg.com/.../vid2.mp4", "bitrate": 2176000 },
+                    { "content_type": "video/mp4", "url": "https://video.twimg.com/.../240p/vid3.mp4", "bitrate": 320000 }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "other_result": {
+      "result": {
+        "rest_id": "1700000000000000002",
+        "legacy": {
+          "full_text": "时间线里另一条推文",
+          "extended_entities": {
+            "media": [
+              { "type": "photo", "media_url_https": "https://pbs.twimg.com/media/other.jpg" }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -9,12 +9,65 @@
 //         cancel+erase / 失败 resume 放行
 //   NM：SW 持有长连接 port（避免 sendNativeMessage 每条消息 spawn 进程），
 //       断链自动重连，挂起请求超时兜底
+//
+// 站点适配层（docs/MEDIA-ADAPTERS.md）：hooks/main-world-hook.js 在 MAIN world
+//   捕获平台 API 响应 → bridge.js 转发到这里（环形缓冲）→ adapters/* 提取直链
+//   → pushToApp 推送。适配器注册表与抖音转换助手与 content world 共用（importScripts）。
+
+importScripts("lib/zip.js", "adapters/types.js", "adapters/core.js");
 
 const NM_HOST = "anything_dl";
 const MIN_BYTES = 1024 * 1024; // 直链媒体噪音阈值（HLS 清单/分片豁免）
 const HLS_RE = /\.(m3u8)(?=[?#]|$)/i;
-const MEDIA_RE =
-  /\.(mp4|m3u8|mpd|ts|m4s|mkv|webm|flv|mp3|flac|m4a|aac|ogg|wav|ape|avi|mov|wmv|rmvb|zip|rar|7z|tar|gz|pdf|epub|apk|exe|msi|dmg|iso)(?=[?#]|$)/i;
+// —— 资源扩展名白名单（唯一事实来源）：不在表里的 URL 一律视为非资源，
+//    页面跳转/js/css/json/接口地址永远不会进嗅探列表；图片单独一个开关
+const EXT_TYPE = (() => {
+  const m = {};
+  const add = (type, exts) => {
+    for (const e of exts.split("|")) m[e] = type;
+  };
+  add("video", "mp4|mkv|webm|flv|avi|mov|wmv|rmvb|m4v|3gp");
+  add("hls", "m3u8");
+  add("dash", "mpd");
+  add("segment", "ts|m4s");
+  add("audio", "mp3|flac|m4a|aac|ogg|wav|ape|opus|wma");
+  add("archive", "zip|rar|7z|tar|gz|bz2|xz|zst");
+  add("binary", "exe|msi|apk|ipa|dmg|iso|img|deb|rpm|pkg|appimage");
+  add("doc", "pdf|epub|mobi|azw3|doc|docx|xls|xlsx|ppt|pptx|csv|chm|srt|ass|ssa|vtt");
+  add("image", "jpg|jpeg|png|gif|webp|svg|bmp|ico|avif");
+  return m;
+})();
+const esc = (e) => e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const mediaExts = Object.entries(EXT_TYPE)
+  .filter(([, t]) => t !== "image")
+  .map(([e]) => esc(e));
+const imageExts = Object.entries(EXT_TYPE)
+  .filter(([, t]) => t === "image")
+  .map(([e]) => esc(e));
+const MEDIA_RE = new RegExp("\\.(" + mediaExts.join("|") + ")(?=[?#]|$)", "i");
+const IMAGE_RE = new RegExp("\\.(" + imageExts.join("|") + ")(?=[?#]|$)", "i");
+
+/** MIME → 资源类型（无扩展名 URL 的兜底判定；非资源返回 null，text/html 永不命中） */
+function mimeToType(mime) {
+  if (!mime) return null;
+  const m = mime.split(";")[0].trim().toLowerCase();
+  if (m === "application/vnd.apple.mpegurl" || m === "application/x-mpegurl") return "hls";
+  if (m === "application/dash+xml") return "dash";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  if (m.startsWith("image/")) return "image";
+  if (m === "application/zip" || m === "application/x-rar-compressed" ||
+      m === "application/x-7z-compressed" || m === "application/gzip" ||
+      m === "application/x-tar") return "archive";
+  if (m === "application/pdf" || m === "application/epub+zip" ||
+      m === "application/msword" || m === "application/vnd.ms-excel" ||
+      m === "application/vnd.ms-powerpoint" ||
+      m.startsWith("application/vnd.openxmlformats-officedocument")) return "doc";
+  if (m === "application/octet-stream" || m === "application/vnd.android.package-archive" ||
+      m === "application/x-msdownload" || m === "application/x-apple-diskimage" ||
+      m === "application/x-iso9660-image") return "binary";
+  return null;
+}
 
 // —— 接管规则（DESIGN §7.3）
 const TAKEOVER_RE =
@@ -22,6 +75,41 @@ const TAKEOVER_RE =
 const MIN_TAKEOVER_BYTES = 1024 * 1024;
 
 const MAX_PER_TAB = 100; // 单页资源上限（超限丢最旧，storage.session 配额治理）
+
+// —— 嗅探配置（popup 设置页写入，storage.local.sniffCfg；内存缓存避免监听器内异步）
+const CFG_DEFAULTS = {
+  types: { video: true, hls: true, audio: true, archive: true, binary: true, doc: true, image: false, other: true },
+  minSizeMB: 1,
+};
+let CFG = JSON.parse(JSON.stringify(CFG_DEFAULTS));
+async function loadCfg() {
+  try {
+    const { sniffCfg } = await chrome.storage.local.get("sniffCfg");
+    if (sniffCfg) {
+      CFG = {
+        types: { ...CFG_DEFAULTS.types, ...(sniffCfg.types || {}) },
+        minSizeMB: sniffCfg.minSizeMB ?? 1,
+      };
+    }
+  } catch (_) {}
+}
+loadCfg();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.sniffCfg) loadCfg();
+});
+function groupOf(type) {
+  if (type === "hls" || type === "dash" || type === "segment") return "video";
+  if (type === "image") return "image";
+  if (type === "binary") return "binary";
+  if (type === "file") return "doc";
+  return type;
+}
+function groupAllowed(type) {
+  return CFG.types[groupOf(type)] !== false;
+}
+function minBytesCfg() {
+  return Math.max(0, CFG.minSizeMB || 0) * 1024 * 1024;
+}
 const RECENT_HEADERS_MAX = 500;
 const RECENT_HEADERS_TTL = 60 * 1000;
 
@@ -55,7 +143,14 @@ function ensurePort() {
 /** NM 请求-响应（port 串行 roundtrip）；超时/断链以结构化错误兜底。 */
 function nmCall(method, params, timeoutMs = 8000) {
   return new Promise((resolve) => {
-    ensurePort();
+    // connectNative 找不到/无法启动 host 时会同步抛错——必须在这里兜底，
+    // 否则 Promise 永不落定，popup 的 sendMessage 将永久挂起
+    try {
+      ensurePort();
+    } catch (e) {
+      resolve({ ok: false, error: "app_not_running" });
+      return;
+    }
     const id = ++msgSeq;
     const timer = setTimeout(() => {
       pending.delete(id);
@@ -149,14 +244,15 @@ function putRec(tabId, rec) {
 }
 
 function guessType(url) {
-  if (/\.(mpd)(?=[?#]|$)/i.test(url)) return "dash";
-  if (HLS_RE.test(url)) return "hls";
-  if (/\.(ts|m4s)(?=[?#]|$)/i.test(url)) return "segment";
-  if (/\.(mp4|mkv|webm|flv|avi|mov|wmv|rmvb)(?=[?#]|$)/i.test(url)) return "video";
-  if (/\.(mp3|flac|m4a|aac|ogg|wav|ape)(?=[?#]|$)/i.test(url)) return "audio";
-  if (/\.(zip|rar|7z|tar|gz)(?=[?#]|$)/i.test(url)) return "archive";
-  if (/\.(exe|msi|apk|dmg|iso|img)(?=[?#]|$)/i.test(url)) return "binary";
-  return "file";
+  let path = url;
+  try {
+    path = new URL(url).pathname; // 天然排除 ?query 和 #hash
+  } catch (_) {
+    return "other";
+  }
+  const m = /\.([a-z0-9]+)$/i.exec(path);
+  if (!m) return "other";
+  return EXT_TYPE[m[1].toLowerCase()] || "other";
 }
 
 function updateBadge(tabId) {
@@ -171,7 +267,9 @@ function updateBadge(tabId) {
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    if (!MEDIA_RE.test(details.url)) return;
+    if (!MEDIA_RE.test(details.url) && !IMAGE_RE.test(details.url)) return;
+    const type = guessType(details.url);
+    if (!groupAllowed(type)) return;
     putRec(details.tabId, {
       url: details.url,
       tabId: details.tabId,
@@ -215,22 +313,27 @@ chrome.webRequest.onCompleted.addListener(
     if (details.tabId < 0) return;
     const map = tabMap(details.tabId);
     let rec = map.get(details.url);
-    if (!rec && MEDIA_RE.test(details.url)) {
-      rec = {
-        url: details.url,
-        tabId: details.tabId,
-        type: guessType(details.url),
-        mime: null,
-        bytes: null,
-        headers: null,
-        at: Date.now(),
-      };
-      map.set(details.url, rec);
-    }
-    if (!rec) return;
     const h = Object.fromEntries(
       (details.responseHeaders || []).map((x) => [x.name.toLowerCase(), x.value])
     );
+    if (!rec) {
+      // 扩展名没命中时按响应 MIME 兜底：真资源（视频/音频/压缩包/二进制…）
+      // 即使 URL 无扩展名也收录；text/html、json、接口响应永远不进列表
+      const mt = mimeToType(h["content-type"]);
+      if (mt && groupAllowed(mt)) {
+        rec = {
+          url: details.url,
+          tabId: details.tabId,
+          type: mt,
+          mime: h["content-type"] || null,
+          bytes: null,
+          headers: null,
+          at: Date.now(),
+        };
+        map.set(details.url, rec);
+      }
+    }
+    if (!rec) return;
     rec.mime = h["content-type"] || null;
     const len = h["content-length"] ? parseInt(h["content-length"], 10) : null;
     const exempt =
@@ -435,12 +538,15 @@ async function fetchVariants(rec) {
 
 // ---------------------------------------------------------------- 推送
 
-async function pushTask(url, headers) {
+async function pushTask(url, headers, filename, postprocess, dir) {
   const add = await nmCall(
     "task.add",
     {
       url,
       headers: headers && Object.keys(headers).length ? headers : undefined,
+      filename: filename || undefined,
+      postprocess: postprocess && postprocess.length ? postprocess : undefined,
+      dir: dir || undefined,
     },
     5000
   );
@@ -454,7 +560,326 @@ async function pushTask(url, headers) {
 }
 
 async function pushToApp(rec) {
-  return pushTask(rec.url, rec.headers);
+  return pushTask(rec.url, rec.headers, rec.filename, rec.postprocess, rec.dir);
+}
+
+// ---------------------------------------------------------------- 站点适配层
+
+// —— 平台开关（storage.local.adaptersCfg；与 sniffCfg 同模式）
+const ADAPTER_DEFAULTS = {
+  douyin: true,
+  xhs: true,
+  x: true,
+  "wechat-article": true,
+  channels: true,
+  articles: true, // 文章适配器（12 站点：排版 HTML/Markdown/文章图片）
+};
+let ADAPTERS = { ...ADAPTER_DEFAULTS };
+async function loadAdaptersCfg() {
+  try {
+    const { adaptersCfg } = await chrome.storage.local.get("adaptersCfg");
+    if (adaptersCfg) ADAPTERS = { ...ADAPTER_DEFAULTS, ...adaptersCfg };
+  } catch (_) {}
+}
+loadAdaptersCfg();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.adaptersCfg) loadAdaptersCfg();
+});
+const adapterEnabled = (id) => ADAPTERS[id] !== false;
+// 适配器 → hook 缓冲 key（xhs/wechat-article/articles 纯 DOM/SSR，无 hook）
+const ADAPTER_HOOK_KEYS = {
+  douyin: ["douyin"],
+  x: ["x"],
+  channels: ["channels"],
+  xhs: ["xhs"],
+  "wechat-article": [],
+  articles: [],
+};
+
+// —— L1 捕获缓冲：tabId -> Map(key -> [{url, at, data}])，每 key 环形上限。
+//     常驻内存不落盘：SW 被回收即丢失，页面下一次请求会重新填充（可接受）。
+const hookBuf = new Map();
+const HOOK_KEEP = { douyin: 20, x: 30, channels: 50, xhs: 30 };
+
+function hookCapture(tabId, key, url, data) {
+  if (!key || data == null) return;
+  const keep = HOOK_KEEP[key];
+  if (!keep) return;
+  let m = hookBuf.get(tabId);
+  if (!m) {
+    m = new Map();
+    hookBuf.set(tabId, m);
+  }
+  let arr = m.get(key);
+  if (!arr) {
+    arr = [];
+    m.set(key, arr);
+  }
+  // 同一 URL 只留最新
+  const idx = arr.findIndex((x) => x.url === url);
+  if (idx >= 0) arr.splice(idx, 1);
+  arr.push({ url, at: Date.now(), data });
+  if (arr.length > keep) arr.splice(0, arr.length - keep);
+}
+
+function sliceCaptures(tabId, adapterId) {
+  const keys = ADAPTER_HOOK_KEYS[adapterId] || [];
+  const m = hookBuf.get(tabId);
+  const out = {};
+  for (const k of keys) {
+    out[k] = ((m && m.get(k)) || []).map((x) => ({ url: x.url, data: x.data }));
+  }
+  return out;
+}
+
+// —— probe：路由到页面内适配器提取，结果缓存（push 直接复用，避免重复提取）。
+//     一页可命中多个适配器（微信文章页 = wechat-article 图片 + articles 文章本体），
+//     逐个提取后按 URL 合并去重。
+const lastProbe = new Map(); // tabId -> { adapterIds, resources, at }
+
+async function adapterProbe(tabId) {
+  let tab = null;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_) {
+    return { ok: false, error: "no_tab" };
+  }
+  const matched = ADL.matchAdapters(tab.url || "");
+  if (!matched.length) return { ok: false, error: "no_adapter" };
+  const enabled = matched.filter((ad) => adapterEnabled(ad.id));
+  if (!enabled.length) return { ok: false, error: "adapter_disabled" };
+  const adapterIds = enabled.map((ad) => ad.id);
+  // 捕获切片 = 各适配器 hook key 的并集
+  const captured = {};
+  for (const ad of enabled) {
+    Object.assign(captured, sliceCaptures(tabId, ad.id));
+  }
+  let resp = null;
+  try {
+    resp = await chrome.tabs.sendMessage(tabId, {
+      type: "adapter-extract",
+      adapterIds,
+      captured,
+    });
+  } catch (e) {
+    return { ok: false, error: "no_content_script:" + String(e && e.message) };
+  }
+  if (resp && resp.ok) {
+    // 按 URL 合并去重（保序：先到者胜——wechat-article 的 mmbiz 原图规则优先）
+    const seen = new Set();
+    const resources = [];
+    for (const r of resp.resources || []) {
+      if (seen.has(r.url)) continue;
+      seen.add(r.url);
+      resources.push(r);
+    }
+    resp.resources = resources;
+    lastProbe.set(tabId, { adapterIds, resources, at: Date.now(), sourceUrl: tab.url });
+  }
+  return resp ? { ...resp, adapterId: adapterIds.join("+"), adapterIds } : { ok: false, error: "extract_failed" };
+}
+
+async function adapterPush(tabId, urls) {
+  let entry = lastProbe.get(tabId);
+  if (!entry) {
+    const r = await adapterProbe(tabId);
+    if (r.ok) entry = lastProbe.get(tabId);
+  }
+  if (!entry) return { ok: false, error: "probe_failed" };
+  const list = entry.resources.filter((r) => {
+    if (urls && urls.length) return urls.includes(r.url); // 显式勾选（含可选变体）
+    return !r.optional; // 一键推送：跳过可选画质变体
+  });
+  const docs = list.filter((r) => r.kind === "document" && r.meta && r.meta.document);
+  const imgs = list.filter((r) => r.kind !== "document");
+
+  // —— 文章合集模式（docs/MEDIA-ADAPTERS.md §11.4）：文档+图片同批推送时
+  //     统一落 <default_dir>/<标题>/，文档内图片引用重写为相对文件名
+  //     （离线完整阅读）。拿不到 default_dir（旧版主程序）或只推文档时
+  //     降级为普通模式（默认目录 + 外链引用）。
+  let collection = null;
+  if (docs.length && imgs.length) {
+    try {
+      const s = await nmCall("settings.get", { key: "default_dir" }, 5000);
+      const base = s && s.ok && s.result && s.result.value;
+      if (base && String(base).trim()) {
+        const title = String(docs[0].filename || "article").replace(/\.(html|md)$/i, "");
+        const name = ADL.cleanName(title, 80) || "article";
+        const sep = String(base).includes("\\") ? "\\" : "/";
+        collection = { dir: String(base).replace(/[\\/]+$/, "") + sep + name, name };
+      }
+    } catch (_) {}
+  }
+  if (collection) {
+    const relMap = {};
+    for (const r of imgs) relMap[r.url.split("#")[0].split("?")[0]] = r.filename;
+    for (const d of docs) {
+      d.meta.document.content = ADL.rewriteDocRefs(d.meta.document.content, relMap);
+    }
+  }
+
+  let pushed = 0;
+  let docTaskId = null;
+  // 图片先推（即建即下）；文档瞬时完成殿后——用户打开文章时图片基本就绪
+  for (const r of [...imgs, ...docs]) {
+    if (r.kind === "document") {
+      const doc = r.meta.document;
+      // 文章导出（排版 HTML / Markdown）：内容生成型 → task.add_content 落盘，
+      // 引擎侧直接 Done，无下载阶段
+      const resp = await nmCall(
+        "task.add_content",
+        {
+          filename: r.filename,
+          mime: doc.mime,
+          content: doc.content,
+          dir: collection ? collection.dir : undefined,
+          source_url: /^https?:/i.test(entry.sourceUrl || "") ? entry.sourceUrl : undefined,
+        },
+        20000 // 大文章 HTML 数 MB：帧传输 + 落盘，超时放宽
+      );
+      if (resp.ok) {
+        pushed += 1;
+        docTaskId = resp.result && resp.result.id;
+      }
+      continue;
+    }
+    // 视频号等平台的后处理（解密）随任务下发，引擎完成下载后执行
+    const dec = r.meta && r.meta.decrypt;
+    const resp = await pushToApp({
+      url: r.url,
+      headers: r.headers,
+      filename: r.filename,
+      dir: collection ? collection.dir : undefined,
+      postprocess:
+        dec && dec.seed ? [{ algo: dec.algo || "isaac64-xor", seed: dec.seed }] : null,
+    });
+    if (resp.ok || resp.error === "task_exists") pushed += 1;
+  }
+  flashBadge(tabId, pushed > 0);
+  return {
+    ok: pushed > 0,
+    pushed,
+    total: list.length,
+    dir: collection ? collection.name : undefined,
+    docTaskId: docTaskId || undefined,
+  };
+}
+
+// —— 分享链接解析（粘贴口令/短链）：抖音（移动端 UA）+ 小红书（带 Cookie 跟随）
+async function adapterResolve(text) {
+  const link = ADL.extractLink(text);
+  if (!link) return { ok: false, error: "no_link" };
+  if (/douyin\.com|iesdouyin\.com/i.test(link)) {
+    try {
+      const res = await fetch(link, {
+        headers: { "User-Agent": ADL.DOUYIN_UA },
+        redirect: "follow",
+      });
+      const html = await res.text();
+      const awemes = ADL.douyinShareHtmlAwemes(html);
+      if (!awemes.length) return { ok: false, error: "no_item" };
+      const resources = awemes.flatMap((a) => ADL.awemeToResources(a));
+      return { ok: resources.length > 0, adapterId: "douyin", resources };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message) };
+    }
+  }
+  if (/xiaohongshu\.com|xhslink\.com/i.test(link)) {
+    try {
+      const res = await fetch(link, {
+        redirect: "follow",
+        credentials: "include", // 带登录 Cookie（高清/部分笔记必需）
+        headers: { "User-Agent": navigator.userAgent },
+      });
+      const html = await res.text();
+      const resources = ADL.xhsShareHtmlResources(html);
+      return { ok: resources.length > 0, adapterId: "xhs", resources };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message) };
+    }
+  }
+  return { ok: false, error: "unsupported_site" };
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  hookBuf.delete(tabId);
+  lastProbe.delete(tabId);
+});
+
+// 真实导航（hard navigation / reload）清空该 tab 的适配层缓冲（docs/MEDIA-ADAPTERS.md
+// §2 生命周期契约）。SPA 内部路由（pushState）只触发 changeInfo.url、不改 status，
+// 因此不会误清；status 变 loading 仅发生在主框架真实加载时。
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "loading") {
+    hookBuf.delete(tabId);
+    lastProbe.delete(tabId);
+  }
+});
+
+// ---------------------------------------------------------------- 本地 zip 落盘
+// ⑦下载所有图片（code-box 本地 zip 行为对齐）：content 侧收图并定名
+// （actions.js collectImageJobs），这里抓原始字节（host_permissions <all_urls>
+// 免 CORS）→ lib/zip.js STORE 打包 → data: URL 经 chrome.downloads 落盘
+// （SW 无 Blob.createObjectURL / FileReader，手写分块 base64；code-box
+// download.ts:29-41 同为 data URL 走 downloads API）。data: URL 下载不会触发
+// 自接管（onCreated 的 /^https?:/ 预筛直接放行）。
+
+function bytesToBase64(bytes) {
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+async function zipDownload(msg) {
+  const jobs = (Array.isArray(msg.jobs) ? msg.jobs : []).filter(
+    (j) => j && typeof j.url === "string" && typeof j.name === "string"
+  );
+  if (!jobs.length || typeof ADLZip === "undefined") {
+    return { ok: false, error: "no_jobs" };
+  }
+  const files = [];
+  const usedNames = new Set();
+  for (const job of jobs) {
+    // zip 重名条目会互相覆盖（jszip 语义）：加 (n) 序号去重保住每张图
+    let name = job.name;
+    if (usedNames.has(name)) {
+      const dot = name.lastIndexOf(".");
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      const ext = dot > 0 ? name.slice(dot) : "";
+      let n = 2;
+      while (usedNames.has(`${stem}(${n})${ext}`)) n += 1;
+      name = `${stem}(${n})${ext}`;
+    }
+    try {
+      // 头优先级：嗅探缓存可能带 Referer/Cookie（防盗链站）；单张失败
+      // console.error 后跳过，序号位保留（code-box weixin.tsx:222-224 同款）
+      const rec = findByUrl(job.url);
+      const init = rec && rec.headers ? { headers: rec.headers } : undefined;
+      const resp = await fetch(job.url, init);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      files.push({ name, data: new Uint8Array(await resp.arrayBuffer()) });
+      usedNames.add(name);
+    } catch (e) {
+      console.error("[adl] zip 图片抓取失败：", job.url, e);
+    }
+  }
+  if (!files.length) return { ok: false, error: "fetch_failed" };
+  const filename =
+    (ADL.cleanName(String(msg.filename || "").replace(/\.zip$/i, ""), 100) || "images") + ".zip";
+  try {
+    const bytes = await ADLZip.build(files);
+    await chrome.downloads.download({
+      url: "data:application/zip;base64," + bytesToBase64(bytes),
+      filename,
+      conflictAction: "uniquify",
+    });
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+  return { ok: true, saved: files.length, total: jobs.length, filename };
 }
 
 // ---------------------------------------------------------------- 消息路由
@@ -477,10 +902,41 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "用 Anything Downloader 下载此图片",
       contexts: ["image"],
     });
+    // 站点适配：仅适配器命中的页面显示（微信文章/小红书/抖音/X + 文章站点）
+    chrome.contextMenus.create({
+      id: "adl-site-page",
+      title: "下载本页媒体（站点适配）",
+      contexts: ["page"],
+      documentUrlPatterns: [
+        "*://mp.weixin.qq.com/*",
+        "*://*.xiaohongshu.com/*",
+        "*://*.douyin.com/*",
+        "*://*.x.com/*",
+        "*://*.twitter.com/*",
+        "*://channels.weixin.qq.com/*",
+        "*://*.blog.csdn.net/*",
+        "*://zhuanlan.zhihu.com/*",
+        "*://www.jianshu.com/*",
+        "*://juejin.cn/*",
+        "*://*.cnblogs.com/*",
+        "*://blog.51cto.com/*",
+        "*://www.jb51.net/*",
+        "*://www.php.cn/*",
+        "*://segmentfault.com/*",
+        "*://my.oschina.net/*",
+        "*://*.medium.com/*",
+      ],
+    });
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === "adl-site-page") {
+    if (!tab || tab.id < 0) return;
+    await adapterProbe(tab.id);
+    await adapterPush(tab.id);
+    return;
+  }
   const url = info.linkUrl || info.srcUrl;
   if (!url || !/^https?:/i.test(url)) return;
   // 头优先级：嗅探缓存（可能含 Cookie）> 近期快照
@@ -497,9 +953,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "ping") {
     // 存活探测：popup 打开时一次，不轮询（DESIGN §7.5）
-    nmCall("ping", undefined, 3000).then((resp) => {
-      sendResponse({ ok: !!resp.ok });
-    });
+    nmCall("ping", undefined, 3000)
+      .then((resp) => sendResponse({ ok: !!resp.ok }))
+      .catch(() => sendResponse({ ok: false }));
     return true; // 异步响应
   }
   if (msg.type === "list") {
@@ -510,6 +966,130 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "push") {
     pushToApp(msg.rec).then(sendResponse);
     return true; // 异步响应
+  }
+  if (msg.type === "hook-capture") {
+    const tabId = _sender.tab && _sender.tab.id;
+    if (tabId != null && tabId >= 0) hookCapture(tabId, msg.key, msg.url, msg.data);
+    return;
+  }
+  if (msg.type === "adapter-probe") {
+    // tabId 缺省 = 调用方所在页（悬浮按钮从页面内发起）
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    if (tabId == null) {
+      sendResponse({ ok: false, error: "no_tab" });
+      return;
+    }
+    adapterProbe(tabId).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "adapter-push") {
+    const tabId = msg.tabId != null ? msg.tabId : _sender.tab && _sender.tab.id;
+    if (tabId == null) {
+      sendResponse({ ok: false, error: "no_tab" });
+      return;
+    }
+    adapterPush(tabId, msg.urls).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "zip-download") {
+    // ⑦下载所有图片：content 收集的图片任务 → 本地 zip 落盘（不进应用管线）
+    zipDownload(msg).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "adapter-resolve") {
+    adapterResolve(msg.link).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "open-sync") {
+    // ①文章同步入口（code-box background/index.ts:143-149 同款）：带来源 tabId
+    //   打开同步页，sync.js boot 的 ?tabId= 分支自动锁定并提取该文章。
+    //   注意路径映射：本仓库同步页在扩展根目录 sync.html（manifest options_ui
+    //   同款解析），非 code-box 的 tabs/sync.html 子目录形态
+    const syncTabId = _sender.tab && _sender.tab.id;
+    const query = syncTabId != null ? `?tabId=${syncTabId}` : "";
+    chrome.tabs.create({ url: chrome.runtime.getURL("sync.html") + query });
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === "adapters-cfg") {
+    sendResponse({ ok: true, cfg: ADAPTERS });
+    return;
+  }
+  if (msg.type === "scan-page") {
+    // 主动嗅探：扫描页面 DOM 里的 a[href] / img / media 元素（被动嗅探盲区）
+    (async () => {
+      try {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId: msg.tabId },
+          func: () => {
+            const abs = (u) => {
+              try {
+                return new URL(u, location.href).href;
+              } catch {
+                return null;
+              }
+            };
+            const links = [...document.querySelectorAll("a[href]")]
+              .map((a) => abs(a.getAttribute("href")))
+              .filter((u) => u && /^https?:/.test(u));
+            const imgs = [...document.images]
+              .map((i) => abs(i.src))
+              .filter((u) => u && /^https?:/.test(u));
+            const media = [
+              ...document.querySelectorAll("video, audio, source"),
+            ]
+              .map((m) => abs(m.src || m.currentSrc || ""))
+              .filter((u) => u && /^https?:/.test(u));
+            const blobVideos = [
+              ...document.querySelectorAll("video"),
+            ].filter((v) => (v.src || "").startsWith("blob:")).length;
+            return { links, imgs, media, blobVideos };
+          },
+        });
+        const tabId = msg.tabId;
+        const map = tabMap(tabId);
+        let added = 0;
+        const addRec = (u, type) => {
+          if (map.has(u)) return;
+          map.set(u, {
+            url: u,
+            tabId,
+            type,
+            mime: null,
+            bytes: null,
+            headers: null,
+            at: Date.now(),
+          });
+          added += 1;
+        };
+        for (const u of result.links) {
+          const type = guessType(u);
+          if (type === "other") continue; // 纯页面跳转链接不是资源
+          if (!groupAllowed(type)) continue;
+          addRec(u, type);
+        }
+        for (const u of result.imgs) {
+          if (groupAllowed("image")) addRec(u, "image");
+        }
+        for (const u of result.media) {
+          const type = guessType(u) === "other" ? "video" : guessType(u);
+          if (groupAllowed(type)) addRec(u, type);
+        }
+        updateBadge(tabId);
+        // 立即落盘并随响应返回列表：popup 不再二次读 storage（防 500ms 防抖竞态）
+        await flushSniff();
+        sendResponse({
+          ok: true,
+          added,
+          total: map.size,
+          items: [...map.values()],
+          blobVideos: result.blobVideos,
+        });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
   }
   if (msg.type === "scan-elements") {
     (async () => {
@@ -576,8 +1156,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.type === "nm") {
-    // popup 控制转发：task.list / task.pause / task.resume / task.cancel / task.open...
-    nmCall(msg.method, msg.params, 5000).then((resp) => sendResponse(resp));
+    // popup/float 控制转发：task.* / settings.get / task.add_content...
+    // （超时可由调用方指定：大文章 add_content 单帧可达数 MB，5s 默认不够）
+    nmCall(msg.method, msg.params, Math.min(msg.timeoutMs || 5000, 30000)).then((resp) =>
+      sendResponse(resp)
+    );
     return true;
   }
   if (msg.type === "takeover-data") {

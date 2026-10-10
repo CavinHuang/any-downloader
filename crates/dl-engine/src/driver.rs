@@ -89,6 +89,8 @@ pub(crate) struct Ctx {
     pub task_headers: HashMap<String, String>,
     /// 完成后哈希校验（已规范化）。
     pub checksum: Option<(String, String)>,
+    /// 下载后处理（视频号解密等；完成时按序执行）。
+    pub postprocess: Vec<dl_model::PostProcess>,
 }
 
 /// 把任务透传头附加到请求（键小写、仅白名单，DESIGN §9）。
@@ -272,6 +274,7 @@ pub(crate) async fn run(
             .checksum
             .as_deref()
             .and_then(crate::checksum::parse_checksum),
+        postprocess: dl_model::PostProcess::parse_list(task.postprocess_json.as_deref()),
     });
 
     // 多镜像原始清单解析（探测校验在 phase 内、主源 total 已知之后）
@@ -283,7 +286,14 @@ pub(crate) async fn run(
 
     let mut restarts: u32 = 0;
     let result = loop {
-        match phase(ctx.clone(), &mirrors_raw).await {
+        let step = if task.kind == dl_model::TaskKind::Ytdlp {
+            crate::ytdlp_task::run_ytdlp(ctx.clone(), &task)
+                .await
+                .map(|_| ())
+        } else {
+            phase(ctx.clone(), &mirrors_raw).await
+        };
+        match step {
             Ok(()) => break Ok(()),
             Err(e @ DriveErr::Fatal(..)) => break Err(e),
             Err(DriveErr::Paused) => break Err(DriveErr::Paused),
@@ -501,6 +511,19 @@ async fn finish_completed(
         .await
         .map_err(drive_from)?;
     verify(ctx, &paths.part, final_segs, total, segmented).await?;
+    // 后处理（视频号 Isaac64-XOR 解密）：在哈希校验之前——校验和针对明文
+    if !ctx.postprocess.is_empty() {
+        ctx.engine
+            .transition(&ctx.task_id, TaskStatus::Decrypting, None)
+            .await
+            .map_err(drive_from)?;
+        crate::postprocess::apply_all(&paths.part, &ctx.postprocess)
+            .map_err(|e| DriveErr::Fatal(e.kind, e.message))?;
+        ctx.engine
+            .transition(&ctx.task_id, TaskStatus::Verifying, None)
+            .await
+            .map_err(drive_from)?;
+    }
     // 哈希校验：不符 → Failed(checksum_mismatch)，.dlpart 保留供排查
     if let Some((algo, expect)) = &ctx.checksum {
         let ok = crate::checksum::verify_file(&paths.part, algo, expect)

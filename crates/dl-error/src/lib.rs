@@ -51,6 +51,8 @@ pub enum ErrorKind {
     },
     /// 完成后哈希校验不符。
     ChecksumMismatch,
+    /// 下载后处理失败（如视频号解密：算法可能已更新）。
+    DecryptFailed,
     Internal,
 }
 
@@ -84,6 +86,7 @@ impl ErrorKind {
             ErrorKind::InvalidParams => "invalid_params",
             ErrorKind::TaskExists { .. } => "task_exists",
             ErrorKind::ChecksumMismatch => "checksum_mismatch",
+            ErrorKind::DecryptFailed => "decrypt_failed",
             ErrorKind::Internal => "internal",
         }
     }

@@ -36,6 +36,9 @@ enum Cmd {
         /// 完成后哈希校验（sha256/sha1/md5，可选）
         #[arg(long)]
         checksum: Option<String>,
+        /// 视频号解密：decode_key（下载完成后对前 128KB 做 Isaac64-XOR）
+        #[arg(long)]
+        isaac64_seed: Option<String>,
     },
     /// 列出任务
     List {
@@ -260,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
             filename,
             mirrors,
             checksum,
+            isaac64_seed,
         } => {
             let mut c = CreateTask::of(url);
             c.kind = kind.map(|k| parse_kind(&k)).transpose()?;
@@ -267,6 +271,12 @@ async fn main() -> anyhow::Result<()> {
             c.filename = filename;
             c.mirrors = Some(mirrors).filter(|m| !m.is_empty());
             c.checksum = checksum;
+            c.postprocess = isaac64_seed.map(|seed| {
+                vec![dl_model::PostProcess {
+                    algo: dl_model::PostProcessAlgo::Isaac64Xor,
+                    seed,
+                }]
+            });
             let t = engine.create_task(c).await?;
             println!("created {} [{}]", t.id, t.status.as_str());
         }

@@ -179,7 +179,7 @@ label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px
 }
 .row .sub { display: flex; gap: 8px; margin-top: 2px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-.dot.downloading, .dot.probing, .dot.verifying, .dot.merging { background: var(--accent); }
+.dot.downloading, .dot.probing, .dot.verifying, .dot.merging, .dot.decrypting { background: var(--accent); }
 .dot.downloading { animation: pulse 1.2s infinite; }
 .dot.done { background: var(--ok); }
 .dot.failed { background: var(--err); }

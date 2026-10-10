@@ -4,6 +4,8 @@ pub mod checksum;
 pub mod driver;
 pub mod engine;
 pub mod hls;
+pub mod postprocess;
+pub mod ytdlp_task;
 
 pub use driver::{DownloadOptions, MAX_SEGMENTS};
 pub use engine::{Engine, EngineEvent};

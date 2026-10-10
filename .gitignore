@@ -10,3 +10,6 @@ node_modules/
 src-tauri/binaries/
 ui/dist/
 src-tauri/gen/schemas/
+
+# Windows redirect artifact
+nul

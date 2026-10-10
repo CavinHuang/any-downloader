@@ -1091,10 +1091,13 @@ dependencies = [
  "dl-segment",
  "dl-testserver",
  "dl-throttle",
+ "dl-ytdlp",
  "fs4",
  "hex",
  "m3u8-rs",
  "md-5",
+ "rand_core 0.10.1",
+ "rand_isaac",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1146,6 +1149,7 @@ dependencies = [
  "dl-error",
  "dl-model",
  "dl-testserver",
+ "open",
  "serde",
  "serde_json",
  "tempfile",
@@ -1168,6 +1172,7 @@ version = "0.2.7"
 dependencies = [
  "dl-error",
  "serde",
+ "serde_json",
  "tempfile",
  "uuid",
 ]
@@ -1232,6 +1237,16 @@ name = "dl-throttle"
 version = "0.2.7"
 dependencies = [
  "tokio",
+]
+
+[[package]]
+name = "dl-ytdlp"
+version = "0.2.7"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3623,7 +3638,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha",
- "rand_core",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -3633,7 +3648,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -3643,6 +3658,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rand_isaac"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62cb7dedb2feaa5c3ea9f47b7d6f5bde397a2dd7d0305a0cd35b51588607f415"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]

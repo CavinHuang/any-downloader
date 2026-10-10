@@ -126,7 +126,8 @@ async fn nm_shim(origin: Option<String>) -> anyhow::Result<()> {
     let mut stdout = tokio::io::stdout();
     let mut conn: Option<IpcClient> = None;
     loop {
-        let Some(payload) = ipc::read_frame(&mut stdin).await? else {
+        // 请求方向（扩展→宿主）放宽到 MAX_REQUEST_BYTES：文章导出单帧可达数 MB
+        let Some(payload) = ipc::read_request(&mut stdin).await? else {
             tracing::info!("nm stdin closed, shim exiting");
             break;
         };

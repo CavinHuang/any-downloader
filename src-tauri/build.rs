@@ -9,7 +9,7 @@ fn main() {
         ""
     };
     std::fs::create_dir_all("binaries").ok();
-    for name in ["dl-cli", "dl-server"] {
+    for name in ["dl-cli", "dl-server", "yt-dlp", "deno"] {
         let p = format!("binaries/{name}-{triple}{exe_suffix}");
         if !std::path::Path::new(&p).exists() {
             std::fs::write(&p, "").ok();

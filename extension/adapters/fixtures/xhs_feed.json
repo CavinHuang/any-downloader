@@ -1,0 +1,72 @@
+{
+  "data": {
+    "current_note_id": "6540abc123def4567890ffff",
+    "items": [
+      {
+        "id": "6540abc123def4567890bbbb",
+        "note_card": {
+          "type": "normal",
+          "title": "旧时间线笔记",
+          "desc": "时间线里的其他笔记",
+          "image_list": [
+            {
+              "url_default": "http://sns-webpic-qc.xhscdn.com/20250102/old/nd/pic!nd_dft_wgtehjqv10hmmm",
+              "live_photo": false,
+              "info_list": []
+            }
+          ]
+        }
+      },
+      {
+        "id": "6540abc123def4567890ffff",
+        "note_card": {
+          "type": "video",
+          "title": "苏州两天一晚攻略",
+          "desc": "附路线图",
+          "image_list": [
+            {
+              "url_default": "http://sns-webpic-qc.xhscdn.com/20250103/cover/nd/img1!nd_dft_wgtehjqv10hmmm",
+              "live_photo": false,
+              "info_list": []
+            },
+            {
+              "url_default": "http://sns-webpic-qc.xhscdn.com/20250103/live/nd/img2!nd_dft_wgtehjqv10hmmm",
+              "live_photo": true,
+              "live_photo_url": "https://sns-video.xhscdn.com/stream/live_img2.mp4",
+              "info_list": []
+            }
+          ],
+          "video": {
+            "media": {
+              "stream": {
+                "h264": [
+                  { "master_url": "https%3A%2F%2Fsns-video.xhscdn.com%2Fstream%2Fsuzhou_720.mp4", "master_height": 720 },
+                  { "master_url": "https%3A%2F%2Fsns-video.xhscdn.com%2Fstream%2Fsuzhou_1080.mp4", "master_height": 1080 }
+                ],
+                "h265": [
+                  { "master_url": "https%3A%2F%2Fsns-video-hw.xhscdn.com%2Fstream%2Fsuzhou_h265.mp4", "master_height": 1080 }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "6540abc123def4567890cccc",
+        "note_card": {
+          "type": "video",
+          "title": "",
+          "desc": null,
+          "image_list": [{}],
+          "video": {
+            "media": {
+              "stream": {
+                "h264": [{ "master_url": "", "master_height": 720 }]
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

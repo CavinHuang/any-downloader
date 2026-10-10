@@ -1,0 +1,25 @@
+{
+  "aweme_list": [
+    {
+      "aweme_id": "7301234567890123456",
+      "desc": "测试视频：海边日落/延时摄影",
+      "video": {
+        "play_addr": {
+          "uri": "v0d00fg10000abcdef1234567890",
+          "url_list": [
+            "https://www.douyin.com/aweme/v1/play/?faid=1&video_id=v0d00fg10000abcdef1234567890&line=0",
+            "https://api.amemv.com/aweme/v1/play/?video_id=v0d00fg10000abcdef1234567890"
+          ]
+        }
+      }
+    },
+    {
+      "aweme_id": "7399876543210987654",
+      "desc": "图集:城市扫街",
+      "images": [
+        { "url_list": ["https://p3-sign.douyinpic.com/a.jpeg", "https://p9-sign.douyinpic.com/a_full.jpeg"] },
+        { "url_list": ["https://p3-sign.douyinpic.com/b.jpeg", "https://p9-sign.douyinpic.com/b_full.jpeg"] }
+      ]
+    }
+  ]
+}

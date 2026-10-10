@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Anything Downloader",
-  "version": "0.4.1",
-  "description": "嗅探网页媒体资源并推送到 Anything Downloader 下载",
+  "version": "0.8.2",
+  "description": "嗅探网页媒体资源 + 站点适配下载（抖音/小红书/X/微信文章）并推送到 Anything Downloader",
   "permissions": [
     "downloads.ui",
     "downloads",
@@ -34,5 +34,84 @@
     "32": "icons/32.png",
     "48": "icons/48.png",
     "128": "icons/128.png"
-  }
+  },
+  "options_ui": {
+    "page": "sync.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.douyin.com/*",
+        "*://*.x.com/*",
+        "*://*.twitter.com/*",
+        "*://channels.weixin.qq.com/*",
+        "*://*.xiaohongshu.com/*"
+      ],
+      "js": [
+        "hooks/main-world-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://mp.weixin.qq.com/*",
+        "*://*.xiaohongshu.com/*",
+        "*://*.douyin.com/*",
+        "*://*.x.com/*",
+        "*://*.twitter.com/*",
+        "*://channels.weixin.qq.com/*",
+        "*://*.blog.csdn.net/*",
+        "*://devpress.csdn.net/*",
+        "*://zhuanlan.zhihu.com/*",
+        "*://www.jianshu.com/*",
+        "*://juejin.cn/*",
+        "*://*.cnblogs.com/*",
+        "*://blog.51cto.com/*",
+        "*://www.jb51.net/*",
+        "*://www.php.cn/*",
+        "*://segmentfault.com/*",
+        "*://my.oschina.net/*",
+        "*://*.medium.com/*"
+      ],
+      "js": [
+        "adapters/types.js",
+        "adapters/core.js",
+        "adapters/turndown.js",
+        "adapters/articles.js",
+        "lib/qr.js",
+        "actions.js",
+        "adapters/wechat-article.js",
+        "adapters/xhs.js",
+        "adapters/douyin.js",
+        "adapters/x.js",
+        "adapters/channels.js",
+        "bridge.js",
+        "float-button.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://mp.weixin.qq.com/*",
+        "*://*.blog.csdn.net/*",
+        "*://devpress.csdn.net/*",
+        "*://zhuanlan.zhihu.com/*",
+        "*://www.jianshu.com/*",
+        "*://juejin.cn/*",
+        "*://*.cnblogs.com/*",
+        "*://blog.51cto.com/*",
+        "*://www.jb51.net/*",
+        "*://www.php.cn/*",
+        "*://segmentfault.com/*",
+        "*://my.oschina.net/*",
+        "*://*.medium.com/*"
+      ],
+      "js": [
+        "sync/extractor.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }

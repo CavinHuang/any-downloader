@@ -116,6 +116,23 @@ cargo build --release -p dl-app
 
 开发链路见 [docs/EXTENSION-DEV.md](docs/EXTENSION-DEV.md)。
 
+## 站点适配（v0.4.0 / 扩展 v0.6.0）
+
+通用引擎之上的专用媒体下载入口（设计详见 [docs/MEDIA-ADAPTERS.md](docs/MEDIA-ADAPTERS.md)）：
+
+| 平台 | 能力 | 实现 |
+|---|---|---|
+| 抖音 | 无水印视频（多清晰度）/图集、作者名文件名 | hook 抓取 API 响应 → `iesdouyin` 直链（移动端 UA，video_id 去重） |
+| 小红书 | 笔记图片（无水印）/视频/Live 图 | API hook + `__INITIAL_STATE__` 双源合并（SPA 站内导航也新鲜） |
+| X (Twitter) | 照片原图/视频多码率（默认最高） | GraphQL 响应直链 mp4 + `name=orig`；详情页只收当前推文 |
+| 微信文章 | 文章全部原图批量 | DOM 懒加载 `data-src` + 参数重写（Referer 防盗链） |
+| 微信视频号 | **加密视频自动解密** | hook 抓 URL + decode_key → 引擎下载后 Isaac64-XOR 解密前 128KB（算法与官方样本逐位对拍） |
+| YouTube | 视频/音频下载 | yt-dlp sidecar 托管模式（`TaskKind::Ytdlp`，URL 自动识别；**安装器已内置 yt-dlp + deno，开箱即用**，设置里可覆盖路径） |
+| **文章站点 ×12** | **文章下载（Markdown）+ 文章图片 + 操作菜单** | 微信公众号/知乎专栏/掘金/CSDN/简书/博客园/51CTO/脚本之家/php中文网/SegmentFault/开源中国/Medium；自研 GFM 转换器（YAML front matter / 代码块语言探测 / 表格列对齐 / figure 图注）；**文章合集模式**：`下载目录/标题/` 统一存放 .md 与原图，相对引用离线完整可读；**文章操作菜单**（对齐 code-box）：获取封面/文章摘要/净化链接/原始链接/编辑 Markdown/解析 Markdown/打包下载/下载 PDF/下载 Word/下载所有图片/生成海报；文档经 `task.add_content` 直达已完成任务，图片走常规下载管线 |
+
+入口：popup 站点卡片、**粘贴分享口令**（抖音/小红书 App 的"复制链接"直接粘）、页面悬浮 ⬇ 按钮、右键"下载本页媒体"、设置页按平台开关。
+仅供个人备份学习使用，请遵守各平台服务条款。
+
 ## 已完成里程碑
 
 ### M1（HTTP 引擎核心）

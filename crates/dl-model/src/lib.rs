@@ -4,4 +4,4 @@ pub mod task;
 pub mod types;
 
 pub use task::can_transition;
-pub use types::{new_task_id, now_ms, CreateTask, Task, TaskKind, TaskStatus, HEADER_ALLOWLIST};
+pub use types::{new_task_id, now_ms, CreateContentTask, CreateTask, PostProcess, PostProcessAlgo, Task, TaskKind, TaskStatus, HEADER_ALLOWLIST};

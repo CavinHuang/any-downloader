@@ -43,6 +43,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       "after_done",
       "clipboard_monitor",
       "ffmpeg_path",
+      "yt_dlp_path",
       "max_concurrent",
       "max_auto_retry",
       "auto_categorize",
@@ -156,6 +157,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           value={field("ffmpeg_path")}
           placeholder="C:\ffmpeg\bin\ffmpeg.exe"
           onChange={(e) => set("ffmpeg_path", e.target.value)}
+        />
+        <label>{t("ytdlpPath")}</label>
+        <input
+          value={field("yt_dlp_path")}
+          placeholder="留空使用内置 yt-dlp"
+          onChange={(e) => set("yt_dlp_path", e.target.value)}
         />
         <label>{t("afterDone")}</label>
         <select

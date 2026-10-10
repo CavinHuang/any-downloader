@@ -1,0 +1,33 @@
+{
+  "loaderData": {
+    "video_(7301234567890123456)/page": {
+      "videoInfoRes": {
+        "item_list": [
+          {
+            "aweme_id": "7301234567890123456",
+            "desc": "测试视频：海边日落/延时摄影",
+            "video": {
+              "play_addr": {
+                "uri": "v0d00fg10000abcdef1234567890",
+                "url_list": []
+              }
+            }
+          }
+        ]
+      }
+    },
+    "note_(7400000000000000099)/page": {
+      "noteInfoRes": {
+        "item_list": [
+          {
+            "aweme_id": "7400000000000000099",
+            "desc": "分享页图集：深夜食堂",
+            "images": [
+              { "url_list": ["https://p3-sign.douyinpic.com/n1.jpeg", "https://p9-sign.douyinpic.com/n1_full.jpeg"] }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

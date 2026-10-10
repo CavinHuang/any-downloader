@@ -14,7 +14,21 @@ pub async fn serve(engine: Engine, name: &str) -> std::io::Result<()> {
         .create(name)?;
     tracing::info!(name = %name, "named pipe listening");
     loop {
-        server.connect().await?;
+        // 客户端在 connect 完成前消失等竞态会让 connect 返回 Err——
+        // 绝不能让单个实例失效拖垮整个管道服务：重建实例继续
+        if let Err(e) = server.connect().await {
+            tracing::warn!(error = %e, "pipe connect race; recreating instance");
+            match ServerOptions::new().create(name) {
+                Ok(next) => {
+                    server = next;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "pipe instance recreate failed; ipc server exiting");
+                    return Err(e);
+                }
+            }
+        }
         let current = server;
         server = ServerOptions::new().create(name)?;
         let engine = engine.clone();

@@ -4,12 +4,16 @@
 
 use dl_engine::Engine;
 use dl_error::{DownloadError, Res};
-use dl_model::{CreateTask, Task, TaskStatus};
+use dl_model::{CreateContentTask, CreateTask, Task, TaskStatus};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
+/// 请求方向（扩展→宿主）帧上限。Chrome NM 该方向协议上限 4 GB；默认 1 MiB
+/// 是 host→扩展方向的对齐值。文章导出（task.add_content）单帧携带 HTML 全文
+/// 可达数 MB，请求读按此上限放行（dl-engine::Engine::MAX_CONTENT_BYTES 兜底）。
+pub const MAX_REQUEST_BYTES: u32 = 32 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -78,8 +82,20 @@ impl Response {
     }
 }
 
-/// 读取一帧；对端正常关闭返回 None。
+/// 读取一帧；对端正常关闭返回 None。上限 MAX_FRAME_BYTES（host→扩展方向）。
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    read_frame_capped(r, MAX_FRAME_BYTES).await
+}
+
+/// 读取请求方向的一帧（扩展→宿主 / shim→管道），上限 MAX_REQUEST_BYTES。
+pub async fn read_request<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    read_frame_capped(r, MAX_REQUEST_BYTES).await
+}
+
+async fn read_frame_capped<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max: u32,
+) -> std::io::Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -87,10 +103,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Opti
         Err(e) => return Err(e),
     }
     let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_BYTES {
+    if len > max {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "frame exceeds 1 MiB limit",
+            "frame exceeds limit",
         ));
     }
     let mut buf = vec![0u8; len as usize];
@@ -111,7 +127,7 @@ pub(crate) async fn serve_connection<S>(engine: &Engine, mut stream: S) -> std::
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    while let Some(payload) = read_frame(&mut stream).await? {
+    while let Some(payload) = read_request(&mut stream).await? {
         let response = match serde_json::from_slice::<Request>(&payload) {
             Ok(req) => dispatch(engine, req).await,
             Err(e) => Response::simple_err(0, "bad_request", e.to_string()),
@@ -126,6 +142,11 @@ where
 #[derive(Deserialize)]
 struct IdParams {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct SettingParams {
+    key: String,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +188,28 @@ pub(crate) async fn dispatch(engine: &Engine, req: Request) -> Response {
             Ok(c) => task_response(req.id, engine.create_task(c).await),
             Err(e) => bad_params(req.id, e),
         },
+        "task.add_content" => match serde_json::from_value::<CreateContentTask>(req.params) {
+            Ok(c) => task_response(req.id, engine.create_content_task(c).await),
+            Err(e) => bad_params(req.id, e),
+        },
+        "settings.get" => {
+            // 白名单暴露：扩展只需要下载根目录与归类开关（文章合集目录拼接用），
+            // 其余设置（代理/限速/密钥类）不经 NM 通道外泄
+            let Some(p) = serde_json::from_value::<SettingParams>(req.params).ok() else {
+                return Response::simple_err(req.id, "bad_params", "expected {\"key\": ...}");
+            };
+            match p.key.as_str() {
+                "default_dir" | "auto_categorize" => match engine.get_setting(&p.key).await {
+                    Ok(v) => Response::ok(req.id, serde_json::json!({ "value": v })),
+                    Err(e) => Response::err(req.id, &e),
+                },
+                other => Response::simple_err(
+                    req.id,
+                    "bad_params",
+                    format!("setting {other:?} is not exposed over IPC"),
+                ),
+            }
+        }
         "task.get" => match serde_json::from_value::<IdParams>(req.params) {
             Ok(p) => match engine.get_task(&p.id).await {
                 Ok(Some(t)) => Response::ok(req.id, task_json(t)),
@@ -232,25 +275,10 @@ pub(crate) async fn dispatch(engine: &Engine, req: Request) -> Response {
             } else {
                 std::path::PathBuf::from(&dir)
             };
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("open").arg(&target).spawn();
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
-            }
-            #[cfg(windows)]
-            {
-                if target.is_file() {
-                    // explorer /select 定位并选中文件
-                    let _ = std::process::Command::new("explorer")
-                        .arg(format!("/select,{}", target.display()))
-                        .spawn();
-                } else {
-                    let _ = std::process::Command::new("explorer").arg(&target).spawn();
-                }
-            }
+            // open crate = ShellExecuteW(Win)/open(mac)/xdg-open(linux)：
+            // 原生处理含空格/中文的路径。旧实现 explorer /select,"<带空格路径>"
+            // 被 explorer 自身的命令行解析规则破坏 → 「找不到应用程序」。
+            let _ = open::that_in_background(&target);
             Response::ok(req.id, serde_json::json!({ "opened": true }))
         }
         "task.start" => {
@@ -400,5 +428,119 @@ mod tests {
         .await;
         assert!(resp.ok, "task.list without params must succeed");
         assert_eq!(resp.result.unwrap().as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_add_content_writes_done_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&dir.path().join("t.db")).await.unwrap();
+        // 内容任务落盘目录必须显式指定：缺省会写到系统下载目录（真实用户目录）
+        let out = dir.path().join("out");
+        engine
+            .set_setting("default_dir", out.display().to_string().as_str())
+            .await
+            .unwrap();
+
+        let resp = dispatch(
+            &engine,
+            Request {
+                v: PROTOCOL_VERSION,
+                id: 9,
+                method: "task.add_content".into(),
+                params: serde_json::json!({
+                    "filename": "文章.md",
+                    "mime": "text/markdown;charset=utf-8",
+                    "content": "# 标题\n\n正文",
+                    "source_url": "https://juejin.cn/post/1"
+                }),
+            },
+        )
+        .await;
+        assert!(resp.ok, "task.add_content must succeed: {:?}", resp.error);
+        let task = resp.result.unwrap();
+        assert_eq!(task["kind"], "content");
+        assert_eq!(task["status"], "done");
+        assert_eq!(task["filename"], "文章.md");
+        assert_eq!(task["url"], "https://juejin.cn/post/1", "原文链接进 url");
+
+        // 缺 content 字段 → bad_params
+        let resp = dispatch(
+            &engine,
+            Request {
+                v: PROTOCOL_VERSION,
+                id: 10,
+                method: "task.add_content".into(),
+                params: serde_json::json!({ "filename": "x.md" }),
+            },
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, "bad_params");
+    }
+
+    #[tokio::test]
+    async fn dispatch_settings_get_whitelist() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(&dir.path().join("t.db")).await.unwrap();
+        engine
+            .set_setting("default_dir", "D:\\Downloads")
+            .await
+            .unwrap();
+
+        let call = |id: u64, key: &str| {
+            dispatch(
+                &engine,
+                Request {
+                    v: PROTOCOL_VERSION,
+                    id,
+                    method: "settings.get".into(),
+                    params: serde_json::json!({ "key": key }),
+                },
+            )
+        };
+        let resp = call(1, "default_dir").await;
+        assert!(resp.ok);
+        assert_eq!(resp.result.unwrap()["value"], "D:\\Downloads");
+
+        // 未设置过的白名单键 → null 值（非错误）
+        let resp = call(2, "auto_categorize").await;
+        assert!(resp.ok);
+        assert!(resp.result.unwrap()["value"].is_null());
+
+        // 白名单外 → 拒绝（代理/限速/密钥类设置不经 NM 外泄）
+        let resp = call(3, "proxy").await;
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, "bad_params");
+    }
+
+    #[tokio::test]
+    async fn read_request_accepts_large_frames_up_to_cap() {
+        // 请求方向上限 MAX_REQUEST_BYTES（文章导出单帧可达数 MB）；
+        // 默认 read_frame 仍按 1 MiB 拒绝（host→扩展方向语义）。
+        let big = vec![0u8; MAX_REQUEST_BYTES as usize];
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(big.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&big);
+        let got = read_request(&mut std::io::Cursor::new(framed))
+            .await
+            .unwrap();
+        assert_eq!(got.unwrap().len(), MAX_REQUEST_BYTES as usize);
+
+        let over = vec![0u8; MAX_REQUEST_BYTES as usize + 1];
+        let mut framed2 = Vec::new();
+        framed2.extend_from_slice(&(over.len() as u32).to_le_bytes());
+        framed2.extend_from_slice(&over);
+        let err = read_request(&mut std::io::Cursor::new(framed2))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let mut framed3 = Vec::new();
+        framed3.extend_from_slice(&(big.len() as u32).to_le_bytes());
+        framed3.extend_from_slice(&big);
+        let err3 = read_frame(&mut std::io::Cursor::new(framed3))
+            .await
+            .unwrap_err();
+        assert_eq!(err3.kind(), std::io::ErrorKind::InvalidData);
     }
 }

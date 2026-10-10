@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/dl-ipc", "crates/dl-error", "crates/dl-model", "crates/dl-persist", "crates/dl-throttle",
     "crates/dl-journal", "crates/dl-segment", "crates/dl-filename", "crates/dl-net",
-    "crates/dl-io", "crates/dl-engine", "crates/dl-testserver", "crates/dl-cli", "crates/dl-server",
+    "crates/dl-io", "crates/dl-engine", "crates/dl-testserver", "crates/dl-cli", "crates/dl-server", "crates/dl-ytdlp",
     "src-tauri",
 ]
 
@@ -37,6 +37,10 @@ sha2 = "0.10"
 sha1 = "0.10"
 md-5 = "0.10"
 fs4 = "0.9"
+open = "5"
+# 视频号解密：必须与微信 WASM 的 Isaac64 行为逐位一致（样本对拍锁定 0.5.1）
+rand_isaac = "=0.5.1"
+rand_core = "0.10"
 
 # 能力 crate（一能力一 crate，见 docs/DESIGN.md §4）
 dl-ipc = { path = "crates/dl-ipc" }
@@ -44,6 +48,7 @@ dl-error = { path = "crates/dl-error" }
 dl-model = { path = "crates/dl-model" }
 dl-persist = { path = "crates/dl-persist" }
 dl-throttle = { path = "crates/dl-throttle" }
+dl-ytdlp = { path = "crates/dl-ytdlp" }
 dl-journal = { path = "crates/dl-journal" }
 dl-segment = { path = "crates/dl-segment" }
 dl-filename = { path = "crates/dl-filename" }

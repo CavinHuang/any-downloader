@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value>
+        <array>
+          <data>
+            <value>
+              <struct>
+                <member>
+                  <name>dateCreated</name>
+                  <value><dateTime.iso8601>20261010T00:00:00</dateTime.iso8601></value>
+                </member>
+                <member>
+                  <name>userid</name>
+                  <value><int>1</int></value>
+                </member>
+                <member>
+                  <name>postid</name>
+                  <value><string>95</string></value>
+                </member>
+                <member>
+                  <name>title</name>
+                  <value><string>最新草稿</string></value>
+                </member>
+              </struct>
+            </value>
+          </data>
+        </array>
+      </value>
+    </param>
+  </params>
+</methodResponse>
