@@ -10,13 +10,17 @@
   const state = { tabs: [], article: null, mdOriginal: "", platforms: [] };
 
   // ------------------------------------------------------------ 轻提示
+  // S5：语义成对 token（info=accent-soft/ink，err=err-soft/ink，见 sync.html §3.8）；
+  // role 随错误态切换 alert/status，读屏可闻
   function toast(msg, isErr) {
     const t = $("toast");
     t.textContent = msg;
-    t.style.background = isErr ? "#b91c1c" : "#0f172a";
+    t.className = isErr ? "toast-err" : "toast-info";
+    t.setAttribute("role", isErr ? "alert" : "status");
     t.style.display = "block";
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => (t.style.display = "none"), 2600);
+    // 错误至少停留 5s（规范 §3.8），普通提示 2.5s
+    toast._t = setTimeout(() => (t.style.display = "none"), isErr ? 5000 : 2500);
   }
 
   // ------------------------------------------------------------ 平台列表
@@ -46,6 +50,8 @@
         cb.type = "checkbox";
         cb.value = p.id;
         cb.dataset.name = p.name;
+        // S4：勾选变化持久化（chrome.storage.local.syncTargets），下次打开自动恢复
+        cb.addEventListener("change", persistTargets);
         const name = document.createElement("span");
         name.textContent = p.name;
         const fmt = document.createElement("span");
@@ -57,6 +63,33 @@
         badge.textContent = "检测中…";
         row.append(cb, name, fmt, badge);
         box.append(row);
+      }
+    }
+  }
+
+  // S4：同步目标平台勾选持久化（固定同步某几个平台的用户不必每次重勾）
+  const TARGETS_KEY = "syncTargets";
+  function currentTargets() {
+    const map = {};
+    for (const cb of $("platforms").querySelectorAll("input[type=checkbox]")) {
+      map[cb.value] = cb.checked;
+    }
+    return map;
+  }
+  async function persistTargets() {
+    try {
+      await chrome.storage.local.set({ [TARGETS_KEY]: currentTargets() });
+    } catch (_) {}
+  }
+  async function restoreTargets() {
+    let saved = null;
+    try {
+      saved = (await chrome.storage.local.get(TARGETS_KEY))[TARGETS_KEY] || null;
+    } catch (_) {}
+    if (!saved) return;
+    for (const cb of $("platforms").querySelectorAll("input[type=checkbox]")) {
+      if (Object.prototype.hasOwnProperty.call(saved, cb.value)) {
+        cb.checked = !!saved[cb.value];
       }
     }
   }
@@ -148,17 +181,27 @@
   }
 
   // ------------------------------------------------------------ 发布状态区
+  // S3：失败原因渲染为 .errmsg 红字警示（原 .lnk 无 href 假链接样式已废除）；
+  // .lnk 只在成功且有草稿链接时使用
   function setStatusRow(id, stage, result) {
     const row = $("status-" + id);
     if (!row) return;
     const st = row.querySelector(".st");
     const link = row.querySelector(".lnk");
+    const msgEl = row.querySelector(".errmsg");
     st.className = "st " + stage;
     if (stage === "starting") {
       st.textContent = "发布中…";
+      st.title = "";
       link.textContent = "";
+      link.removeAttribute("href");
+      msgEl.textContent = "";
+      msgEl.title = "";
     } else if (stage === "completed" && result && result.ok) {
       st.textContent = "✓ 成功";
+      st.title = "";
+      msgEl.textContent = "";
+      msgEl.title = "";
       if (result.draftUrl) {
         link.textContent = "打开草稿";
         link.href = result.draftUrl;
@@ -167,9 +210,10 @@
       st.textContent = "✕ 失败";
       const msg = (result && (result.error || (result.ok === false && "未知错误"))) || "未知错误";
       st.title = msg;
-      link.textContent = msg.length > 46 ? msg.slice(0, 46) + "…" : msg;
+      link.textContent = "";
       link.removeAttribute("href");
-      link.title = msg;
+      msgEl.textContent = msg.length > 46 ? msg.slice(0, 46) + "…" : msg;
+      msgEl.title = msg;
     }
   }
 
@@ -224,7 +268,9 @@
       link.className = "lnk";
       link.target = "_blank";
       link.rel = "noreferrer";
-      row.append(nm, st, link);
+      const msgEl = document.createElement("span");
+      msgEl.className = "errmsg"; // S3：失败原因走红字警示，不再挂 .lnk
+      row.append(nm, st, link, msgEl);
       box.append(row);
     }
 
@@ -305,14 +351,21 @@
       const row = document.createElement("div");
       row.className = "cmsrow";
       const nm = document.createElement("span");
-      nm.textContent = (a.name || labels[a.type] || a.type) + "（" + a.url + " · " + a.username + "）";
+      const label = (a.name || labels[a.type] || a.type) + "（" + a.url + " · " + a.username + "）";
+      nm.textContent = label;
       const del = document.createElement("button");
       del.textContent = "删除";
       del.className = "mini";
       del.addEventListener("click", async () => {
-        await ADL.syncEngine.removeCmsAccount(a.id);
-        await boot();
-        toast("账号已删除");
+        // S7：破坏性-单条，与清空历史/应用端删除口径一致（§4.5 所有入口统一）
+        if (!confirm("删除账号 " + label + "？不可恢复")) return;
+        try {
+          await ADL.syncEngine.removeCmsAccount(a.id);
+          await boot();
+          toast("账号已删除");
+        } catch (e) {
+          toast("删除失败：" + ((e && e.message) || e), true);
+        }
       });
       row.append(nm, del);
       box.append(row);
@@ -363,6 +416,7 @@
   async function boot() {
     await buildPlatforms();
     renderPlatforms();
+    await restoreTargets(); // S4：恢复上次的平台勾选
     renderCmsList();
     await refreshTabs();
     // ?tabId= 入参：直接锁定来源并自动提取；无入参时自动选中最近访问的
@@ -387,8 +441,20 @@
       toast(ADL.syncEngine.cancelSync() ? "已请求取消" : "当前没有进行中的同步");
     });
     $("btnClearHistory").addEventListener("click", async () => {
-      await ADL.syncEngine.clearSyncHistory();
-      loadHistory();
+      // S1：破坏性-批量，确认文案含数量与后果（§4.5）
+      try {
+        const list = await ADL.syncEngine.getSyncHistory();
+        if (!list.length) {
+          toast("暂无可清空的同步历史");
+          return;
+        }
+        if (!confirm("清空全部 " + list.length + " 条同步历史？不可恢复")) return;
+        await ADL.syncEngine.clearSyncHistory();
+        loadHistory();
+        toast("已清空同步历史");
+      } catch (e) {
+        toast("操作失败：" + ((e && e.message) || e), true);
+      }
     });
     $("btnCmsAdd").addEventListener("click", toggleCmsForm);
     $("cmsType").addEventListener("change", () => {

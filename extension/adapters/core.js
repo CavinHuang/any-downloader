@@ -303,3 +303,73 @@ ADL.douyinShareHtmlAwemes = (html) => {
   const router = ADL.parseLooseJson(json);
   return router ? ADL.douyinRouterAwemes(router) : [];
 };
+
+// ---------------------------------------------------------------- X 分享链接
+// 粘贴解析走 syndication 端点（cdn.syndication.twimg.com/tweet-result，无需登录，
+// 社区与 yt-dlp 同款方案）。token 为推文 id 的确定性算式，逐字移植 yt-dlp
+// _generate_syndication_token（与 X 官方 embed JS 同源）：
+//   ((id/1e15)*π).toString(36) 去 0 与 .
+// 注意 Number(19 位 id) 会丢低位精度，但 X 自己的 embed JS 同样跑在 JS double 上，
+// 同一算式得到同一 token——不要"修复"成 BigInt。
+ADL.xSyndicationToken = (id) =>
+  ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, "");
+
+// 分享文本/链接 → status id。接受 x.com / twitter.com（含 mobile）/ fxtwitter /
+// vxtwitter / fixupx，路径 /status/、/statuses/、/i/web/status/；非推文链接 null。
+// 前向锚点防止子串误判（netflix.com 含 "x.com"）。
+ADL.xStatusId = (link) => {
+  const m =
+    /(?:^|\/\/|\.)(?:mobile\.)?(?:x|twitter|fxtwitter|vxtwitter|fixupx)\.com\/(?:i\/web\/)?(?:[^/?]+\/)?status(?:es)?\/(\d+)/i.exec(
+      String(link || "")
+    );
+  return m && m[1];
+};
+
+// syndication tweet-result JSON → MediaResource[]（与 x.js 页面路径同一命名/码率约定）。
+// 响应无 extended_entities，媒体在顶层 mediaDetails[]（yt-dlp 同样重组该字段）：
+//   photo → media_url_https 升级 ?format=<ext>&name=orig；
+//   video/animated_gif → video_info.variants 取 mp4 按码率降序（m3u8/webm 不收），
+//   最高档为主资源，低码率 optional。
+ADL.xSyndicationResources = (d, statusId) => {
+  const out = [];
+  if (!d || !Array.isArray(d.mediaDetails)) return out;
+  const who = (d.user && (d.user.screen_name || d.user.name)) || statusId || "tw";
+  const headers = { Referer: "https://x.com/" };
+  const seen = new Set();
+  for (const md of d.mediaDetails) {
+    if (!md) continue;
+    if (md.type === "photo" && md.media_url_https) {
+      const ext =
+        (/\.(jpe?g|png|gif|webp)$/i.exec(md.media_url_https) || [])[1] || "jpg";
+      const url = `${md.media_url_https}?format=${ext}&name=orig`;
+      const key = url.split("?")[0];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        url,
+        kind: "image",
+        filename: `x_${who}_${statusId || "tw"}_${String(out.length + 1).padStart(2, "0")}.${ext}`,
+        headers,
+      });
+    } else if (md.video_info && md.type !== "photo") {
+      const mp4 = (md.video_info.variants || [])
+        .filter((v) => v && v.content_type === "video/mp4" && v.url)
+        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+      mp4.forEach((v, vi) => {
+        if (seen.has(v.url)) return;
+        seen.add(v.url);
+        out.push({
+          url: v.url,
+          kind: "video",
+          filename: `x_${who}${statusId ? `_${statusId}` : ""}${vi ? `_${v.bitrate || ""}` : ""}.mp4`,
+          headers,
+          optional: vi > 0,
+          meta: {
+            quality: v.bitrate ? `${Math.round(v.bitrate / 1000)}kbps` : undefined,
+          },
+        });
+      });
+    }
+  }
+  return out;
+};

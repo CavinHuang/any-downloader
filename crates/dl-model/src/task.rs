@@ -3,6 +3,9 @@ use crate::types::TaskStatus;
 /// 状态机迁移表（DESIGN §5.1）。
 /// 不变量：Done 是唯一终点且不可迁出；Verifying → Done 是唯一完成路径（Verifying 为强制阶段）。
 /// Canceled 可从除 Done/Canceled 外的任意状态进入；Failed/Canceled 均可重新入队。
+/// Paused 可失败/可重新入队：续传恢复先重新探测，签名 URL 过期等探测失败
+/// 必须能落 Failed（否则任务永远卡在暂停、错误被吞），瞬态网络错误则经
+/// Paused → Queued 走自动重试。
 pub fn can_transition(from: TaskStatus, to: TaskStatus) -> bool {
     use TaskStatus::*;
 
@@ -23,6 +26,9 @@ pub fn can_transition(from: TaskStatus, to: TaskStatus) -> bool {
             | (Downloading, Verifying)
             | (Downloading, Failed)
             | (Paused, Downloading)
+            | (Paused, Probing)
+            | (Paused, Queued)
+            | (Paused, Failed)
             | (WaitingRetry, Downloading)
             | (WaitingRetry, Probing)
             | (WaitingRetry, Paused)
@@ -116,9 +122,14 @@ mod tests {
         assert!(can_transition(Verifying, Failed));
         assert!(can_transition(Failed, Queued));
         assert!(can_transition(Canceled, Queued));
+        // 暂停恢复路径：恢复探测可见（Paused→Probing）、探测失败可落 Failed、
+        // 瞬态错误可重新入队走自动重试——缺了这三条，续传失败的任务会
+        // 永远卡在「已暂停」且错误被吞（真实事故：paused -> failed 被拒）
+        assert!(can_transition(Paused, Probing));
+        assert!(can_transition(Paused, Failed));
+        assert!(can_transition(Paused, Queued));
         // 非法路径抽查
         assert!(!can_transition(Queued, Paused));
-        assert!(!can_transition(Paused, Probing));
         assert!(!can_transition(Paused, Done));
         assert!(!can_transition(Queued, Downloading));
     }

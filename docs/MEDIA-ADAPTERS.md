@@ -19,6 +19,9 @@
 >   **0.7.0 文章操作菜单（§12）**：对齐 code-box 微信面板 12 项操作
 >   （封面/摘要/净化/原始链接/编辑/解析/MD/打包/PDF/Word/图片/海报）。
 >   单测 `node scripts/test_articles.js`（87，迷你 DOM 桩零依赖）。
+>   **粘贴 X 链接（ext 0.8.3）**：popup 粘贴口令支持 x.com/twitter.com/fxtwitter 等
+>   形态——syndication 端点匿名解析（token 为 id 确定性算式，yt-dlp 同款），详见 §3.1；
+>   `test_adapters.js` 78 断言（含 token 黄金值）。
 > - P2（Rust）：**视频号**——channels 适配器（decode_key 配对）+ 引擎 postprocess
 >   （`dl-engine::postprocess`，Isaac64-XOR 解密前 128KB；算法已用官方样本逐位对拍锁定：
 >   seed→randrsl[0]、u64 大端拼接、整体 reverse）+ `Decrypting` 任务状态 +
@@ -26,6 +29,9 @@
 >   单测 `node scripts/test_channels.js`（8 断言）。
 >   **YouTube**——`dl-ytdlp` crate（sidecar 驱动：进度行解析/取消/产出定位）+
 >   `TaskKind::Ytdlp` 托管模式 + YouTube URL 自动识别 + 设置页 `yt_dlp_path`。
+>   **yt-dlp 识别扩展到 X/Bilibili/TikTok/抖音（app v0.4.x，与 ext 0.8.3 同批）**：
+>   `is_ytdlp_host` 域名清单 + 各平台结构化单作品 id 命名（x_/bili_/tiktok_/douyin_
+>   前缀）+ 主页/空间批量防护，详见 §5.2。
 >   **安装器内置 yt-dlp + deno**（`scripts/fetch-ytdlp.ps1` 抓取、缓存于
 >   `src-tauri/binaries/*-x86_64-pc-windows-msvc.exe`，tauri externalBin 分发；
 >   解析链：设置显式路径 > 应用目录内置 > PATH；子进程 PATH 注入使 yt-dlp
@@ -168,6 +174,17 @@ interface PageContext {
 重定向 → 分享页 HTML 正则取 `window._ROUTER_DATA` → `loaderData → video_(id)/page →
 videoInfoRes → item_list[0] → video.play_addr.uri`。
 
+**粘贴 X 链接（ext 0.8.3）**：X 无 SSR、GraphQL 需登录态，background 匿名 fetch 拿不到
+`TweetDetail`——社区与 yt-dlp 同款方案改走 **syndication 端点**（`cdn.syndication.twimg.com/
+tweet-result?id=…&token=…`，无需任何鉴权）。token 为推文 id 的确定性算式（X 官方 embed JS
+同源、yt-dlp `_generate_syndication_token` 逐字移植）：`((id/1e15)*π).toString(36)` 去
+`0` 与 `.`——19 位 id 转 double 丢的低位精度 X 侧同样在丢，同一算式即同一 token（测试有
+黄金值锁定）。链接形态接受 x.com/twitter.com（含 mobile、/statuses/、/i/web/status/）与
+fxtwitter/vxtwitter/fixupx 短链；响应无 `extended_entities`，媒体取顶层 `mediaDetails[]`
+（photo 升级 name=orig，video/gif 取 mp4 按码率降序、m3u8/webm 不收），命名与码率约定与
+页面路径（`x.js`）一致。本机网络到不了 twimg 未能录制真实响应件（`x_share.json` 为按
+yt-dlp 重组来源构造的形态样本），接入真实环境后建议重录。
+
 ## 4. L3 入口 UI
 
 1. **popup 站点卡片**：当前 tab 命中适配器时顶部显示卡片（平台图标 + "检测到 1 个视频 /
@@ -198,13 +215,22 @@ videoInfoRes → item_list[0] → video.play_addr.uri`。
   有测试向量，实现后与已知样本对拍）。
 - 状态机：下载完成 → `Decrypting`（新状态，面板显示解密进度）→ `Merging/Verifying` → `Done`。
 
-### 5.2 dl-ytdlp（P2，YouTube）
+### 5.2 dl-ytdlp（P2，YouTube；ext 0.8.3 起扩展 X/Bilibili/TikTok）
 
 - 新 crate `dl-ytdlp`：sidecar 二进制（与 dl-cli/dl-server 同打包链，bundle.ps1 加 copy）。
 - 模式一（解析）：`yt-dlp -J <url>` → 抽 `formats` 直链 → 构造视频+音频两个引擎任务 +
   ffmpeg 混流（复用 HLS 混流能力）；保留多线程/断点/日志核心价值。
 - 模式二（托管，降级）：直接 `yt-dlp --newline --progress-template` 整任务托管，
   stdout 解析桥接为 EngineEvent::Progress。
+- **托管平台清单（`ytdlp_task::is_ytdlp_host`）**：YouTube 之外纳入 X/Twitter
+  （x.com/twitter.com 及子域）、Bilibili（bilibili.com 及子域、b23.tv 短链）、
+  TikTok（tiktok.com 及子域）、抖音（douyin.com 及子域、iesdouyin.com 分享页）。
+  建任务 URL 命中域名即自动 `TaskKind::Ytdlp`；命名按平台结构化单作品 id
+  （`youtube_/x_/bili_/tiktok_/douyin_` 前缀，短链无 id 退时间戳）；主页形态
+  （X 用户页、B 站用户空间、TikTok @user、抖音 /user/）与 YouTube 合集一样
+  快速失败报"无法作为单文件任务"。抖音走 yt-dlp 的分享页 SSR 提取路线，公开
+  视频可用；浏览器扩展在场时 hook 路线仍是首选（信息更全、含图集/livephoto），
+  两条路线并存。
 - 设置页：yt-dlp 路径、跟随 nightly 自动更新开关；未安装时 GUI 引导下载。
 
 ## 6. 消息协议扩展（extension ⇄）

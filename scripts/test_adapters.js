@@ -184,6 +184,44 @@ console.log("x:");
   ok(!rs2.some((r) => r.url.includes("profile_images")), "头像不入列");
 }
 
+// ---------------------------------------------- X 粘贴链接（syndication 匿名解析）
+// x_share.json 为 syndication tweet-result 形态的构造样本（字段结构以 yt-dlp
+// _call_syndication_api 的重组来源为准；本机网络到不了 twimg 暂无真实录制件，
+// 接入真实环境后建议重录替换）。
+console.log("x paste-link:");
+{
+  // 黄金值：与 yt-dlp 同款算式的输出对齐，防实现被"优化"坏（勿改用 BigInt）
+  ok(ADL.xSyndicationToken("1700000000000000001") === "44cpgxmyurn",
+    "token 黄金值（(id/1e15*π).toString(36) 去 0 与 .）", ADL.xSyndicationToken("1700000000000000001"));
+  ok(ADL.xStatusId("8.88 复制此链接，打开抖音 https://x.com/testuser/status/1700000000000000001?s=20") === "1700000000000000001",
+    "x.com /status/ 提链");
+  ok(ADL.xStatusId("https://twitter.com/testuser/statuses/999888") === "999888",
+    "twitter.com /statuses/ 旧形态");
+  ok(ADL.xStatusId("https://mobile.twitter.com/i/web/status/12345") === "12345",
+    "mobile /i/web/status/ 形态");
+  ok(ADL.xStatusId("https://fxtwitter.com/testuser/status/777") === "777",
+    "fxtwitter 短链形态");
+  ok(ADL.xStatusId("https://x.com/testuser") === null, "非推文链接 null");
+  ok(ADL.xStatusId("https://netflix.com/title/123") === null, "含 x.com 子串的站点不误判");
+
+  const sh = JSON.parse(F("x_share.json"));
+  const rs = ADL.xSyndicationResources(sh, "1700000000000000001");
+  ok(rs.length === 4, "4 项（视频 2 档 + gif 1 + 图 1；m3u8/webm 跳过）", rs.length);
+  const main = rs.find((r) => r.kind === "video" && !r.optional);
+  ok(main && main.url.endsWith("vid1.mp4") && main.meta.quality === "2176kbps",
+    "视频主资源 = 最高码率 mp4", main && main.url);
+  ok(rs.some((r) => r.optional && r.url.endsWith("pl.mp4") && r.meta.quality === "288kbps"),
+    "低码率 optional", rs.map((r) => [r.url, r.optional]));
+  const ph = rs.find((r) => r.kind === "image");
+  ok(ph && ph.url === "https://pbs.twimg.com/media/def456.jpg?format=jpg&name=orig",
+    "照片 name=orig 原图", ph && ph.url);
+  ok(rs.every((r) => r.headers.Referer === "https://x.com/"), "全部带 Referer");
+  ok(!rs.some((r) => r.url.includes("m3u8") || r.url.includes(".webm")), "m3u8 与 webm 不收");
+  ok(rs[0].filename.startsWith("x_testuser_1700000000000000001"), "文件名带作者与推文 id", rs[0].filename);
+  ok(ADL.xSyndicationResources(null, "1").length === 0 && ADL.xSyndicationResources({}, "1").length === 0,
+    "空响应安全返回空");
+}
+
 // ---------------------------------------------------------------- 微信文章
 console.log("wechat-article:");
 {

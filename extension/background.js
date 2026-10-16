@@ -798,6 +798,23 @@ async function adapterResolve(text) {
       return { ok: false, error: String(e && e.message) };
     }
   }
+  // X (Twitter)：syndication 端点匿名解析（无需登录；token 为推文 id 确定性算式，
+  // 见 core.js。走浏览器自身网络栈，用户能打开 X 就能解析）。
+  const xId = ADL.xStatusId(link);
+  if (xId) {
+    try {
+      const res = await fetch(
+        `https://cdn.syndication.twimg.com/tweet-result?id=${xId}&token=${ADL.xSyndicationToken(xId)}&lang=zh-cn`,
+        { redirect: "follow" }
+      );
+      if (!res.ok) return { ok: false, error: `syndication_http_${res.status}` };
+      const d = await res.json();
+      const resources = ADL.xSyndicationResources(d, xId);
+      return { ok: resources.length > 0, adapterId: "x", resources };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message) };
+    }
+  }
   return { ok: false, error: "unsupported_site" };
 }
 

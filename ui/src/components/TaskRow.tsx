@@ -1,29 +1,46 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api, isActive, Task } from "../api";
 import { fmtBytes, fmtSpeed } from "../App";
+import { ROW_H } from "../const";
 import { t } from "../i18n";
 import { store } from "../store";
-import { useSyncExternalStore } from "react";
+import { showToast } from "../toast";
 
-const ROW_H = 56;
-
-export function TaskRow({ task, onDetail }: { task: Task; onDetail: () => void }) {
+export function TaskRow({
+  task,
+  onDetail,
+  selected,
+  onToggleSelect,
+}: {
+  task: Task;
+  onDetail: () => void;
+  /** 是否被批量选择选中（App 持有选中集合，行内只受控渲染） */
+  selected: boolean;
+  /** shift=true 时由 App 做范围选择 */
+  onToggleSelect: (shift: boolean) => void;
+}) {
   const live = useSyncExternalStore(store.subscribe, () => store.liveOf(task.id));
   const segs = live?.segs ?? null;
-  const [opErr, setOpErr] = useState<string | null>(null);
-  // 操作错误不再静默：捕获后行内提示（3s 自动清除）
+  const [flash, setFlash] = useState(false);
+  const flashTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
+
+  // 操作错误唯一口径（A18/§4.1）：error toast + 出错行闪红 2s；行内不渲染错误文本
+  // （56px 固定行高是虚拟滚动硬约束）。捕获与自动清除的时序逻辑保留，仅换出口。
   const guard = (fn: () => Promise<unknown>) => async () => {
     try {
       await fn();
-      setOpErr(null);
     } catch (e) {
-      setOpErr(String(e));
-      setTimeout(() => setOpErr(null), 3000);
+      showToast(String(e), "error");
+      setFlash(true);
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(() => setFlash(false), 2000);
     }
     store.refresh();
   };
+
   const active = isActive(task.status);
-  const total = live ? task.total_bytes : task.total_bytes;
+  const total = task.total_bytes;
   // 优先实时值；否则用持久化的 downloaded_bytes（暂停/失败后恢复显示）
   const downloaded =
     live?.downloaded ??
@@ -32,19 +49,39 @@ export function TaskRow({ task, onDetail }: { task: Task; onDetail: () => void }
   const pct =
     total && total > 0 ? Math.min(100, Math.floor(((downloaded || 0) / total) * 100)) : 0;
   const name = task.filename || displayName(task.url);
+  // A7：exe/msi/apk/dmg 完成态显示警告，且「打开」前确认（§4.5）
+  const isExe = /\.(exe|msi|apk|dmg)$/i.test(name);
+  const indet = !total && active; // A11：总大小未知且进行中 → indeterminate（multi 不渲染，一律单条）
+
+  const openFile = guard(async () => {
+    if (task.status === "done" && isExe && !window.confirm(t("exeWarn"))) return;
+    await api.openTask(task.id);
+  });
 
   return (
     <div
-      className="row"
+      className={`row${flash ? " err-flash" : ""}${selected ? " selected" : ""}`}
       style={{ height: ROW_H }}
-      onDoubleClick={() => {
-        if (task.status === "done") {
-          api.openTask(task.id);
-        } else {
-          onDetail();
-        }
-      }}
+      title={t("doubleClickHint")}
+      onDoubleClick={onDetail}
     >
+      <div
+        className="c-sel"
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        <input
+          type="checkbox"
+          className="sel-cb"
+          checked={selected}
+          title={t("selRangeHint")}
+          aria-label={t("selRangeHint")}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect(e.shiftKey);
+          }}
+        />
+      </div>
       <div className="c-file">
         <div className="name" title={task.url}>
           <span className={`dot ${task.status}`} />
@@ -55,6 +92,11 @@ export function TaskRow({ task, onDetail }: { task: Task; onDetail: () => void }
           {task.status === "failed" && task.error ? (
             <span className="err" title={JSON.stringify(task.error)}>
               {errorCode(task.error)}
+            </span>
+          ) : null}
+          {task.status === "done" && isExe ? (
+            <span className="warn-text" title={t("exeWarn")}>
+              {t("exeWarn")}
             </span>
           ) : null}
         </div>
@@ -96,11 +138,13 @@ export function TaskRow({ task, onDetail }: { task: Task; onDetail: () => void }
             })}
           </div>
         ) : (
-          <div className="bar">
-            <div
-              className={`fill ${task.status}`}
-              style={{ width: `${task.status === "done" ? 100 : pct}%` }}
-            />
+          <div className={indet ? "bar indet" : "bar"}>
+            {!indet && (
+              <div
+                className={`fill ${task.status}`}
+                style={{ width: `${task.status === "done" ? 100 : pct}%` }}
+              />
+            )}
           </div>
         )}
         <span className="pct">
@@ -110,16 +154,12 @@ export function TaskRow({ task, onDetail }: { task: Task; onDetail: () => void }
               ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}${task.status === "done" ? "" : ` ${pct}%`}`
               : task.status === "done"
                 ? "✓"
-                : "—"}
+                : // A11：「—」时说明总大小未知，避免误读为卡死
+                  <span title={t("sizeUnknown")}>—</span>}
         </span>
       </div>
       <div className="c-speed">
         {active && bps > 0 ? fmtSpeed(bps) : ""}
-        {opErr && (
-          <div className="error" title={opErr}>
-            {opErr.length > 40 ? opErr.slice(0, 40) + "…" : opErr}
-          </div>
-        )}
       </div>
       <div className="c-actions" onClick={(e) => e.stopPropagation()}>
         {active ? (
@@ -127,31 +167,35 @@ export function TaskRow({ task, onDetail }: { task: Task; onDetail: () => void }
             <ActionBtn label={t("pause")} onClick={guard(() => api.pauseTask(task.id))} />
             <ActionBtn label={t("cancel")} onClick={guard(() => api.cancelTask(task.id))} />
           </>
+        ) : task.status === "done" ? (
+          <>
+            {/* A1：完成态固定 [打开][文件夹][详情]，行内 ≤3；删除统一收进详情抽屉 */}
+            <ActionBtn label={t("open")} onClick={openFile} />
+            <ActionBtn
+              label={t("openFolder")}
+              onClick={guard(() => api.revealTask(task.id))}
+            />
+            <ActionBtn label={t("detail")} onClick={onDetail} />
+          </>
         ) : (
           <>
-            {task.status !== "done" && (
+            {task.status === "failed" || task.status === "canceled" ? (
               <ActionBtn
-                label={task.status === "failed" || task.status === "canceled" ? t("retry") : t("start")}
                 primary
+                label={t("retry")}
                 onClick={guard(async () => {
-                  if (task.status === "failed" || task.status === "canceled") {
-                    await api.retryTask(task.id);
-                  }
+                  await api.retryTask(task.id);
                   await api.startDownload(task.id);
                 })}
               />
-            )}
-            {task.status === "done" && (
-              <ActionBtn label={t("open")} onClick={() => api.openTask(task.id)} />
+            ) : (
+              <ActionBtn
+                primary
+                label={t("start")}
+                onClick={guard(() => api.startDownload(task.id))}
+              />
             )}
             <ActionBtn label={t("detail")} onClick={onDetail} />
-            <ActionBtn
-              label={t("remove")}
-              onClick={guard(async () => {
-                if (!window.confirm(`${t("remove")} ${name}?`)) return;
-                await api.removeTask(task.id);
-              })}
-            />
           </>
         )}
       </div>

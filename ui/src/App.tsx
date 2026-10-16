@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, isActive, listenEngineEvents, Task, TaskStatus } from "./api";
 
@@ -10,6 +10,8 @@ function listenEngineEventsClip(cb: (url: string) => void) {
 }
 import { open as pickFile, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { t } from "./i18n";
+import { ROW_H } from "./const";
+import { dismissToast, getToasts, showToast, subscribeToasts } from "./toast";
 import { AddDialog } from "./components/AddDialog";
 import { DetailDrawer } from "./components/DetailDrawer";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -56,24 +58,34 @@ const CAT_META: { key: Category; icon: string; label: string }[] = [
   { key: "other", icon: "•", label: "catOther" },
 ];
 
-const ROW_H = 56;
 const OVERSCAN = 8;
 
 export function App() {
   const tasks = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const toasts = useSyncExternalStore(subscribeToasts, getToasts);
   const [filter, setFilter] = useState<Filter>("all");
   const [catFilter, setCatFilter] = useState<Category>("all");
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [detail, setDetail] = useState<Task | null>(null);
+  // A12：只存 id，详情任务渲染时从 store 快照按 id 取（打开期间实时更新）
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [inTauri, setInTauri] = useState(true);
   const [totalBps, setTotalBps] = useState(0);
   const [clipUrl, setClipUrl] = useState<string | null>(null);
+  const [clipBusy, setClipBusy] = useState(false);
   const [seenClips, setSeenClips] = useState<Set<string>>(new Set());
   const [sortKey, setSortKey] = useState<null | "name" | "size" | "speed">(null);
   const [sortDir, setSortDir] = useState<1 | -1>(1);
-  const [toast, setToast] = useState<string | null>(null);
+  // A17：批量操作进行中标记（按钮 disabled + 「…」）
+  const [busyOp, setBusyOp] = useState<string | null>(null);
+  // —— 批量选择（行多选 + 上下文操作栏）：选中集合按任务 id 持有 ——
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastIndexRef = useRef<number | null>(null); // Shift 范围选择锚点（filtered 下标）
+  const headerCbRef = useRef<HTMLInputElement | null>(null);
+  // A23：首屏骨架 = 首次加载 + 列表为空 + 延迟 300ms
+  const [firstLoad, setFirstLoad] = useState(true);
+  const [skeletonOn, setSkeletonOn] = useState(false);
 
   useEffect(() => {
     // 非 Tauri 环境（纯浏览器打开 vite 页）给出提示而非白屏
@@ -81,8 +93,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!firstLoad) return;
+    const timer = window.setTimeout(() => setSkeletonOn(true), 300); // 防毫秒级 IPC 闪烁
+    return () => window.clearTimeout(timer);
+  }, [firstLoad]);
+
+  useEffect(() => {
     if (!inTauri) return;
-    store.refresh();
+    store
+      .refresh()
+      .catch(() => {})
+      .finally(() => setFirstLoad(false));
     const poll = setInterval(() => store.pollIncremental(), 2000);
     const unlisten = listenEngineEvents((ev) => store.applyEvent(ev));
     const unclip = listenEngineEventsClip((url) => {
@@ -168,6 +189,65 @@ export function App() {
     });
   }, [tasks, filter, catFilter, search, sortKey, sortDir]);
 
+  // —— 批量选择：筛选/搜索/数据变化后剪除已不在当前列表的选中项
+  //（删除任务后随之自动清空，无需专门处理）——
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(filtered.map((x) => x.id));
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filtered]);
+
+  // Esc 清除选择（浮层打开时让位给浮层自身的关闭逻辑）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (showAdd || showSettings || detailId) return;
+      if (selected.size > 0) setSelected(new Set());
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected.size, showAdd, showSettings, detailId]);
+
+  const toggleSelect = (task: Task, index: number, shift: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (shift && lastIndexRef.current !== null) {
+        // 范围语义跟随锚点行：锚点→当前行整体 选/清（以当前行为准）
+        const anchor = lastIndexRef.current;
+        const [a, b] = [Math.min(anchor, index), Math.max(anchor, index)];
+        const add = !prev.has(task.id);
+        for (let i = a; i <= b; i += 1) {
+          const id = filtered[i]?.id;
+          if (id == null) continue;
+          if (add) next.add(id);
+          else next.delete(id);
+        }
+      } else if (prev.has(task.id)) {
+        next.delete(task.id);
+      } else {
+        next.add(task.id);
+      }
+      return next;
+    });
+    lastIndexRef.current = index;
+  };
+
+  const allSelected = filtered.length > 0 && filtered.every((x) => selected.has(x.id));
+  const someSelected = selected.size > 0 && !allSelected;
+  useEffect(() => {
+    if (headerCbRef.current) headerCbRef.current.indeterminate = someSelected;
+  }, [someSelected]);
+
+  const toggleAll = () => {
+    setSelected((prev) =>
+      allSelected ? new Set<string>() : new Set([...prev, ...filtered.map((x) => x.id)])
+    );
+    lastIndexRef.current = null;
+  };
+
   const toggleSort = (key: "name" | "size" | "speed") => {
     if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
     else {
@@ -175,6 +255,11 @@ export function App() {
       setSortDir(1);
     }
   };
+
+  const sortAttr = (key: "name" | "size" | "speed") =>
+    sortKey === key ? (sortDir === 1 ? "ascending" : "descending") : "none";
+  const arrow = (key: "name" | "size" | "speed") =>
+    sortKey === key ? (sortDir === 1 ? " ▲" : " ▼") : "";
 
   // —— 虚拟滚动（固定行高窗口化，万级行 60fps）
   const [scrollTop, setScrollTop] = useState(0);
@@ -203,6 +288,145 @@ export function App() {
     return c;
   }, [tasks]);
 
+  // A12：详情任务实时取自 store 快照
+  const detailTask = useMemo(
+    () => (detailId ? tasks.find((x) => x.id === detailId) ?? null : null),
+    [tasks, detailId]
+  );
+
+  // —— A17：批量操作统一 Promise.allSettled + 计数 toast + 按钮忙态
+  const runBatch = async (op: string, fn: () => Promise<void>) => {
+    setBusyOp(op);
+    try {
+      await fn();
+    } finally {
+      setBusyOp(null);
+    }
+  };
+  const countOk = (rs: PromiseSettledResult<unknown>[]) =>
+    rs.filter((r) => r.status === "fulfilled").length;
+  // 失败项不静默（§1）：ok < total 时追加「失败 k」并转 warn 语义
+  const toastBatch = (msg: string, ok: number, total: number) => {
+    const fail = total - ok;
+    showToast(
+      fail > 0 ? `${msg} · ${t("failedN").replace("{n}", String(fail))}` : msg,
+      fail > 0 ? "warn" : "success"
+    );
+  };
+
+  const pauseAll = () =>
+    runBatch("pauseAll", async () => {
+      const targets = tasks.filter((x) => x.status === "downloading");
+      const rs = await Promise.allSettled(targets.map((x) => api.pauseTask(x.id)));
+      store.refresh();
+      toastBatch(t("pausedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+    });
+
+  const resumeAll = () =>
+    runBatch("resumeAll", async () => {
+      const targets = tasks.filter((x) => x.status === "paused");
+      const rs = await Promise.allSettled(targets.map((x) => api.startDownload(x.id)));
+      store.refresh();
+      toastBatch(t("resumedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+    });
+
+  const retryAllFailed = () =>
+    runBatch("retryAll", async () => {
+      const targets = filtered.filter((x) => x.status === "failed");
+      const rs = await Promise.allSettled(
+        targets.map(async (x) => {
+          await api.retryTask(x.id);
+          await api.startDownload(x.id);
+        })
+      );
+      store.refresh();
+      toastBatch(t("retriedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+    });
+
+  // A2：清空记录确认——文案含数量与后果（§4.5 破坏性-批量）
+  const clearDone = () =>
+    runBatch("clearDone", async () => {
+      const targets = filtered.filter((x) => x.status === "done");
+      if (targets.length === 0) return;
+      if (!window.confirm(t("clearDoneConfirm").replace("{n}", String(targets.length)))) return;
+      const rs = await Promise.allSettled(targets.map((x) => api.removeTask(x.id)));
+      store.refresh();
+      toastBatch(t("clearedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+    });
+
+  // —— 选中项批量操作：targets = 选中 ∩ 适用状态；空集给中性提示不静默（§3.8）
+  const runSelected = (
+    op: string,
+    eligible: (x: Task) => boolean,
+    action: (x: Task) => Promise<unknown>,
+    msgKey: string
+  ) =>
+    runBatch(op, async () => {
+      const targets = filtered.filter((x) => selected.has(x.id) && eligible(x));
+      if (targets.length === 0) {
+        showToast(t("noEligible"), "warn");
+        return;
+      }
+      const rs = await Promise.allSettled(targets.map(action));
+      store.refresh();
+      toastBatch(t(msgKey).replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+    });
+
+  const selStart = () =>
+    runSelected(
+      "selStart",
+      (x) => x.status === "queued" || x.status === "paused" || x.status === "waiting_retry",
+      (x) => api.startDownload(x.id),
+      "startedN"
+    );
+  const selPause = () =>
+    runSelected("selPause", (x) => isActive(x.status), (x) => api.pauseTask(x.id), "pausedN");
+  const selRetry = () =>
+    runSelected(
+      "selRetry",
+      (x) => x.status === "failed" || x.status === "canceled",
+      async (x) => {
+        await api.retryTask(x.id);
+        await api.startDownload(x.id);
+      },
+      "retriedN"
+    );
+  const selCancel = () =>
+    runSelected("selCancel", (x) => isActive(x.status), (x) => api.cancelTask(x.id), "canceledN");
+  // 删除：含数量确认，注明文件保留（§4.5 破坏性-批量）；成功后清空选择
+  const selRemove = () =>
+    runBatch("selRemove", async () => {
+      const targets = filtered.filter((x) => selected.has(x.id));
+      if (targets.length === 0) return;
+      if (!window.confirm(t("removeConfirm").replace("{n}", String(targets.length)))) return;
+      const rs = await Promise.allSettled(targets.map((x) => api.removeTask(x.id)));
+      store.refresh();
+      toastBatch(t("removedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+      setSelected(new Set());
+    });
+
+  // A4：剪贴板「下载」失败不再无声（task_exists → duplicate 文案）
+  const addFromClip = async () => {
+    const url = clipUrl;
+    if (!url) return;
+    setClipBusy(true);
+    try {
+      const task = await api.addTask({ url });
+      await api.startDownload(task.id);
+      setClipUrl(null);
+      store.refresh();
+    } catch (e) {
+      const msg = String(e);
+      const dup = msg.includes("task_exists");
+      // 重复 → warn（跳过语义）；其他失败 → error（操作失败带原因，§3.8）
+      showToast(dup ? t("duplicate") : msg, dup ? "warn" : "error");
+    } finally {
+      setClipBusy(false);
+    }
+  };
+
+  const showSkeleton = inTauri && firstLoad && tasks.length === 0 && skeletonOn;
+
   return (
     <div className="app">
       <header className="toolbar">
@@ -221,9 +445,12 @@ export function App() {
               filters: [{ name: "JSON", extensions: ["json"] }],
             });
             if (!path) return;
-            const n = await api.exportTasks(path);
-            setToast(t("exported").replace("{n}", String(n)));
-            setTimeout(() => setToast(null), 2500);
+            try {
+              const n = await api.exportTasks(path);
+              showToast(t("exported").replace("{n}", String(n)), "success");
+            } catch (e) {
+              showToast(String(e), "error");
+            }
           }}
         >
           {t("exportTasks")}
@@ -235,10 +462,13 @@ export function App() {
               filters: [{ name: "JSON", extensions: ["json"] }],
             });
             if (!path || Array.isArray(path)) return;
-            const n = await api.importTasks(path);
-            setToast(t("imported").replace("{n}", String(n)));
-            setTimeout(() => setToast(null), 2500);
-            store.refresh();
+            try {
+              const n = await api.importTasks(path);
+              showToast(t("imported").replace("{n}", String(n)), "success");
+              store.refresh();
+            } catch (e) {
+              showToast(String(e), "error");
+            }
           }}
         >
           {t("importTasks")}
@@ -249,8 +479,12 @@ export function App() {
           placeholder={t("search")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setSearch("");
+          }}
         />
-        <span className="total-speed">
+        {/* 高频变化不播报（§5.1 工具栏 P2） */}
+        <span className="total-speed" aria-live="off">
           {totalBps > 0 ? `${fmtSpeed(totalBps)}` : ""}
         </span>
       </header>
@@ -271,41 +505,38 @@ export function App() {
               <button
                 key={key}
                 className={filter === key ? "side-item active" : "side-item"}
+                title={label}
                 onClick={() => setFilter(key)}
               >
                 <span className="side-icon">{icon}</span>
-                {label}
+                <span className="side-label">{label}</span>
                 <span className="side-count">{counts[key]}</span>
               </button>
             ))}
             <div className="side-actions">
               <button
-                onClick={async () => {
-                  for (const x of tasks) {
-                    if (x.status === "downloading") {
-                      try {
-                        await api.pauseTask(x.id);
-                      } catch {}
-                    }
-                  }
-                  store.refresh();
-                }}
+                onClick={pauseAll}
+                disabled={busyOp === "pauseAll"}
+                title={t("pauseAll")}
+                aria-label={t("pauseAll")}
               >
-                全部暂停
+                <span aria-hidden="true">⏸</span>
+                <span className="side-label">
+                  {t("pauseAll")}
+                  {busyOp === "pauseAll" ? "…" : ""}
+                </span>
               </button>
               <button
-                onClick={async () => {
-                  for (const x of tasks) {
-                    if (x.status === "paused") {
-                      try {
-                        await api.startDownload(x.id);
-                      } catch {}
-                    }
-                  }
-                  store.refresh();
-                }}
+                onClick={resumeAll}
+                disabled={busyOp === "resumeAll"}
+                title={t("resumeAll")}
+                aria-label={t("resumeAll")}
               >
-                全部恢复
+                <span aria-hidden="true">▶</span>
+                <span className="side-label">
+                  {t("resumeAll")}
+                  {busyOp === "resumeAll" ? "…" : ""}
+                </span>
               </button>
             </div>
           </div>
@@ -315,10 +546,11 @@ export function App() {
               <button
                 key={key}
                 className={catFilter === key ? "side-item active" : "side-item"}
+                title={t(label as never)}
                 onClick={() => setCatFilter(key)}
               >
                 <span className="side-icon">{icon}</span>
-                {t(label as never)}
+                <span className="side-label">{t(label as never)}</span>
                 <span className="side-count">
                   {key === "all" ? tasks.length : catCounts[key] || 0}
                 </span>
@@ -329,99 +561,150 @@ export function App() {
 
         <main className="main">
           {!inTauri && <div className="banner">{t("needTauri")}</div>}
-          {toast && <div className="banner toast">{toast}</div>}
-          {clipUrl && (
-            <div className="banner clip">
-              <span className="clip-url">{clipUrl}</span>
+          {/* toast（§3.8）：success 2.5s / error 5s，可手动关；error 用 role=alert */}
+          {toasts.map((x) => (
+            <div
+              key={x.id}
+              className={`banner toast ${x.kind}`}
+              role={x.kind === "error" ? "alert" : "status"}
+            >
+              <span className="banner-text">{x.text}</span>
               <button
-                className="primary"
-                onClick={async () => {
-                  const url = clipUrl;
-                  setClipUrl(null);
-                  const task = await api.addTask({ url });
-                  await api.startDownload(task.id);
-                  store.refresh();
-                }}
+                className="banner-close"
+                aria-label={t("close")}
+                onClick={() => dismissToast(x.id)}
               >
-                {t("download")}
-              </button>
-              <button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
-              <button className="ghost" onClick={() => setClipUrl(null)}>
                 ×
               </button>
             </div>
+          ))}
+          {clipUrl && (
+            <div className="banner clip" role="status" aria-live="polite">
+              <div className="clip-info">
+                <b>{t("clipboardFound")}</b>
+                <span className="clip-url" title={clipUrl}>
+                  {clipUrl}
+                </span>
+              </div>
+              {/* A16：横幅动作降级 default（primary 每容器 ≤1，工具栏已有）；去掉与「忽略」重复的 × */}
+              <button onClick={addFromClip} disabled={clipBusy}>
+                {t("download")}
+                {clipBusy ? "…" : ""}
+              </button>
+              <button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
+            </div>
           )}
 
-          <div className="maintool">
-            <span className="crumb">
-              {t(filter as never)}
-              {catFilter !== "all" ? ` · ${t(("cat" + cap(catFilter)) as never)}` : ""}
-            </span>
-            <div className="spacer" />
-            {filter === "failed" && counts.failed > 0 && (
-              <button
-                className="batch"
-                onClick={async () => {
-                  for (const x of filtered) {
-                    if (x.status !== "failed") continue;
-                    try {
-                      await api.retryTask(x.id);
-                      await api.startDownload(x.id);
-                    } catch {
-                      // 单个失败不中断
-                    }
-                  }
-                  store.refresh();
-                }}
-              >
-                {t("retryAllFailed")}
+          {selected.size > 0 ? (
+            /* 上下文批量操作栏：替代面包屑行（选中态下导航信息让位给操作） */
+            <div
+              className="batchbar"
+              role="toolbar"
+              aria-label={t("selectedN").replace("{n}", String(selected.size))}
+            >
+              <span className="sel-count">
+                {t("selectedN").replace("{n}", String(selected.size))}
+              </span>
+              <button onClick={selStart} disabled={busyOp !== null}>
+                {t("start")}
+                {busyOp === "selStart" ? "…" : ""}
               </button>
-            )}
-            {filter === "done" && counts.done > 0 && (
-              <button
-                className="batch"
-                onClick={async () => {
-                  for (const x of filtered) {
-                    if (x.status !== "done") continue;
-                    try {
-                      await api.removeTask(x.id);
-                    } catch {
-                      // 单个失败不中断
-                    }
-                  }
-                  store.refresh();
-                }}
-              >
-                {t("clearDone")}
+              <button onClick={selPause} disabled={busyOp !== null}>
+                {t("pause")}
+                {busyOp === "selPause" ? "…" : ""}
               </button>
-            )}
-          </div>
+              <button onClick={selRetry} disabled={busyOp !== null}>
+                {t("retry")}
+                {busyOp === "selRetry" ? "…" : ""}
+              </button>
+              <button onClick={selCancel} disabled={busyOp !== null}>
+                {t("cancel")}
+                {busyOp === "selCancel" ? "…" : ""}
+              </button>
+              <button className="danger" onClick={selRemove} disabled={busyOp !== null}>
+                {t("remove")}
+                {busyOp === "selRemove" ? "…" : ""}
+              </button>
+              <div className="spacer" />
+              <button
+                onClick={() => setSelected(new Set())}
+                disabled={busyOp !== null}
+              >
+                {t("clearSel")}
+              </button>
+            </div>
+          ) : (
+            <div className="maintool">
+              <span className="crumb">
+                {t(filter as never)}
+                {catFilter !== "all" ? ` · ${t(("cat" + cap(catFilter)) as never)}` : ""}
+              </span>
+              <div className="spacer" />
+              {filter === "failed" && counts.failed > 0 && (
+                <button
+                  className="batch"
+                  onClick={retryAllFailed}
+                  disabled={busyOp === "retryAll"}
+                >
+                  {t("retryAllFailed")}
+                  {busyOp === "retryAll" ? "…" : ""}
+                </button>
+              )}
+              {filter === "done" && counts.done > 0 && (
+                <button
+                  className="batch"
+                  onClick={clearDone}
+                  disabled={busyOp === "clearDone"}
+                >
+                  {t("clearDone")}
+                  {busyOp === "clearDone" ? "…" : ""}
+                </button>
+              )}
+            </div>
+          )}
 
           <div className="table-head">
-            <span
-              className="c-file sortable"
+            <div className="c-sel">
+              <input
+                ref={headerCbRef}
+                type="checkbox"
+                className="sel-cb"
+                checked={allSelected}
+                onChange={toggleAll}
+                title={t("selectAll")}
+                aria-label={t("selectAll")}
+              />
+            </div>
+            {/* A5：三个可排序列头用 button + aria-sort；「操作」列头还原纯文本；
+                大小排序挂在「进度」列头 */}
+            <button
+              className="c-file th-sort"
+              aria-sort={sortAttr("name")}
+              title={t("sortTip")}
               onClick={() => toggleSort("name")}
-              title="↕"
             >
               {t("colFile")}
-              {sortKey === "name" ? (sortDir === 1 ? " ▲" : " ▼") : ""}
-            </span>
-            <span className="c-progress">{t("colProgress")}</span>
-            <span
-              className="c-speed sortable"
+              {arrow("name")}
+            </button>
+            <button
+              className="c-progress th-sort"
+              aria-sort={sortAttr("size")}
+              title={t("sortBySize")}
+              onClick={() => toggleSort("size")}
+            >
+              {t("colProgress")}
+              {sortKey === "size" ? ` · ${t("size")}${arrow("size")}` : ""}
+            </button>
+            <button
+              className="c-speed th-sort"
+              aria-sort={sortAttr("speed")}
+              title={t("sortTip")}
               onClick={() => toggleSort("speed")}
-              title="↕"
             >
               {t("colSpeed")}
-              {sortKey === "speed" ? (sortDir === 1 ? " ▲" : " ▼") : ""}
-            </span>
-            <span
-              className="c-actions sortable"
-              onClick={() => toggleSort("size")}
-              title="按大小排序"
-            >
-              {sortKey === "size" ? (sortDir === 1 ? "大小 ▲" : "大小 ▼") : t("colActions")}
-            </span>
+              {arrow("speed")}
+            </button>
+            <span className="c-actions">{t("colActions")}</span>
           </div>
 
           <div
@@ -433,16 +716,60 @@ export function App() {
               }
             }}
           >
-            {filtered.length === 0 ? (
-              <div className="empty">{t("emptyList")}</div>
+            {showSkeleton ? (
+              // A23：3 行灰条骨架，数据到达即撤（轮询/局部刷新绝不显示）
+              <div aria-hidden="true">
+                {[56, 38, 46].map((w, i) => (
+                  <div className="skel-row" key={i}>
+                    <div className="skel" style={{ width: `${w}%` }} />
+                    <div className="skel" style={{ width: "22%" }} />
+                    <div className="skel" style={{ width: "110px" }} />
+                  </div>
+                ))}
+              </div>
+            ) : inTauri && firstLoad ? (
+              // 首载 300ms 窗口：宁空勿假，不渲染稍纵即逝的误导性空态（A23）
+              null
+            ) : filtered.length === 0 ? (
+              // A10：空态三分，各带一个出口
+              search.trim() ? (
+                <div className="empty">
+                  {t("emptySearch")}
+                  <button className="btn" onClick={() => setSearch("")}>
+                    {t("clearSearch")}
+                  </button>
+                </div>
+              ) : tasks.length === 0 ? (
+                <div className="empty">
+                  {t("emptyList")}
+                  <button className="btn primary" onClick={() => setShowAdd(true)}>
+                    ＋ {t("newTask")}
+                  </button>
+                </div>
+              ) : (
+                <div className="empty">
+                  {t("emptyFiltered")}
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      setFilter("all");
+                      setCatFilter("all");
+                    }}
+                  >
+                    {t("clearFilter")}
+                  </button>
+                </div>
+              )
             ) : (
               <div style={{ height: filtered.length * ROW_H, position: "relative" }}>
                 <div style={{ transform: `translateY(${start * ROW_H}px)` }}>
-                  {visible.map((task) => (
+                  {visible.map((task, vi) => (
                     <TaskRow
                       key={task.id}
                       task={task}
-                      onDetail={() => setDetail(task)}
+                      onDetail={() => setDetailId(task.id)}
+                      selected={selected.has(task.id)}
+                      onToggleSelect={(shift) => toggleSelect(task, start + vi, shift)}
                     />
                   ))}
                 </div>
@@ -462,17 +789,16 @@ export function App() {
         />
       )}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
-      {detail && (
+      {detailId && detailTask && (
         <DetailDrawer
-          key={detail.id}
-          task={detail}
-          onClose={() => setDetail(null)}
+          key={detailTask.id}
+          task={detailTask}
+          onClose={() => setDetailId(null)}
           onChanged={(nt) => {
             store.upsert(nt);
-            setDetail(nt);
           }}
           onRemoved={() => {
-            setDetail(null);
+            setDetailId(null);
             store.refresh();
           }}
         />

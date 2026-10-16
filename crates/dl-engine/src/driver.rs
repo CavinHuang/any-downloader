@@ -246,10 +246,14 @@ pub(crate) async fn run(
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
 ) -> Res<Task> {
     let task = engine.require(task_id).await?;
-    // Downloading 入口 = 进程崩溃（kill -9）后的残留状态：journal 恢复续传（DESIGN §5.5）
+    // Downloading 入口 = 进程崩溃（kill -9）后的残留状态：journal 恢复续传（DESIGN §5.5）；
+    // WaitingRetry 入口 = 自动重试退避期间应用重启的残留：等价重新入队（→探测）
     if !matches!(
         task.status,
-        TaskStatus::Queued | TaskStatus::Paused | TaskStatus::Downloading
+        TaskStatus::Queued
+            | TaskStatus::Paused
+            | TaskStatus::WaitingRetry
+            | TaskStatus::Downloading
     ) {
         return Err(DownloadError::new(
             ErrorKind::InvalidTransition {
@@ -342,14 +346,17 @@ pub(crate) async fn run(
 async fn phase(ctx: Arc<Ctx>, mirrors_raw: &[String]) -> Result<(), DriveErr> {
     let task = ctx.engine.require(&ctx.task_id).await.map_err(drive_from)?;
     match task.status {
-        TaskStatus::Queued => {
+        // Queued：新任务；WaitingRetry：退避残留；Paused：恢复前重新探测
+        //（迁移表放行 Paused→Probing，探测期间状态如实显示「探测中」，
+        //  探测失败才能可见地落 Failed 而不是卡死在暂停）
+        TaskStatus::Queued | TaskStatus::WaitingRetry | TaskStatus::Paused => {
             ctx.engine
                 .transition(&ctx.task_id, TaskStatus::Probing, None)
                 .await
                 .map_err(drive_from)?;
         }
-        // Paused：正常暂停；Downloading：崩溃残留，journal 恢复
-        TaskStatus::Paused | TaskStatus::Downloading => {}
+        // Downloading：崩溃残留，journal 恢复
+        TaskStatus::Downloading => {}
         s => {
             return Err(DriveErr::Fatal(
                 ErrorKind::InvalidTransition {

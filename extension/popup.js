@@ -1,9 +1,9 @@
 // popup：本页资源（过滤/多选批量推送）+ 主程序任务（实时进度/控制）
 const ERROR_TEXT = {
-  app_not_running: "主程序未运行（先启动 dl-app）",
+  app_not_running: "主程序未运行——请先启动桌面端",
   timeout: "主程序响应超时",
   invalid_params: "参数被拒绝",
-  app_not_registered: "NM 未注册（先运行 scripts/register-nm-host.ps1）",
+  app_not_registered: "浏览器连接未授权——请打开桌面端完成连接授权后重试",
 };
 
 const STATUS_TEXT = {
@@ -388,8 +388,11 @@ async function pushSelected() {
   const note = document.createElement("span");
   note.className = fail > 0 ? "result-skip" : "result-ok";
   note.style.fontSize = "11px";
+  // E4：ok 已含重复（dup），直接报 ok 并注明，不再做 ok-fail+dup 的重复计数
   note.textContent =
-    fail > 0 ? `成功 ${ok - fail + dup} · 失败 ${fail}` : `已推送 ${ok} 项`;
+    fail > 0
+      ? `成功 ${ok}（含重复 ${dup}）· 失败 ${fail}`
+      : `已推送 ${ok} 项`;
   bar.prepend(note);
   setTimeout(() => note.remove(), 3000);
 }
@@ -397,8 +400,28 @@ async function pushSelected() {
 // ---------------------------------------------------------------- 主程序任务
 
 const POLL_MS = 1000;
+const PING_MS = 5000;
 let taskTimer = null;
+let pingTimer = null;
+let pollFailures = 0;
+let offlineMode = false;
+let view = "res"; // 显式声明（原先靠隐式全局）
 const prevBytes = new Map();
+
+// E7/E2：状态 pill 随每轮轮询更新（不再只开窗检测一次）
+function setStatusPill(ok) {
+  const el = document.getElementById("status");
+  el.textContent = ok ? "已连接" : "未运行";
+  el.classList.toggle("ok", ok);
+  el.classList.toggle("err", !ok);
+  el.title = ok ? "主程序连接正常" : "主程序未连接，点击查看指引";
+}
+
+function showGuide(open) {
+  const guide = document.getElementById("offline-guide");
+  guide.classList.toggle("hidden", !open);
+  if (open) guide.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
 function computeSpeed(t) {
   const now = t.downloaded_bytes || 0;
@@ -499,36 +522,119 @@ function renderTask(t, bps) {
 async function renderTasks() {
   const stats = document.getElementById("tasks-stats");
   const el = document.getElementById("task-list");
-  const resp = await send({
-    type: "nm",
-    method: "task.list",
-    params: {},
-  });
+  // E2：send 包 try/catch——主程序中途退出不再产生未捕获 rejection，
+  // 而是进入离线态（连续失败 ≥2 次）
+  let resp = null;
+  try {
+    resp = await send({
+      type: "nm",
+      method: "task.list",
+      params: {},
+    });
+  } catch (_) {
+    resp = null;
+  }
   if (!resp || !resp.ok) {
-    stats.textContent = "";
-    el.innerHTML = '<div class="empty">主程序未运行，无法获取任务</div>';
+    pollFailures += 1;
+    // E2：单次失败可能是瞬时抖动，保持原列表不打扰用户；
+    // 连续失败 ≥2 次（或已在离线态）才显示离线 UI 并改 5s ping 探活
+    if (pollFailures >= 2 || offlineMode) {
+      if (!offlineMode) enterOfflineMode();
+      renderOfflineState(stats, el);
+    }
     return;
   }
+  pollFailures = 0;
+  if (offlineMode) exitOffline();
+  setStatusPill(true);
+
   const tasks = resp.result || [];
   const rank = (t) => (ACTIVE.includes(t.status) ? 0 : 1);
-  const shown = tasks
-    .sort((a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at)
-    .slice(0, 30);
+  const sorted = tasks.sort(
+    (a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at
+  );
+  const shown = sorted.slice(0, 30);
+  const truncated = sorted.length > shown.length;
 
+  // E3：每任务每轮只算一次速度存入 Map，总速求和与卡片渲染共读一份
+  //（原先 renderTask 内二次调用时 prev 刚更新、dt≈0，速度恒为 0）
+  const speedMap = new Map();
   const activeTasks = shown.filter((x) => ACTIVE.includes(x.status));
   let totalBps = 0;
-  for (const t of activeTasks) totalBps += computeSpeed(t);
-  stats.textContent = activeTasks.length
-    ? `${activeTasks.length} 个任务进行中 · 总速度 ${fmtSpeed(totalBps)}`
-    : "无进行中的任务";
-  stats.style.color = activeTasks.length ? "var(--accent)" : "var(--muted)";
+  for (const t of activeTasks) {
+    const bps = computeSpeed(t);
+    speedMap.set(t.id, bps);
+    totalBps += bps;
+  }
+  stats.textContent =
+    activeTasks.length
+      ? `${activeTasks.length} 个任务进行中 · 总速度 ${fmtSpeed(totalBps)}`
+      : "无进行中的任务";
+  if (truncated) stats.textContent += ` · 共 ${tasks.length} 条`;
+  stats.style.color = activeTasks.length ? "var(--accent-ink)" : "var(--muted)";
 
   el.innerHTML = "";
   if (shown.length === 0) {
     el.innerHTML = '<div class="empty">主程序暂无任务</div>';
     return;
   }
-  for (const t of shown) el.append(renderTask(t, computeSpeed(t)));
+  for (const t of shown) el.append(renderTask(t, speedMap.get(t.id) || 0));
+  // E10：30 条截断出口（不新建打开主程序的通道，克制）
+  if (truncated) {
+    const trunc = document.createElement("div");
+    trunc.className = "list-trunc";
+    trunc.textContent = `仅显示最近 ${shown.length} 条 · 全部任务请在主程序窗口查看`;
+    el.append(trunc);
+  }
+}
+
+// E2：离线态——连续失败 ≥2 次暂停 1s 任务轮询，改 5s ping 探活；成功即恢复 1s 轮询
+function renderOfflineState(stats, el) {
+  setStatusPill(false);
+  stats.textContent = "";
+  // 用 data-offline 专属标识去重：泛查 .empty 会把「主程序暂无任务」误当成离线空态，
+  // 导致零任务时掉线永远换不上离线提示
+  if (el.querySelector("[data-offline]")) return;
+  el.innerHTML =
+    '<div class="empty" data-offline="1">主程序未运行——启动后将自动恢复连接<br>' +
+    '<button id="btn-guide" class="chip-f" style="margin-top:8px">查看连接指引</button></div>';
+  document
+    .getElementById("btn-guide")
+    .addEventListener("click", () => showGuide(true));
+}
+
+function enterOfflineMode() {
+  offlineMode = true;
+  clearInterval(taskTimer);
+  taskTimer = null;
+  clearInterval(pingTimer);
+  pingTimer = setInterval(pingProbe, PING_MS);
+}
+
+async function pingProbe() {
+  try {
+    const r = await send({ type: "ping" }, 4000);
+    if (r && r.ok) {
+      pollFailures = 0;
+      exitOffline();
+      renderTasks(); // 恢复后立即刷新，兑现「启动后自动恢复」
+    }
+  } catch (_) {}
+}
+
+function exitOffline() {
+  offlineMode = false;
+  clearInterval(pingTimer);
+  pingTimer = null;
+  setStatusPill(true);
+  startTaskPoll();
+}
+
+function startTaskPoll() {
+  clearInterval(taskTimer);
+  taskTimer = setInterval(() => {
+    if (view === "tasks" && !offlineMode) renderTasks();
+  }, POLL_MS);
 }
 
 function escapeHtml(s) {
@@ -541,7 +647,12 @@ function escapeHtml(s) {
 
 async function renderTakeoverInfo() {
   const el = document.getElementById("takeover-info");
-  const data = await send({ type: "takeover-data" });
+  let data = null;
+  try {
+    data = await send({ type: "takeover-data" });
+  } catch (_) {
+    return; // 主程序不可达时静默退出（离线态由任务区统一呈现）
+  }
   if (!data) return;
   const hosts = data.ignoredHosts || [];
   const parts = [];
@@ -553,7 +664,9 @@ async function renderTakeoverInfo() {
     x.textContent = "×";
     x.title = "恢复接管此站点";
     x.addEventListener("click", async () => {
-      await send({ type: "unignore-host", host: h });
+      try {
+        await send({ type: "unignore-host", host: h });
+      } catch (_) {}
       renderTakeoverInfo();
     });
     chip.append(x);
@@ -574,7 +687,9 @@ async function renderTakeoverInfo() {
     b.textContent = "忽略此站点";
     b.style.cssText = "font-size:11px;padding:1px 8px";
     b.addEventListener("click", async () => {
-      await send({ type: "ignore-host", host: last.host });
+      try {
+        await send({ type: "ignore-host", host: last.host });
+      } catch (_) {}
       renderTakeoverInfo();
     });
     row.append(b);
@@ -592,10 +707,7 @@ function switchToTasks() {
   document.getElementById("tasks").classList.remove("hidden");
   document.getElementById("batchbar").classList.add("hidden");
   renderTasks();
-  clearInterval(taskTimer);
-  taskTimer = setInterval(() => {
-    if (view === "tasks") renderTasks();
-  }, POLL_MS);
+  startTaskPoll();
 }
 
 function switchToRes() {
@@ -653,6 +765,13 @@ function init() {
     settingsEl.classList.toggle("hidden");
     document.getElementById("btn-settings").classList.toggle("active", opening);
     if (opening) settingsEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+  // E7：未运行 pill 可点击 → 展开用户向连接指引（替换开发者术语）
+  document.getElementById("status").addEventListener("click", () => {
+    const pill = document.getElementById("status");
+    if (!pill.classList.contains("err")) return;
+    const guide = document.getElementById("offline-guide");
+    showGuide(guide.classList.contains("hidden"));
   });
 
   // —— 嗅探配置（storage.local.sniffCfg，与 background 即时共享）
@@ -727,8 +846,14 @@ function init() {
     pasteInput.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") pasteGo.click();
     });
+    // E6：popup 打开即聚焦头牌操作——粘贴框，省一步点击
+    pasteInput.focus();
   }
 }
+
+const SKELETON_HTML = '<div class="skel"></div>'.repeat(3);
+let resLoaded = false;
+let tasksLoaded = false;
 
 async function start() {
   try {
@@ -745,19 +870,32 @@ async function start() {
     document.body.prepend(b);
   }
 
+  // E9：首屏骨架——仅首次加载且列表为空，延迟 300ms 出现，数据到达即撤
+  const listEl = document.getElementById("list");
+  const taskListEl = document.getElementById("task-list");
+  listEl.textContent = "";
+  taskListEl.textContent = "";
+  resLoaded = false;
+  tasksLoaded = false;
+  setTimeout(() => {
+    if (!resLoaded) listEl.innerHTML = SKELETON_HTML;
+  }, 300);
+  setTimeout(() => {
+    if (!tasksLoaded) taskListEl.innerHTML = SKELETON_HTML;
+  }, 300);
+
+  // 状态 pill 首检；此后随每轮轮询更新（E2）
+  let appOnline = false;
+  try {
+    const ping = await send({ type: "ping" });
+    appOnline = !!(ping && ping.ok);
+  } catch (_) {}
+  setStatusPill(appOnline);
+
   let tab = null;
   try {
     tab = await getActiveTab();
-    const ping = await send({ type: "ping" });
-    const statusEl = document.getElementById("status");
-    statusEl.textContent = ping && ping.ok ? "已连接" : "未运行";
-    statusEl.classList.add(ping && ping.ok ? "ok" : "err");
-  } catch (_) {
-    const statusEl = document.getElementById("status");
-    statusEl.textContent = "未运行";
-    statusEl.classList.add("err");
-  }
-
+  } catch (_) {}
   if (tab) {
     try {
       const resp = await send({ type: "list", tabId: tab.id });
@@ -765,14 +903,14 @@ async function start() {
         resItems = resp.items.sort((a, b) => (b.bytes || 0) - (a.bytes || 0));
       }
     } catch (_) {}
-    renderFilters();
-    renderResList();
     renderSiteCard(tab.id); // 站点适配卡片（独立容错，失败不影响嗅探列表）
   }
+  resLoaded = true; // 数据到达（或确认无 tab 数据）即撤骨架
+  renderFilters();
+  renderResList();
 
-  try {
-    await renderTasks();
-  } catch (_) {}
+  await renderTasks();
+  tasksLoaded = true;
   try {
     await renderTakeoverInfo();
   } catch (_) {}

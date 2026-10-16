@@ -1,9 +1,15 @@
-//! YouTube 任务驱动（yt-dlp 托管模式，docs/MEDIA-ADAPTERS.md §5.2 模式二）。
+//! yt-dlp 任务驱动（yt-dlp 托管模式，docs/MEDIA-ADAPTERS.md §5.2 模式二）。
 //!
 //! 引擎把整条下载交给 yt-dlp 进程（含 PO Token/nsig 处理与音视频合并），
 //! 进度行桥接为 EngineEvent::Progress；完成文件复用 finalize 的冲突处理与
 //! 改名链路。解析模式（直链喂多线程引擎）留作后续优化——托管模式正确性
-//! 由 yt-dlp 保证，不受 YouTube 风控变化影响。
+//! 由 yt-dlp 保证，不受平台风控变化影响。
+//!
+//! 平台识别：YouTube 之外扩展 X/Twitter、Bilibili、TikTok、抖音（域名 +
+//! 结构化单作品 URL 判定，见 [`is_ytdlp_host`]）。这些平台的直链同样受
+//! 登录态/签名/动态清单保护，统一交给 yt-dlp 应对。抖音的 yt-dlp 提取器
+//! 依赖分享页 SSR 数据（a_bogus 签名场景少），公开视频可用；登录态内容
+//! （喜欢/关注流）不在覆盖范围。
 
 use std::sync::Arc;
 
@@ -24,6 +30,25 @@ fn is_youtube_host(host: &str) -> bool {
         || h.ends_with(".youtube.com")
         || h == "youtube-nocookie.com"
         || h.ends_with(".youtube-nocookie.com")
+}
+
+/// host 等于 bare 或其子域（www.x.com/m.x.com/vm.x.com…）。
+fn host_is(host: &str, bare: &str) -> bool {
+    host == bare || host.ends_with(&format!(".{bare}"))
+}
+
+/// yt-dlp 托管模式识别的域名：URL 建任务时的自动 kind 判定用（engine.rs）。
+/// 各平台直链受风控/签名/动态清单保护，多线程引擎无法直接下，交给 yt-dlp。
+pub(crate) fn is_ytdlp_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    is_youtube_host(&h)
+        || host_is(&h, "x.com")
+        || host_is(&h, "twitter.com")
+        || host_is(&h, "bilibili.com")
+        || h == "b23.tv"
+        || host_is(&h, "tiktok.com")
+        || host_is(&h, "douyin.com")
+        || host_is(&h, "iesdouyin.com")
 }
 
 fn is_video_id(s: &str) -> bool {
@@ -56,43 +81,125 @@ fn youtube_video_id(url: &str) -> Option<String> {
     is_video_id(candidate).then(|| candidate.to_string())
 }
 
-/// 合集/频道/播放列表 URL：单文件任务无法表达（所有条目写同一个输出名，
-/// 互相覆盖只剩最后一个视频），直接报错而不是静默浪费带宽。
+/// 平台结构化单作品 id → (平台前缀, id)，task.filename 缺省时的命名来源：
+/// - YouTube：[`youtube_video_id`]（watch?v=、youtu.be/、shorts/live/embed/v）
+/// - X/Twitter：路径任意深度的 /status(es)?/<纯数字 id>（详情页/移动页形态）
+/// - Bilibili：/video/BV…、/video/av<数字>（b23.tv 短链无 id → None 走时间戳）
+/// - TikTok：/@user/video|photo/<数字 id>（vt.tiktok.com 短链同上）
+fn platform_id(url: &str) -> Option<(&'static str, String)> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    if is_youtube_host(&host) {
+        return youtube_video_id(url).map(|id| ("youtube", id));
+    }
+    let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+    let after_key = |keys: &[&str]| -> Option<String> {
+        let pos = segs.iter().position(|s| keys.contains(s))?;
+        let id = *segs.get(pos + 1)?;
+        id.chars().all(|c| c.is_ascii_alphanumeric())
+            .then(|| id.to_string())
+    };
+    if host_is(&host, "x.com") || host_is(&host, "twitter.com") {
+        return after_key(&["status", "statuses"]).map(|id| ("x", id));
+    }
+    if host_is(&host, "bilibili.com") {
+        let id = after_key(&["video"])?;
+        // BV… 直接收；av<数字> 收；其余路径段（如分区页残留）不猜。
+        // get(..2) 而非 [..2]：路径段以多字节字符开头时后者会 panic
+        let is_av = match id.get(..2) {
+            Some(p) => {
+                p.eq_ignore_ascii_case("av")
+                    && id[2..].chars().all(|c| c.is_ascii_digit())
+            }
+            None => false,
+        };
+        return (id.starts_with("BV") || is_av).then(|| ("bili", id));
+    }
+    if host_is(&host, "tiktok.com") {
+        let id = after_key(&["video", "photo"])?;
+        return id
+            .chars()
+            .all(|c| c.is_ascii_digit())
+            .then(|| ("tiktok", id));
+    }
+    if host_is(&host, "douyin.com") || host_is(&host, "iesdouyin.com") {
+        // /video/{id}、/note/{id}（图集）、/share/video|note/{id}（分享页）；
+        // v.douyin.com 短链无 id → None（yt-dlp 跟随重定向）
+        let id = after_key(&["video", "note"])?;
+        return id
+            .chars()
+            .all(|c| c.is_ascii_digit())
+            .then(|| ("douyin", id));
+    }
+    None
+}
+
+/// 合集/频道/播放列表/用户主页 URL：单文件任务无法表达（所有条目写同一个
+/// 输出名，互相覆盖只剩最后一个视频），直接报错而不是静默浪费带宽。
 /// watch?v=X&list=Y 有具体视频 → --no-playlist 已处理，不算合集。
+/// 新平台同样只拦明确的主页形态：X 单段路径（用户时间线）、B 站用户空间、
+/// TikTok @user 主页——未识别的页面交给 yt-dlp 自己报错。
 fn is_batch_url(url: &str) -> bool {
     let Ok(u) = url::Url::parse(url) else {
         return false;
     };
-    if !u.host_str().is_some_and(is_youtube_host) {
+    let Some(host) = u.host_str().map(|h| h.to_ascii_lowercase()) else {
         return false;
+    };
+    if is_youtube_host(&host) {
+        if platform_id(url).is_some() {
+            return false;
+        }
+        let path = u.path().to_ascii_lowercase();
+        let has_list = u.query_pairs().any(|(k, _)| k == "list");
+        return path == "/playlist"
+            || has_list
+            || path.starts_with("/channel/")
+            || path.starts_with("/c/")
+            || path.starts_with("/user/")
+            || path.starts_with("/@");
     }
-    if youtube_video_id(url).is_some() {
-        return false;
+    let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+    if host_is(&host, "x.com") || host_is(&host, "twitter.com") {
+        // /{user} 主页时间线；/i、/search 等功能页放行给 yt-dlp 自然报错
+        return segs.len() == 1
+            && !matches!(
+                segs[0],
+                "i" | "search" | "hashtag" | "explore" | "notifications" | "messages" | "settings"
+            );
     }
-    let path = u.path().to_ascii_lowercase();
-    let has_list = u.query_pairs().any(|(k, _)| k == "list");
-    path == "/playlist"
-        || has_list
-        || path.starts_with("/channel/")
-        || path.starts_with("/c/")
-        || path.starts_with("/user/")
-        || path.starts_with("/@")
+    if host_is(&host, "bilibili.com") {
+        return host == "space.bilibili.com" || u.path().to_ascii_lowercase().starts_with("/space");
+    }
+    if host_is(&host, "tiktok.com") {
+        return segs.len() == 1 && segs[0].starts_with('@');
+    }
+    if host_is(&host, "douyin.com") || host_is(&host, "iesdouyin.com") {
+        // /user/{sec_uid} 主页；根路径（推荐流）与 live 放行给 yt-dlp 报错
+        return u.path().to_ascii_lowercase().starts_with("/user");
+    }
+    false
 }
 
-/// URL → youtube 视频基名（task.filename 优先且经 sanitize；缺省 youtube_{id}）。
-/// 结构化解析失败再退 11 位 token 启发式，最后退 yt_{时间戳}。
+/// URL → 作品基名（task.filename 优先且经 sanitize）。
+/// 平台结构化 id 优先（youtube_{id} / x_{id} / bili_{id} / tiktok_{id} /
+/// douyin_{id}）；结构化解析失败（含手动指定 Ytdlp 的任意站点）再退 11 位
+/// token 启发式，最后退 yt_{时间戳}。
 fn base_name(filename: Option<&str>, url: &str, fallback_ms: i64) -> String {
     if let Some(f) = filename.map(str::trim).filter(|f| !f.is_empty()) {
         // 引擎此前直接拿 filename 拼 out 路径：`..\..\x` 会路径穿越、非法字符
         // 在 Windows 上 spawn/落盘失败。与 HTTP 驱动（pick_name）对齐做清洗。
         return dl_filename::sanitize(f);
     }
-    let id = youtube_video_id(url)
+    let id = platform_id(url)
+        .map(|(plat, id)| format!("{plat}_{id}"))
         .or_else(|| {
-            url.split(['/', '=', '?', '&']).find(|s| is_video_id(s)).map(String::from)
+            url.split(['/', '=', '?', '&'])
+                .find(|s| is_video_id(s))
+                .map(|s| format!("youtube_{s}"))
         })
-        .unwrap_or_else(|| format!("yt_{fallback_ms}"));
-    format!("youtube_{id}")
+        .unwrap_or_else(|| format!("youtube_yt_{fallback_ms}"));
+    id
 }
 
 /// 剥离文件名末尾的媒体扩展名得到 yt-dlp 输出基名：模板交给 yt-dlp 后由它
@@ -119,20 +226,37 @@ fn out_stem(name: &str) -> String {
 }
 
 pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<(), DriveErr> {
-    // 合集/频道链接先快速失败，避免 yt-dlp 拉下几十个视频全写同一个文件名
+    // 合集/主页链接先快速失败，避免 yt-dlp 拉下几十个视频全写同一个文件名
     if is_batch_url(&ctx.url) {
         return Err(DriveErr::Fatal(
             ErrorKind::InvalidUrl,
-            "YouTube 合集/频道/播放列表链接无法作为单文件任务下载（只会互相覆盖、只剩最后一个视频）：请打开具体视频页（watch?v=… 或 youtu.be/…）后再试"
+            "合集/频道/播放列表/用户主页链接无法作为单文件任务下载（只会互相覆盖、只剩最后一个视频）：请打开具体作品页（如 watch?v=…、/status/…、/video/BV…）后再试"
                 .into(),
         ));
     }
 
-    // 状态机：Queued → Probing → Downloading（借用 Probing 直通，无网络请求）
-    ctx.engine
-        .transition(&ctx.task_id, TaskStatus::Probing, None)
-        .await
-        .map_err(drive_from)?;
+    // 状态机入口：Queued（新任务）与 WaitingRetry（重试退避残留）走 Probing 直通
+    // （无网络请求）；Paused（续传）与 Downloading（崩溃残留）直接进 Downloading
+    // ——迁移表不允许 Paused/Downloading → Probing，此前无条件走探测直通导致
+    // 暂停后点「开始」静默失败（InvalidTransition 只落在后台重试循环的日志里）。
+    match task.status {
+        TaskStatus::Queued | TaskStatus::WaitingRetry => {
+            ctx.engine
+                .transition(&ctx.task_id, TaskStatus::Probing, None)
+                .await
+                .map_err(drive_from)?;
+        }
+        TaskStatus::Paused | TaskStatus::Downloading => {}
+        s => {
+            return Err(DriveErr::Fatal(
+                ErrorKind::InvalidTransition {
+                    from: s.as_str().into(),
+                    to: "downloading".into(),
+                },
+                format!("cannot download from state {}", s.as_str()),
+            ));
+        }
+    }
     ctx.engine
         .transition(&ctx.task_id, TaskStatus::Downloading, None)
         .await
@@ -446,5 +570,105 @@ mod tests {
         assert_eq!(out_stem("youtube_dQw4w9WgXcQ"), "youtube_dQw4w9WgXcQ");
         assert_eq!(out_stem("archive.webp"), "archive.webp");
         assert_eq!(out_stem(".mp4"), ".mp4");
+    }
+
+    #[test]
+    fn platform_ids_extracted() {
+        // X：详情页 / 移动页 / statuses 旧形态
+        assert_eq!(
+            platform_id("https://x.com/testuser/status/1700000000000000001"),
+            Some(("x", "1700000000000000001".into()))
+        );
+        assert_eq!(
+            platform_id("https://mobile.twitter.com/i/web/statuses/12345"),
+            Some(("x", "12345".into()))
+        );
+        // Bilibili：BV 号与 av 号
+        assert_eq!(
+            platform_id("https://www.bilibili.com/video/BV1xx411c7mD"),
+            Some(("bili", "BV1xx411c7mD".into()))
+        );
+        assert_eq!(
+            platform_id("https://www.bilibili.com/video/av170001?p=1"),
+            Some(("bili", "av170001".into()))
+        );
+        // 多字节路径段不 panic（曾用 [..2] 切片）、非作品页不猜
+        assert_eq!(platform_id("https://www.bilibili.com/video/分区"), None);
+        // TikTok：video 与 photo（图文帖）
+        assert_eq!(
+            platform_id("https://www.tiktok.com/@someuser/video/7301234567890123456"),
+            Some(("tiktok", "7301234567890123456".into()))
+        );
+        assert_eq!(
+            platform_id("https://www.tiktok.com/@someuser/photo/7301234567890123456"),
+            Some(("tiktok", "7301234567890123456".into()))
+        );
+        // 短链无 id → None（命名走时间戳，重定向由 yt-dlp 跟随）
+        assert_eq!(platform_id("https://b23.tv/abc123"), None);
+        assert_eq!(platform_id("https://vt.tiktok.com/abc123/"), None);
+        // 抖音：video/note/share 页形态；短链无 id
+        assert_eq!(
+            platform_id("https://www.douyin.com/video/7301234567890123456"),
+            Some(("douyin", "7301234567890123456".into()))
+        );
+        assert_eq!(
+            platform_id("https://www.douyin.com/note/7301234567890123456"),
+            Some(("douyin", "7301234567890123456".into()))
+        );
+        assert_eq!(
+            platform_id("https://www.iesdouyin.com/share/video/7301234567890123456"),
+            Some(("douyin", "7301234567890123456".into()))
+        );
+        assert_eq!(platform_id("https://v.douyin.com/abcXYZ/"), None);
+        // 含 x.com 子串的站点不误判
+        assert_eq!(platform_id("https://netflix.com/title/123"), None);
+    }
+
+    #[test]
+    fn base_name_per_platform() {
+        assert_eq!(
+            base_name(None, "https://x.com/testuser/status/1700000000000000001", 1),
+            "x_1700000000000000001"
+        );
+        assert_eq!(
+            base_name(None, "https://www.bilibili.com/video/BV1xx411c7mD", 1),
+            "bili_BV1xx411c7mD"
+        );
+        assert_eq!(
+            base_name(None, "https://www.tiktok.com/@u/video/7301234567890123456", 1),
+            "tiktok_7301234567890123456"
+        );
+        assert_eq!(
+            base_name(None, "https://www.douyin.com/video/7301234567890123456", 1),
+            "douyin_7301234567890123456"
+        );
+        // b23.tv 短链：结构化失败 → 时间戳兜底（保留旧前缀行为）
+        assert_eq!(base_name(None, "https://b23.tv/abc123", 7), "youtube_yt_7");
+    }
+
+    #[test]
+    fn batch_urls_non_youtube() {
+        for url in [
+            "https://x.com/testuser",
+            "https://twitter.com/testuser",
+            "https://space.bilibili.com/123456",
+            "https://www.bilibili.com/space/bilibili",
+            "https://www.tiktok.com/@someuser",
+            "https://www.douyin.com/user/MS4wLjABAAAAabcd1234",
+        ] {
+            assert!(is_batch_url(url), "{url}");
+        }
+        for url in [
+            "https://x.com/testuser/status/1700000000000000001",
+            // 空间音频等 /i/ 功能路径放行给 yt-dlp
+            "https://x.com/i/spaces/1vOxwrabP",
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://www.tiktok.com/@someuser/video/7301234567890123456",
+            "https://www.douyin.com/video/7301234567890123456",
+            "https://www.douyin.com/note/7301234567890123456",
+            "https://www.iesdouyin.com/share/video/7301234567890123456",
+        ] {
+            assert!(!is_batch_url(url), "{url}");
+        }
     }
 }

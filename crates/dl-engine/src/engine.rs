@@ -336,19 +336,13 @@ impl Engine {
             _ => None,
         };
         // URL 特征启发：.m3u8/.m3u 直链自动归为 HLS（驱动内清单探测确认）；
-        // YouTube 归为 yt-dlp 托管（PO Token/SABR 风控由 yt-dlp 应对）
+        // YouTube/X/Bilibili/TikTok 归为 yt-dlp 托管（风控/签名/动态清单由
+        // yt-dlp 应对，识别域名清单见 ytdlp_task::is_ytdlp_host）
         let kind = c.kind.or_else(|| {
             let host_ok = url::Url::parse(&c.url)
                 .ok()
-                .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
-                .map(|h| {
-                    h == "youtube.com"
-                        || h == "www.youtube.com"
-                        || h == "m.youtube.com"
-                        || h == "music.youtube.com"
-                        || h.ends_with(".youtube.com")
-                        || h == "youtu.be"
-                })
+                .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                .map(|h| crate::ytdlp_task::is_ytdlp_host(&h))
                 .unwrap_or(false);
             if host_ok {
                 return Some(TaskKind::Ytdlp);
@@ -1002,6 +996,32 @@ mod tests {
         let t = env
             .engine
             .create_task(CreateTask::of("https://vimeo.com/12345"))
+            .await
+            .unwrap();
+        assert_eq!(t.kind, TaskKind::Http);
+    }
+
+    #[tokio::test]
+    async fn other_platform_urls_autodetect_ytdlp_kind() {
+        let env = test_engine().await;
+        for url in [
+            "https://x.com/testuser/status/1700000000000000001",
+            "https://mobile.twitter.com/i/web/status/1700000000000000001",
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://b23.tv/abc123",
+            "https://www.tiktok.com/@someuser/video/7301234567890123456",
+            "https://www.douyin.com/video/7301234567890123456",
+            "https://v.douyin.com/abcXYZ/",
+        ] {
+            let t = env.engine.create_task(CreateTask::of(url)).await.unwrap();
+            assert_eq!(t.kind, TaskKind::Ytdlp, "{url}");
+        }
+        // 清单外域名仍是普通 HTTP（快手同类站点未纳入，需要时再扩）
+        let t = env
+            .engine
+            .create_task(CreateTask::of(
+                "https://www.kuaishou.com/short-video/3xabc123",
+            ))
             .await
             .unwrap();
         assert_eq!(t.kind, TaskKind::Http);
