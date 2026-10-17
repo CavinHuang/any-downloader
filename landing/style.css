@@ -118,6 +118,7 @@ h1 { font: 600 56px/1.22 var(--font-editorial); letter-spacing: .02em; margin: 0
 .shot-hero { display: block; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); background: var(--panel); }
 .shot-hero img { display: block; width: 100%; }
 .shot-cap { display: block; padding: 12px 16px; font-size: 13.5px; color: var(--muted); border-top: 1px solid var(--border-soft); background: var(--panel); }
+a .shot-cap, .shot .shot-cap { text-decoration: none; }
 .shot-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 16px; }
 .shot { display: block; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--panel); transition: translate .15s, box-shadow .15s; }
 .shot:hover { translate: 0 -3px; box-shadow: var(--shadow); }
