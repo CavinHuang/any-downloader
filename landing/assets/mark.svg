@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
-  <rect width="48" height="48" rx="11" fill="#e4edb5"/>
-  <g transform="rotate(-12 24 24)" stroke="#293c34" stroke-width="2.2" stroke-linejoin="round">
-    <rect x="10" y="6" width="17" height="25" rx="1.2" fill="#fbfaf6"/>
-    <rect x="15" y="12" width="17" height="25" rx="1.2" fill="#f4f3ec"/>
-    <rect x="20" y="18" width="17" height="25" rx="1.2" fill="#e4edb5"/>
-    <path d="M25 25h7m-7 5h5" stroke-width="1.6" stroke-linecap="round"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Anything Downloader AD monogram">
+  <title>Anything Downloader — AD</title>
+  <!-- Anything Studio palette: paper / forest ink / sage / soft lime -->
+  <rect x="52" y="52" width="920" height="920" rx="210" fill="#fbfaf6"/>
+  <rect x="54" y="54" width="916" height="916" rx="208" fill="none" stroke="#dedfd5" stroke-width="4"/>
+  <path d="M 541 318 H 614 C 745 318 828 387 828 512 C 828 638 749 710 622 710 H 541" fill="none" stroke="#8da994" stroke-width="106" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 360 564 H 540" fill="none" stroke="#c1d39a" stroke-width="86" stroke-linecap="round"/>
+  <path d="M 235 716 L 450 309 Q 456 298 462 309 L 678 716" fill="none" stroke="#293c34" stroke-width="109" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
