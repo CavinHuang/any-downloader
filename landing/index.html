@@ -10,7 +10,7 @@
 <meta property="og:type" content="website">
 <link rel="icon" type="image/png" href="assets/icon-128.png">
 <link rel="apple-touch-icon" href="assets/icon-128.png">
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
 
@@ -130,7 +130,18 @@
       <p class="eyebrow">COLLECT AS YOU BROWSE</p>
       <h2 class="section-title left">浏览时顺手收下<br>好东西<span class="heading-period">。</span></h2>
       <p class="ext-sub">装上浏览器扩展后，遇到想收藏的视频或文件，点一下扩展图标就能推送到桌面端开始下载；复制的直链也会被安静识别，弹一条可忽略的提示。</p>
-      <a class="text-link" href="https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-DEV.md" rel="noopener">扩展安装与开发指南 →</a>
+      <div class="ext-actions">
+        <a class="btn btn-primary" href="https://github.com/CavinHuang/any-downloader/releases/latest/download/anything-downloader-extension.zip" rel="noopener">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor"><path d="M8 1a1 1 0 0 1 1 1v6.6l2.3-2.3a1 1 0 1 1 1.4 1.4l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.4L7 8.6V2a1 1 0 0 1 1-1ZM2.5 13h11a1 1 0 1 1 0 2h-11a1 1 0 1 1 0-2Z"/></svg>
+          下载扩展包（Chrome / Edge）
+        </a>
+        <a class="btn" href="https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-INSTALL.md" rel="noopener">详细安装教程</a>
+      </div>
+      <ol class="ext-steps">
+        <li><b>启动桌面端</b>——扩展文件已随装进软件目录，通道自动注册（v0.4.3+）</li>
+        <li>桌面端 设置 里点 <b>「安装浏览器扩展」</b>，按弹窗指引加载即可</li>
+        <li>或手动下载扩展包解压，在 <code>chrome://extensions</code>（Edge：<code>edge://extensions</code>）加载</li>
+      </ol>
     </div>
     <div class="ext-visual" aria-hidden="true">
       <div class="ext-pop">
@@ -201,8 +212,8 @@
         <div class="step-copy">
           <span class="step-no">05</span>
           <h3>装上浏览器扩展</h3>
-          <p>在 Chrome / Edge 装上扩展并注册本机通道后，网页里遇到视频、音频、图片，点扩展图标直接推到桌面端开始下载；复制的直链也会被安静识别。</p>
-          <a class="text-link" href="https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-DEV.md" rel="noopener">查看扩展安装指南 →</a>
+          <p>下载扩展包并解压，在 Chrome / Edge 的扩展页开启<b>开发者模式</b>、「加载已解压的扩展程序」选中解压目录即可。桌面端 v0.4.3 起启动时自动注册本机通道，装完 popup 显示「已连接」：网页里的视频、音频、图片点一下就推到桌面端；复制的直链也会被安静识别。</p>
+          <a class="text-link" href="https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-INSTALL.md" rel="noopener">查看扩展安装教程 →</a>
         </div>
         <a class="step-shot" href="assets/shots/done-filter.png" target="_blank" rel="noopener">
           <img src="assets/shots/done-filter.png" alt="完成的收藏按类型归档" loading="lazy">

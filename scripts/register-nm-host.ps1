@@ -1,6 +1,9 @@
 # 注册 Native Messaging Host（开发环境，Windows）。
 # 用户级注册（HKCU），无需管理员；Chrome 与 Edge 一起注册。
 #
+# 注意：dl-app（桌面端）v0.4.3 起启动时会自动注册并指向同目录 dl-server.exe，
+# 本脚本仅在需要取消注册、或绕开 GUI 显式刷新时使用。
+#
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\register-nm-host.ps1
 #   powershell ... -Unregister   # 取消注册

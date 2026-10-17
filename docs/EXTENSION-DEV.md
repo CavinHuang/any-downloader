@@ -2,6 +2,7 @@
 
 Chrome/Edge 的 MV3 扩展负责「眼睛和手」：嗅探资源、推送任务给主程序。
 本指南覆盖开发环境的完整链路：注册 NM host → 加载扩展 → 启动主程序 → 推送下载。
+（普通用户装扩展请看 [EXTENSION-INSTALL.md](EXTENSION-INSTALL.md)：安装包随 Release 发布，桌面端 v0.4.3 起启动时自动注册通道。）
 
 界面已统一为 Anything Studio「网页收集室」，视觉与交互说明见 [UI-STUDIO.md](UI-STUDIO.md)。扩展无需前端构建；修改后在扩展管理页点击「重新加载」，再刷新已打开的网页，使浮动收集面板和文章操作也使用新版本。打包时请包含 `studio.css`、`popup.css`、`sync.css` 与 `icons/`，不可只复制 HTML 和 JS。
 
@@ -12,7 +13,10 @@ Chrome/Edge 的 MV3 扩展负责「眼睛和手」：嗅探资源、推送任务
 | `extension/` | MV3 扩展（无构建步骤，原生 JS） | webRequest 嗅探 + popup 推送 |
 | `dl-server nm-shim` | 同一二进制的 NM 模式 | Chrome 拉起的 stdio ↔ 管道薄桥 |
 | `dl-server serve` | 常驻进程 | 持有引擎，执行下载 |
-| `scripts/register-nm-host.ps1` | 注册脚本 | 写 HKCU 注册表 + NM manifest |
+| `scripts/register-nm-host.ps1` | 注册脚本 | 取消注册 / 显式刷新（dl-app 启动已自动注册） |
+| `scripts/stage-extension.mjs` | 打包前暂存 | `extension/` → `src-tauri/resources/extension/`（排除 fixtures），经 tauri resources 随安装器装进软件目录 |
+
+扩展除独立 zip（Release 资产 `anything-downloader-extension.zip`）外，还随桌面端安装器一起分发：`tauri.conf.json` 的 `beforeBuildCommand` 先跑暂存脚本，`bundle.resources` 把目录映射到安装后的 `extension/`；桌面端设置页「安装浏览器扩展」按钮弹窗（`ExtensionDialog`）读取 `extension_bundle` 命令给出的实际路径指引用户加载。
 
 扩展 ID 由 `manifest.json` 的 `key` 固定为
 **`jeigecniniligfiigmmanjeiaooiiomc`**（unpacked 加载 ID 稳定，
@@ -24,7 +28,9 @@ NM `allowed_origins` 才能写死）。
 # 1. 构建（NM manifest 指向 release 二进制）
 cargo build --release
 
-# 2. 注册 NM host（HKCU，无需管理员；Chrome + Edge 一起注册）
+# 2. 注册 NM host：跑一次桌面端（dl-app）即自动注册（HKCU，无需管理员；
+#    Chrome + Edge 一起注册，指向同目录的 dl-server.exe）。脚本仅用于
+#    取消注册或绕开 GUI 显式刷新：
 powershell -ExecutionPolicy Bypass -File scripts\register-nm-host.ps1
 #    取消注册：powershell ... -Unregister
 
@@ -50,9 +56,12 @@ Chrome **每次连接时**解析——改 manifest/重编二进制后无需重�
 ```bash
 cargo build --release
 
-# NM host manifest（用户级，免管理员）
-mkdir -p "$HOME/Library/Application Support/anything-downloader/nm"
-cat > "$HOME/Library/Application Support/anything-downloader/nm/anything_dl.json" <<EOF
+# NM host manifest：非 Windows 平台 NativeMessagingHosts/<host>.json 即清单
+# 本体（现行 Chromium 无「指针文件」间接层，path 必须绝对路径）。直接写入
+# Chrome / Edge 的用户级目录（dl-app 启动时也会自动写，此处为显式手动版）：
+for d in "$HOME/Library/Application Support/Google/Chrome" "$HOME/Library/Application Support/Microsoft Edge"; do
+  mkdir -p "$d/NativeMessagingHosts"
+  cat > "$d/NativeMessagingHosts/anything_dl.json" <<EOF
 {
   "name": "anything_dl",
   "description": "Anything Downloader native messaging host",
@@ -60,13 +69,6 @@ cat > "$HOME/Library/Application Support/anything-downloader/nm/anything_dl.json
   "type": "stdio",
   "allowed_origins": ["chrome-extension://jeigecniniligfiigmmanjeiaooiiomc/"]
 }
-EOF
-
-# 注册（Chrome 与 Edge 路径分别指向同一 manifest）
-for d in "Google/Chrome" "Microsoft Edge"; do
-  mkdir -p "$HOME/Library/Application Support/$d/NativeMessagingHosts"
-  cat > "$HOME/Library/Application Support/$d/NativeMessagingHosts/anything_dl.json" <<EOF
-"$HOME/Library/Application Support/anything-downloader/nm/anything_dl.json"
 EOF
 done
 

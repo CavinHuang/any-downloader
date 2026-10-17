@@ -390,3 +390,26 @@ code { font: 11px/1.6 Consolas, monospace; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   .bar.indet::after { left: 35%; }
 }
+
+/* ---- 安装浏览器扩展弹窗 ---- */
+.extension-modal { width: 520px; }
+.ext-steps { list-style: none; margin: 0 0 16px; padding: 0; display: grid; gap: 9px; counter-reset: extstep; }
+.ext-steps li { position: relative; padding-left: 34px; font-size: var(--fs-md); color: var(--text); counter-increment: extstep; }
+.ext-steps li::before {
+  content: counter(extstep);
+  position: absolute; left: 0; top: 2px;
+  width: 21px; height: 21px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent-ink);
+  font-size: var(--fs-xs); font-weight: 600;
+}
+.ext-path { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px; }
+.ext-path-label { font-size: var(--fs-sm); color: var(--muted); flex-shrink: 0; }
+.ext-path-value {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: var(--fs-xs); line-height: 1.5;
+  background: var(--accent-soft); color: var(--accent-ink);
+  padding: 3px 8px; border-radius: var(--r-sm);
+  word-break: break-all;
+}
+.ext-path-missing { font-size: var(--fs-sm); color: var(--err-ink); }

@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod nm;
 mod schedule;
 mod ytdlp_update;
 
@@ -80,6 +81,9 @@ thread: {:?}
             let handle = app.handle().clone();
             let engine = tauri::async_runtime::block_on(Engine::open_default())
                 .expect("open engine database");
+
+            // 扩展通道：启动即把 NM 指向自带 dl-server（幂等、best-effort）
+            nm::ensure_registered();
 
             // 内嵌 IPC 管道：扩展推送 / dl-server call 直达本进程
             {
@@ -237,6 +241,9 @@ thread: {:?}
             commands::get_autostart,
             commands::set_autostart,
             commands::open_logs_dir,
+            commands::extension_bundle,
+            commands::open_extension_dir,
+            commands::open_extension_doc,
             commands::nm_registered,
             commands::set_priority,
             commands::rename_task,

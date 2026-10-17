@@ -130,6 +130,11 @@ export const api = {
   setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
   openLogsDir: () => invoke<void>("open_logs_dir"),
   nmRegistered: () => invoke<boolean>("nm_registered"),
+  extensionBundle: () =>
+    invoke<{ path: string | null; present: boolean }>("extension_bundle"),
+  openExtensionDir: (path: string) =>
+    invoke<void>("open_extension_dir", { path }),
+  openExtensionDoc: () => invoke<void>("open_extension_doc"),
   renameTask: (id: string, filename: string) =>
     invoke<Task>("rename_task", { id, filename }),
   exportTasks: (path: string) => invoke<number>("export_tasks", { path }),

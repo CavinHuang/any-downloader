@@ -301,13 +301,28 @@ pub fn nm_registered() -> bool {
     }
     #[cfg(not(windows))]
     {
-        std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .map(|h| {
-                h.join("Library/Application Support/Google/Chrome/NativeMessagingHosts/anything_dl.json")
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return false;
+        };
+        if cfg!(target_os = "macos") {
+            let support = home.join("Library/Application Support");
+            support
+                .join("Google/Chrome/NativeMessagingHosts/anything_dl.json")
+                .exists()
+                || support
+                    .join("Microsoft Edge/NativeMessagingHosts/anything_dl.json")
                     .exists()
-            })
-            .unwrap_or(false)
+        } else {
+            let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+            ["google-chrome", "microsoft-edge", "chromium"]
+                .iter()
+                .any(|b| {
+                    config
+                        .join(b)
+                        .join("NativeMessagingHosts/anything_dl.json")
+                        .exists()
+                })
+        }
     }
 }
 
@@ -316,6 +331,64 @@ pub fn open_logs_dir() -> Result<(), String> {
     let dir = dl_engine::data_dir().join("logs");
     let _ = std::fs::create_dir_all(&dir);
     tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 随桌面端分发的浏览器扩展安装信息（「安装浏览器扩展」弹窗用）。
+/// 查找顺序：资源目录（安装器布局）→ exe 同目录（便携）→ 仓库 extension/
+/// （开发布局：target/release → 仓库根）。
+#[tauri::command]
+pub fn extension_bundle(app: tauri::AppHandle) -> serde_json::Value {
+    use tauri::Manager;
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = app.path().resource_dir() {
+        candidates.push(dir.join("extension"));
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    {
+        candidates.push(dir.join("extension"));
+        candidates.push(dir.join("../../extension"));
+    }
+    for dir in &candidates {
+        if dir.join("manifest.json").is_file() {
+            let resolved = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            return serde_json::json!({
+                "path": display_path(&resolved),
+                "present": true
+            });
+        }
+    }
+    serde_json::json!({
+        "path": candidates.first().map(|d| d.display().to_string()),
+        "present": false
+    })
+}
+
+/// 打开扩展所在目录（弹窗「打开扩展文件夹」）；要求目标确为扩展目录。
+#[tauri::command]
+pub fn open_extension_dir(path: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).join("manifest.json").is_file() {
+        return Err("extension manifest.json not found".into());
+    }
+    tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 打开扩展安装教程（外部浏览器）。
+#[tauri::command]
+pub fn open_extension_doc() -> Result<(), String> {
+    tauri_plugin_opener::open_url(
+        "https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-INSTALL.md",
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Windows 上 canonicalize 产生的 `\\?\` 前缀不适合直接展示/复制，剥掉。
+fn display_path(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
 #[tauri::command]

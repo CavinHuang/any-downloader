@@ -12,6 +12,7 @@ import {
 } from "../updater";
 import { useOverlay } from "../useOverlay";
 import { Icon } from "./Icon";
+import { ExtensionDialog } from "./ExtensionDialog";
 
 const SAVE_KEYS = [
   "default_dir",
@@ -59,6 +60,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [remote, setRemote] = useState<RemoteStatus | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
   const [invalid, setInvalid] = useState<Record<string, boolean>>({});
+  const [extOpen, setExtOpen] = useState(false);
   // dirty 基线（§3.6）：载入值；保存成功后基线重置为已保存值
   const [baseline, setBaseline] = useState("");
   const savedValues = useRef<Settings | null>(null);
@@ -198,6 +200,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   );
 
   return (
+    <>
     <div className="modal-mask" onClick={requestClose}>
       <div
         className="modal settings-modal"
@@ -424,16 +427,21 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         )}
-        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
-          {t("nmStatus")}:
-          {nmOk == null ? (
-            <span style={{ color: "var(--muted)" }}>…</span>
-          ) : nmOk ? (
-            <span style={{ color: "var(--ok-ink)" }}>{t("nmOk")}</span>
-          ) : (
-            <span style={{ color: "var(--err-ink)" }}>{t("nmMissing")}</span>
-          )}
-        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {t("nmStatus")}:
+            {nmOk == null ? (
+              <span style={{ color: "var(--muted)" }}>…</span>
+            ) : nmOk ? (
+              <span style={{ color: "var(--ok-ink)" }}>{t("nmOk")}</span>
+            ) : (
+              <span style={{ color: "var(--err-ink)" }}>{t("nmMissing")}</span>
+            )}
+          </label>
+          <button className="text-button" onClick={() => setExtOpen(true)}>
+            {t("extInstallBtn")}
+          </button>
+        </div>
         <div className="form-section-title">05 / {t("updateSection")}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           {version && <span style={{ color: "var(--muted)", fontSize: 11 }}>v{version}</span>}
@@ -486,5 +494,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
+    {extOpen && <ExtensionDialog onClose={() => setExtOpen(false)} />}
+    </>
   );
 }

@@ -21,6 +21,7 @@ jobs:
       contents: write
     outputs:
       releaseId: ${{ steps.create.outputs.id }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - name: Read app version
@@ -33,9 +34,28 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: "Anything Downloader v${{ steps.ver.outputs.version }}"
-          body: "Windows 安装包（x64-setup.exe）；macOS 应用未签名，首启需右键 → 打开；Linux 提供 AppImage。已安装用户通过应用内自动更新收到此版本。"
+          body: "Windows 安装包（x64-setup.exe）；macOS 应用未签名，首启需右键 → 打开；Linux 提供 AppImage；浏览器扩展包 anything-downloader-extension.zip（安装教程见 docs/EXTENSION-INSTALL.md）。已安装用户通过应用内自动更新收到此版本。"
           draft: false
           prerelease: false
+
+  # 浏览器扩展安装包（纯静态 zip，无需构建）。资产名固定，landing 页经
+  # releases/latest/download 直链引用。
+  extension-package:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack browser extension
+        run: |
+          mkdir anything-downloader-extension
+          rsync -a --exclude 'fixtures' extension/ anything-downloader-extension/
+          zip -qr anything-downloader-extension.zip anything-downloader-extension
+      - name: Upload extension package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "v${{ needs.create-release.outputs.version }}" anything-downloader-extension.zip --clobber
 
   build:
     needs: create-release
