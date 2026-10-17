@@ -36,11 +36,7 @@ input:focus,textarea:focus,select:focus { border-color:var(--accent); }
 svg { flex-shrink:0; vertical-align:middle; }
 .hidden { display:none !important; }
 .brand { display:inline-flex; align-items:center; gap:9px; text-decoration:none; color:var(--text); font:600 27px/1 Georgia,"Times New Roman",serif; letter-spacing:-1.5px; }
-.brand-mark { width:24px; height:26px; position:relative; display:block; transform:rotate(-12deg); }
-.brand-mark i { position:absolute; width:12px; height:17px; border:1.5px solid var(--text); border-radius:1px; }
-.brand-mark i:nth-child(1) { top:1px; left:0; }
-.brand-mark i:nth-child(2) { top:5px; left:5px; background:var(--bg); }
-.brand-mark i:nth-child(3) { top:9px; left:10px; background:var(--lime); }
+.brand-mark { width:28px; height:28px; display:block; flex:none; object-fit:contain; }
 .brand-period { color:var(--accent); }
 .eyebrow { font:9px/1.8 Consolas,"Microsoft YaHei UI",monospace; letter-spacing:1.7px; color:var(--muted); }
 .icon-btn { width:30px; height:30px; min-height:30px; padding:0; border-color:transparent; background:transparent; }
