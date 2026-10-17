@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Anything Downloader",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "嗅探网页媒体资源 + 站点适配下载（抖音/小红书/X/微信文章）并推送到 Anything Downloader",
   "permissions": [
     "downloads.ui",
