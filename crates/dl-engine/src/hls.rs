@@ -242,7 +242,7 @@ fn decrypt_aes128(data: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Result<Vec<u8>,
     let mut block = [0u8; 16];
     let cipher = <aes::Aes128 as aes::cipher::KeyInit>::new(key.into());
     use aes::cipher::BlockDecrypt;
-    for chunk in data.chunks_exact(16) {
+    for chunk in data.as_chunks::<16>().0 {
         block.copy_from_slice(chunk);
         let ct = block;
         let ga = aes::cipher::generic_array::GenericArray::from_mut_slice(&mut block);
