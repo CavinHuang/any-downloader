@@ -10,7 +10,7 @@
 <meta property="og:type" content="website">
 <link rel="icon" type="image/svg+xml" href="assets/mark.svg">
 <link rel="apple-touch-icon" href="assets/icon-128.png">
-<link rel="stylesheet" href="style.css?v=2">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 
@@ -22,7 +22,9 @@
     </a>
     <nav class="nav-links" aria-label="页内导航">
       <a href="#features">特性</a>
-      <a href="#extension">浏览器扩展</a>
+      <a href="#gallery">界面</a>
+      <a href="#guide">教程</a>
+      <a href="#extension">扩展</a>
       <a href="#download" class="nav-cta">下载</a>
       <a href="https://github.com/CavinHuang/any-downloader" class="nav-gh" aria-label="GitHub 仓库">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -92,6 +94,36 @@
   </div>
 </section>
 
+<section class="gallery" id="gallery">
+  <div class="wrap">
+    <p class="eyebrow center">THE COLLECTION ROOM</p>
+    <h2 class="section-title">界面预览</h2>
+    <p class="section-sub">真实运行截图——收藏室、传输现场、详情与批量操作，都是本机原生体验。</p>
+    <a class="shot-hero" href="assets/shots/app-overview.png" target="_blank" rel="noopener">
+      <img src="assets/shots/app-overview.png" alt="Anything Downloader 主界面：收藏列表、状态筛选、传输现场速度曲线" loading="lazy">
+      <span class="shot-cap">收藏室主界面 —— 状态筛选、类型索引与传输现场一屏尽收</span>
+    </a>
+    <div class="shot-grid">
+      <a class="shot" href="assets/shots/transfer-panel.png" target="_blank" rel="noopener">
+        <img src="assets/shots/transfer-panel.png" alt="传输现场：实时速度曲线与按类型索引" loading="lazy">
+        <span class="shot-cap">传输现场 —— 40 秒实时速度曲线</span>
+      </a>
+      <a class="shot" href="assets/shots/batch-bar.png" target="_blank" rel="noopener">
+        <img src="assets/shots/batch-bar.png" alt="批量选择操作栏：开始、暂停、重试、取消、删除" loading="lazy">
+        <span class="shot-cap">批量操作 —— 勾选即出操作栏，支持 Shift 范围选择</span>
+      </a>
+      <a class="shot" href="assets/shots/task-detail.png" target="_blank" rel="noopener">
+        <img src="assets/shots/task-detail.png" alt="任务详情抽屉：状态、重命名、优先级、链接与类型" loading="lazy">
+        <span class="shot-cap">详情抽屉 —— 重命名、优先级、链接与响应头一览</span>
+      </a>
+      <a class="shot" href="assets/shots/done-filter.png" target="_blank" rel="noopener">
+        <img src="assets/shots/done-filter.png" alt="已完成筛选：文件妥善留存，按类型翻阅" loading="lazy">
+        <span class="shot-cap">妥善留存 —— 完成的收藏按类型归档，随时翻阅</span>
+      </a>
+    </div>
+  </div>
+</section>
+
 <section class="extension" id="extension">
   <div class="wrap ext-grid">
     <div>
@@ -108,6 +140,76 @@
         <div class="ext-pop-btn">推送到桌面端</div>
       </div>
     </div>
+  </div>
+</section>
+
+<section class="guide" id="guide">
+  <div class="wrap">
+    <p class="eyebrow center">FIVE SMALL STEPS</p>
+    <h2 class="section-title">五步，上手 Anything</h2>
+
+    <ol class="steps">
+      <li class="step">
+        <div class="step-copy">
+          <span class="step-no">01</span>
+          <h3>下载并安装</h3>
+          <p>点击右上角或页底「下载」，拿到 <code>x64-setup.exe</code> 双击安装。全程本地运行，无账号、无捆绑；之后新版本会<b>自动更新</b>（更新包经签名验证，静默安装）。</p>
+        </div>
+        <a class="step-shot" href="assets/shots/settings-update.png" target="_blank" rel="noopener">
+          <img src="assets/shots/settings-update.png" alt="设置中的「关于与更新」：检查更新与版本号" loading="lazy">
+          <span class="shot-cap">设置 · 关于与更新 —— 新版本自动送达</span>
+        </a>
+      </li>
+
+      <li class="step">
+        <div class="step-copy">
+          <span class="step-no">02</span>
+          <h3>收下第一个链接</h3>
+          <p>把链接粘进首页输入框或按 <kbd>Ctrl</kbd>+<kbd>N</kbd> 新建任务：先「识别」看文件名、大小与是否支持多线程，需要的话在「更多选项」里加校验值与镜像，然后「添加并开始」。一次可粘贴多行，批量收下。</p>
+        </div>
+        <a class="step-shot" href="assets/shots/add-dialog.png" target="_blank" rel="noopener">
+          <img src="assets/shots/add-dialog.png" alt="新建下载任务：识别结果显示文件名、大小与线程数" loading="lazy">
+          <span class="shot-cap">新建任务 —— 识别结果：48.0 MB · 可选校验与镜像</span>
+        </a>
+      </li>
+
+      <li class="step">
+        <div class="step-copy">
+          <span class="step-no">03</span>
+          <h3>管理你的收藏</h3>
+          <p>按状态与类型筛选、搜索、排序；行内可暂停/取消，双击看详情（重命名、优先级、响应头）。失败任务自动重试，卡住的任务随时批量接管。</p>
+        </div>
+        <a class="step-shot" href="assets/shots/batch-bar.png" target="_blank" rel="noopener">
+          <img src="assets/shots/batch-bar.png" alt="批量选择与操作栏" loading="lazy">
+          <span class="shot-cap">批量接管 —— 选中即操作，失败也可全部重试</span>
+        </a>
+      </li>
+
+      <li class="step">
+        <div class="step-copy">
+          <span class="step-no">04</span>
+          <h3>按习惯调校</h3>
+          <p>默认目录、单任务/全局限速、最大并发、文件冲突策略、完成后动作（打开/关机）、剪贴板监听与自动分类子目录——都在设置里，改完即存。</p>
+        </div>
+        <a class="step-shot" href="assets/shots/settings-transfer.png" target="_blank" rel="noopener">
+          <img src="assets/shots/settings-transfer.png" alt="设置：存放命名与传输偏好" loading="lazy">
+          <span class="shot-cap">传输偏好 —— 分段、限速、并发与重试都由你定</span>
+        </a>
+      </li>
+
+      <li class="step">
+        <div class="step-copy">
+          <span class="step-no">05</span>
+          <h3>装上浏览器扩展</h3>
+          <p>在 Chrome / Edge 装上扩展并注册本机通道后，网页里遇到视频、音频、图片，点扩展图标直接推到桌面端开始下载；复制的直链也会被安静识别。</p>
+          <a class="text-link" href="https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-DEV.md" rel="noopener">查看扩展安装指南 →</a>
+        </div>
+        <a class="step-shot" href="assets/shots/done-filter.png" target="_blank" rel="noopener">
+          <img src="assets/shots/done-filter.png" alt="完成的收藏按类型归档" loading="lazy">
+          <span class="shot-cap">收好的，都在 —— 已完成按类型归档</span>
+        </a>
+      </li>
+    </ol>
   </div>
 </section>
 
