@@ -1,10 +1,13 @@
 // 自动更新仓：tauri-plugin-updater + GitHub Releases（latest.json）分发。
 // 状态机：idle → checking → upToDate | available → installing → ready（relaunch 生效）。
-// 启动静默检查一次（失败不打扰）；设置页可手动检查；发现新版本主界面挂横幅。
+// 自动链路（设置 update_auto 可关，默认开）：启动后静默检查一次，此后每 6 小时
+// 再查；发现新版本自动后台下载安装。提示形态：主界面设置图标出现角标，悬停
+// 显示状态 tooltip；完整进度与「立即重启」在设置 → 05 / 关于与更新。
 // 非 Tauri 环境（界面预览）全部静默。
 
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { api } from "./api";
 
 export type UpdateStatus =
   | "idle" // 未检查 / 已忽略
@@ -71,7 +74,7 @@ export async function checkForUpdate(silent = false): Promise<void> {
       set({ status: "upToDate", version: null });
     }
   } catch (e) {
-    // 静默检查（启动）失败回到 idle；手动检查展示原因
+    // 静默检查（启动/周期）失败回到 idle；手动检查展示原因
     set(silent ? { status: "idle" } : { status: "error", error: String(e) });
   } finally {
     busy = false;
@@ -102,14 +105,26 @@ export function restartToUpdate() {
   relaunch().catch((e) => set({ status: "error", error: String(e) }));
 }
 
-/** 关闭横幅（安装包已缓存/忽略本次，不回滚已完成的安装） */
-export function dismissUpdate() {
-  if (busy) return;
-  set({ status: "idle", error: null });
+/** 设置 update_auto（默认开）：自动检查 + 后台下载；关闭后仅手动检查/下载 */
+async function autoUpdateEnabled(): Promise<boolean> {
+  try {
+    const s = await api.getSettings();
+    return s.update_auto !== "off";
+  } catch {
+    return true;
+  }
 }
 
-/** 启动静默检查：延迟避开首屏，失败不打扰 */
-export function scheduleStartupCheck(delayMs = 4000) {
+async function autoTick() {
+  if (busy || !(await autoUpdateEnabled())) return;
+  await checkForUpdate(true);
+  if (getUpdateState().status === "available") void installUpdate();
+}
+
+/** 运行期自动检查：启动后延迟首查，此后每 6 小时一轮（应用常驻托盘） */
+export function scheduleAutoChecks(delayMs = 4000) {
   if (!("__TAURI_INTERNALS__" in window)) return;
-  setTimeout(() => checkForUpdate(true), delayMs);
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  setTimeout(autoTick, delayMs);
+  setInterval(autoTick, SIX_HOURS);
 }

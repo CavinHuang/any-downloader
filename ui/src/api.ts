@@ -80,6 +80,7 @@ export interface Settings {
   schedule_window: string | null;
   schedule_outside: string | null;
   schedule_outside_bps: string | null;
+  update_auto: string | null;
 }
 
 export interface RemoteStatus {

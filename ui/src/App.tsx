@@ -12,11 +12,8 @@ import { t } from "./i18n";
 import { ROW_H } from "./const";
 import { dismissToast, getToasts, showToast, subscribeToasts } from "./toast";
 import {
-  dismissUpdate,
   getUpdateState,
-  installUpdate,
-  restartToUpdate,
-  scheduleStartupCheck,
+  scheduleAutoChecks,
   subscribeUpdate,
 } from "./updater";
 import { AddDialog } from "./components/AddDialog";
@@ -36,6 +33,22 @@ export function App() {
   const tasks = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const toasts = useSyncExternalStore(subscribeToasts, getToasts);
   const upd = useSyncExternalStore(subscribeUpdate, getUpdateState);
+  // 更新提示形态：设置图标角标 + 悬停 tooltip（完整进度/操作在设置 → 05）
+  const updateNudge =
+    upd.status === "available" ||
+    upd.status === "installing" ||
+    upd.status === "ready" ||
+    upd.status === "error";
+  const updateTooltip =
+    upd.status === "available"
+      ? t("updateAvailableTo").replace("{v}", upd.version ?? "")
+      : upd.status === "installing"
+        ? `${t("updateInstalling")} ${upd.total != null ? `${Math.min(100, Math.round((upd.downloaded / upd.total) * 100))}%` : ""}`
+        : upd.status === "ready"
+          ? t("updateReadyTooltip")
+          : upd.status === "error"
+            ? `${t("updateFailed")}: ${upd.error ?? ""}`
+            : t("settings");
   const [filter, setFilter] = useState<Filter>("all");
   const [catFilter, setCatFilter] = useState<Category>("all");
   const [showAdd, setShowAdd] = useState(false);
@@ -96,8 +109,8 @@ export function App() {
       seenClips.current.add(url);
       setClipUrl(url);
     }).catch(() => () => {});
-    // 自动更新：启动后静默检查一次（失败不打扰，§更新见 docs/RELEASE.md）
-    scheduleStartupCheck();
+    // 自动更新：启动后静默首查，此后每 6 小时一轮；发现新版本自动后台下载（§docs/RELEASE.md）
+    scheduleAutoChecks();
     // 汇总速度（从 live 数据聚合，节流 500ms）
     const speedTimer = setInterval(async () => {
       let sum = 0;
@@ -448,7 +461,15 @@ export function App() {
           <button className="icon-button" title={t("importTasks")} aria-label={t("importTasks")} onClick={importTasks}><Icon name="import" /></button>
           <button className="icon-button" title={t("exportTasks")} aria-label={t("exportTasks")} onClick={exportTasks}><Icon name="export" /></button>
           <span className="action-divider" />
-          <button className="icon-button" title={t("settings")} aria-label={t("settings")} onClick={() => requireDesktop() && setShowSettings(true)}><Icon name="settings" /></button>
+          <button
+            className="icon-button"
+            title={updateTooltip}
+            aria-label={t("settings")}
+            onClick={() => requireDesktop() && setShowSettings(true)}
+          >
+            <Icon name="settings" />
+            {updateNudge && <span className="update-dot" aria-hidden="true" />}
+          </button>
         </div>
       </header>
 
@@ -508,34 +529,6 @@ export function App() {
               <Icon name="link" size={16} /><div className="clip-info"><b>{t("clipboardFound")}</b><span className="clip-url">{clipUrl}</span></div>
               <button onClick={addFromClip} disabled={clipBusy}>{t("download")}{clipBusy ? "…" : ""}</button><button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
             </div>}
-
-            {upd.status === "available" || upd.status === "installing" || upd.status === "ready" || upd.status === "error" ? (
-              <div className="banner update" role="status">
-                <Icon name="arrow" size={16} />
-                <div className="clip-info">
-                  <b>
-                    {upd.status === "available"
-                      ? t("updateAvailableTo").replace("{v}", upd.version ?? "")
-                      : upd.status === "installing"
-                        ? t("updateInstalling")
-                        : upd.status === "ready"
-                          ? t("updateReady")
-                          : t("updateFailed")}
-                  </b>
-                  {upd.status === "installing" && (
-                    <span className="clip-url">
-                      {upd.total != null
-                        ? `${Math.min(100, Math.round((upd.downloaded / upd.total) * 100))}% · ${fmtBytes(upd.downloaded)} / ${fmtBytes(upd.total)}`
-                        : fmtBytes(upd.downloaded)}
-                    </span>
-                  )}
-                  {upd.status === "error" && upd.error && <span className="clip-url">{upd.error}</span>}
-                </div>
-                {upd.status === "available" && <button onClick={() => installUpdate()}>{t("updateDownload")}</button>}
-                {upd.status === "ready" && <button onClick={restartToUpdate}>{t("updateRestart")}</button>}
-                {upd.status !== "installing" && <button onClick={dismissUpdate}>{t("ignore")}</button>}
-              </div>
-            ) : null}
 
             {selected.size > 0 ? (
               <div className="batchbar" role="toolbar" aria-label={t("selectedN").replace("{n}", String(selected.size))}>

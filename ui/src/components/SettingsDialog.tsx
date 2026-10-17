@@ -33,6 +33,7 @@ const SAVE_KEYS = [
   "schedule_window",
   "schedule_outside",
   "schedule_outside_bps",
+  "update_auto",
 ] as const;
 
 // 数值输入允许范围（§3.2/A21）：blur 与保存时 clamp，不依赖 HTML min/max 兜底
@@ -443,6 +444,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <div className="form-section-title">05 / {t("updateSection")}</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={field("update_auto") !== "off"}
+            onChange={(e) => set("update_auto", e.target.checked ? "on" : "off")}
+          />
+          {t("updateAuto")}
+        </label>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           {version && <span style={{ color: "var(--muted)", fontSize: 11 }}>v{version}</span>}
           <button

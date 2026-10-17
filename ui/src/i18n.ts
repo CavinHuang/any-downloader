@@ -217,6 +217,7 @@ const zh: Dict = {
   removedN: "已删除 {n} 条记录",
   // —— 自动更新（GitHub Releases 分发，docs/RELEASE.md）——
   updateSection: "关于与更新",
+  updateAuto: "自动检查并后台下载更新（每 6 小时，可手动重启生效）",
   updateCheckNow: "检查更新",
   updateChecking: "检查中…",
   updateUpToDate: "已是最新版本 ✓",
@@ -225,6 +226,7 @@ const zh: Dict = {
   updateInstalling: "正在下载安装…",
   updateReady: "更新已就绪，重启后生效",
   updateRestart: "立即重启",
+  updateReadyTooltip: "更新已就绪 —— 打开设置，点「立即重启」生效",
   updateFailed: "更新失败",
   // —— yt-dlp 自动更新 / 定时错峰 / 远程添加 ——
   ytdlpAutoUpdate: "自动更新 yt-dlp（保持站点适配最新）",
@@ -454,6 +456,7 @@ const en: Dict = {
   canceledN: "Canceled {n} tasks",
   removedN: "Removed {n} records",
   updateSection: "About & updates",
+  updateAuto: "Check & download updates automatically (every 6 h; restart to apply)",
   updateCheckNow: "Check for updates",
   updateChecking: "Checking…",
   updateUpToDate: "You're up to date ✓",
@@ -462,6 +465,7 @@ const en: Dict = {
   updateInstalling: "Downloading & installing…",
   updateReady: "Update ready — restart to apply",
   updateRestart: "Restart now",
+  updateReadyTooltip: "Update ready — open Settings and click Restart to apply",
   updateFailed: "Update failed",
   ytdlpAutoUpdate: "Auto-update yt-dlp (keep site adapters fresh)",
   schedule: "Scheduled off-peak downloads",

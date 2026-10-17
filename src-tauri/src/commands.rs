@@ -152,6 +152,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "schedule_window",
         "schedule_outside",
         "schedule_outside_bps",
+        "update_auto",
     ] {
         let v = engine.get_setting(key).await.map_err(str_err)?;
         out.insert(
