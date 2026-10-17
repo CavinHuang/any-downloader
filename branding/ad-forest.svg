@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Anything Downloader AD monogram">
+ <defs>
+  <linearGradient id="tile" x1="0" x2="0.95" y1="0" y2="1"><stop stop-color="#1A312B"/><stop offset="1" stop-color="#2E5040"/></linearGradient>
+  <linearGradient id="d" x1=".18" y1="0" x2=".95" y2="1"><stop stop-color="#B6D4C0"/><stop offset="1" stop-color="#83A998"/></linearGradient>
+  <linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FCF9EC"/><stop offset="1" stop-color="#E0F1D1"/></linearGradient>
+  <linearGradient id="bar" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#D5EAA3"/><stop offset="1" stop-color="#BBD879"/></linearGradient>
+ </defs>
+ <!-- Border stays inside the square; outside remains truly transparent. -->
+ <rect x="14" y="14" width="484" height="484" rx="110" fill="url(#tile)"/>
+ <rect x="15" y="15" width="482" height="482" rx="109" fill="none" stroke="#4F7360" stroke-opacity=".5" stroke-width="2"/>
+ <path d="M 266 132 H 315 C 390 132 421 180 421 255 C 421 327 385 382 315 382 H 271" fill="none" stroke="url(#d)" stroke-width="77" stroke-linecap="round" stroke-linejoin="round"/>
+ <path d="M 112 381 L 225 136 Q 229 129 234 136 L 355 381" fill="none" stroke="url(#a)" stroke-width="77" stroke-linecap="round" stroke-linejoin="round"/>
+ <path d="M 171 305 L 287 305" fill="none" stroke="url(#bar)" stroke-width="34" stroke-linecap="round"/>
+</svg>
