@@ -8,7 +8,6 @@
 extension/.key-info.txt
 node_modules/
 src-tauri/binaries/
-src-tauri/resources/
 ui/dist/
 src-tauri/gen/schemas/
 anything-downloader-extension.zip

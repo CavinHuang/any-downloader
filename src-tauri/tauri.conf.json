@@ -5,7 +5,7 @@
   "identifier": "com.anythingdownloader.app",
   "build": {
     "frontendDist": "../ui/dist",
-    "beforeBuildCommand": "npm --prefix ../ui run build && node ../scripts/stage-extension.mjs"
+    "beforeBuildCommand": "npm --prefix ../ui run build"
   },
   "app": {
     "windows": [
@@ -52,7 +52,7 @@
       "binaries/deno"
     ],
     "resources": {
-      "resources/extension": "extension"
+      "../extension": "extension"
     }
   },
   "plugins": {

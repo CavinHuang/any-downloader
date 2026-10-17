@@ -14,9 +14,8 @@ Chrome/Edge 的 MV3 扩展负责「眼睛和手」：嗅探资源、推送任务
 | `dl-server nm-shim` | 同一二进制的 NM 模式 | Chrome 拉起的 stdio ↔ 管道薄桥 |
 | `dl-server serve` | 常驻进程 | 持有引擎，执行下载 |
 | `scripts/register-nm-host.ps1` | 注册脚本 | 取消注册 / 显式刷新（dl-app 启动已自动注册） |
-| `scripts/stage-extension.mjs` | 打包前暂存 | `extension/` → `src-tauri/resources/extension/`（排除 fixtures），经 tauri resources 随安装器装进软件目录 |
 
-扩展除独立 zip（Release 资产 `anything-downloader-extension.zip`）外，还随桌面端安装器一起分发：`tauri.conf.json` 的 `beforeBuildCommand` 先跑暂存脚本，`bundle.resources` 把目录映射到安装后的 `extension/`；桌面端设置页「安装浏览器扩展」按钮弹窗（`ExtensionDialog`）读取 `extension_bundle` 命令给出的实际路径指引用户加载。
+扩展除独立 zip（Release 资产 `anything-downloader-extension.zip`）外，还随桌面端安装器一起分发：`tauri.conf.json` 的 `bundle.resources` 把仓库 `extension/` 目录直接映射到安装后的 `extension/`（`../extension` 路径始终存在，`cargo check` 无需预处理；仓库内测试 fixtures 会一并进入安装目录，均为惰性样本文件，体积 ~50KB 可忽略）。桌面端设置页「安装浏览器扩展」按钮弹窗（`ExtensionDialog`）读取 `extension_bundle` 命令给出的实际路径指引用户加载。
 
 扩展 ID 由 `manifest.json` 的 `key` 固定为
 **`jeigecniniligfiigmmanjeiaooiiomc`**（unpacked 加载 ID 稳定，

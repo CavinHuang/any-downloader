@@ -58,9 +58,10 @@ cat ~/.tauri/any-downloader.key
 - `anything-downloader-extension.zip` — 浏览器扩展独立安装包（`extension-package` job
   直接 zip `extension/`，排除本地测试用 fixtures；资产名固定，landing 页经
   `releases/latest/download/` 直链引用，勿改名。用户教程见 [EXTENSION-INSTALL.md](EXTENSION-INSTALL.md)）
-- 此外 `tauri.conf.json` 的 `bundle.resources` 会把暂存后的扩展（`beforeBuildCommand`
-  跑 `scripts/stage-extension.mjs`）随三平台安装包装进软件目录——应用内
-  「安装浏览器扩展」弹窗据此指引，改扩展后无需单独配置。
+- 此外 `tauri.conf.json` 的 `bundle.resources` 会把仓库 `extension/` 目录随三平台
+  安装包装进软件目录（`../extension` 直接映射，无暂存步骤；安装目录会包含
+  惰性的本地测试 fixtures，独立 zip 仍排除）。应用内「安装浏览器扩展」弹窗
+  据此指引，改扩展后无需单独配置。
 
 三平台并行构建（release.yml 矩阵）。macOS 应用未签名——如需消除 Gatekeeper
 提示，后续接入 Apple Developer ID 签名与公证（TAURI_APPLE 名下 Secrets）。
