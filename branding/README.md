@@ -1,22 +1,21 @@
-# Anything Downloader — AD brand mark
+# Anything Downloader — official AD PNG brand icon
 
-Canonical, resolution-independent vector: `branding/ad-mark.svg` (1024 × 1024 viewBox).
+Source of truth: `branding/ad-logo-source.png`, the **original 1254 × 1254 PNG** supplied in the design conversation. Do not approximate or redraw it as an SVG.
 
-The new combined **AD** monogram matches the Anything Studio design:
-- paper tile `#fbfaf6`; forest-ink A `#293c34`
-- sage D `#8da994`; soft-lime crossbar `#c1d39a`
+The source contains the pale cream tile and the softly shaded blue/sage green interwoven AD monogram. Pixel-level artwork is preserved; derivative app sizes crop only the surrounding presentation margin (80px on all sides), then use LANCZOS scaling.
 
-All product surfaces now reference the same design:
-- Desktop: Tauri `src-tauri/icons/{32x32.png,128x128.png,icon.ico}`; tray icon follows Tauri's default window icon.
-- Browser extension: `extension/icons/mark.svg` and four PNG files referenced by `extension/manifest.json`.
-- Web app: `ui/public/brand-mark.svg`, displayed in the header and as favicon.
-- Product site: `landing/assets/mark.svg` and `landing/assets/icon-128.png`.
+| Use | Paths |
+| --- | --- |
+| Desktop (Tauri / Windows) | `src-tauri/icons/32x32.png`, `src-tauri/icons/128x128.png`, `src-tauri/icons/icon.ico` |
+| App header and favicon | `ui/public/brand-mark.png`, `ui/public/favicon.png` |
+| Browser extension | `extension/icons/{16,32,48,128}.png` |
+| Landing | `landing/assets/icon-128.png` |
 
-To regenerate all assets from the canonical SVG:
+Generate all assets from the original PNG:
 
-```sh
-python -m pip install cairosvg Pillow
+```shell
+python -m pip install Pillow
 python scripts/generate_ad_icons.py
 ```
 
-ICO contains 16/24/32/48/64/128/256px frames for Windows shell sizes. Extension icons are 16, 32, 48 and 128px. All raster assets are committed so normal application builds do not need Python dependencies.
+The generated files are committed so normal builds need no image toolchain. ICO embeds 16, 24, 32, 48, 64, 128 and 256px. No raster-to-vector tracing is involved.
