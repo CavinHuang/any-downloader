@@ -6,6 +6,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod schedule;
+mod ytdlp_update;
 
 use dl_engine::Engine;
 use tauri::{
@@ -127,6 +129,7 @@ thread: {:?}
             // 引擎事件 → WebView（100ms 聚合进度 + 状态变更）
             {
                 let engine = engine.clone();
+                let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut rx = engine.subscribe();
                     loop {
@@ -158,6 +161,15 @@ thread: {:?}
                     }
                 });
             }
+
+            // yt-dlp 自动更新（延迟首查 + 24h 轮询）与定时错峰调度
+            let engine_bg = engine.clone();
+            ytdlp_update::spawn(handle.clone(), engine_bg.clone());
+            schedule::spawn(engine_bg);
+
+            // 远程添加：恢复上次的开关状态
+            app.manage(commands::RemoteState::default());
+            commands::remote_autostart(&engine, &app.state::<commands::RemoteState>());
 
             app.manage(AppState { engine });
 
@@ -228,6 +240,8 @@ thread: {:?}
             commands::nm_registered,
             commands::set_priority,
             commands::rename_task,
+            commands::remote_status,
+            commands::set_remote_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

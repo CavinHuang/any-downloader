@@ -75,6 +75,18 @@ export interface Settings {
   max_concurrent: string | null;
   max_auto_retry: string | null;
   auto_categorize: string | null;
+  ytdlp_auto_update: string | null;
+  schedule_enabled: string | null;
+  schedule_window: string | null;
+  schedule_outside: string | null;
+  schedule_outside_bps: string | null;
+}
+
+export interface RemoteStatus {
+  enabled: boolean;
+  port: number;
+  urls: string[];
+  qr: string | null;
 }
 
 const running = new Set([
@@ -123,6 +135,8 @@ export const api = {
   exportTasks: (path: string) => invoke<number>("export_tasks", { path }),
   importTasks: (path: string) => invoke<number>("import_tasks", { path }),
   probeUrl: (url: string) => invoke<ProbeInfo>("probe_url", { url }),
+  remoteStatus: () => invoke<RemoteStatus>("remote_status"),
+  setRemoteEnabled: (on: boolean) => invoke<RemoteStatus>("set_remote_enabled", { on }),
 };
 
 export function listenEngineEvents(

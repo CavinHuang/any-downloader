@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
-import { api, Settings } from "../api";
+import { api, RemoteStatus, Settings } from "../api";
 import { t } from "../i18n";
 import {
   checkForUpdate,
@@ -27,6 +27,11 @@ const SAVE_KEYS = [
   "max_concurrent",
   "max_auto_retry",
   "auto_categorize",
+  "ytdlp_auto_update",
+  "schedule_enabled",
+  "schedule_window",
+  "schedule_outside",
+  "schedule_outside_bps",
 ] as const;
 
 // 数值输入允许范围（§3.2/A21）：blur 与保存时 clamp，不依赖 HTML min/max 兜底
@@ -36,6 +41,7 @@ const NUM_BOUNDS: Partial<Record<keyof Settings, [number, number]>> = {
   global_bps: [0, Number.MAX_SAFE_INTEGER],
   max_concurrent: [0, Number.MAX_SAFE_INTEGER],
   max_auto_retry: [0, Number.MAX_SAFE_INTEGER],
+  schedule_outside_bps: [0, Number.MAX_SAFE_INTEGER],
 };
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -50,6 +56,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [autoOn, setAutoOn] = useState(false);
   const [version, setVersion] = useState("");
   const [nmOk, setNmOk] = useState<boolean | null>(null);
+  const [remote, setRemote] = useState<RemoteStatus | null>(null);
+  const [remoteBusy, setRemoteBusy] = useState(false);
   const [invalid, setInvalid] = useState<Record<string, boolean>>({});
   // dirty 基线（§3.6）：载入值；保存成功后基线重置为已保存值
   const [baseline, setBaseline] = useState("");
@@ -65,7 +73,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       api.getAutostart().catch(() => false),
       getVersion().catch(() => ""),
       api.nmRegistered().catch(() => null as boolean | null),
-    ]).then(([v, auto, ver, nm]) => {
+      api.remoteStatus().catch(() => null),
+    ]).then(([v, auto, ver, nm, rm]) => {
       const clip = v.clipboard_monitor !== "off";
       const done = v.after_done || "none";
       setS(v);
@@ -75,6 +84,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       setAutoOn(auto);
       setVersion(ver);
       setNmOk(nm);
+      setRemote(rm);
       setBaseline(snapshotOf(v, clip, done, auto));
     }).catch(e => setSaveError(String(e)));
   }, []);
@@ -282,6 +292,17 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           placeholder={t("ytdlpPlaceholder")}
           onChange={(e) => set("yt_dlp_path", e.target.value)}
         />
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={field("ytdlp_auto_update") !== "off"}
+            onChange={(e) =>
+              set("ytdlp_auto_update", e.target.checked ? "on" : "off")
+            }
+          />
+          {t("ytdlpAutoUpdate")}
+        </label>
         <div className="form-section-title">04 / {t("behaviorPreferences")}</div>
         <label>{t("afterDone")}</label>
         <select
@@ -330,6 +351,79 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           />
           {t("autostart")}
         </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={field("schedule_enabled") === "on"}
+            onChange={(e) =>
+              set("schedule_enabled", e.target.checked ? "on" : "off")
+            }
+          />
+          {t("schedule")}
+        </label>
+        {field("schedule_enabled") === "on" && (
+          <>
+            <label>{t("scheduleWindow")}</label>
+            <input
+              value={field("schedule_window")}
+              placeholder="23:00-07:00"
+              onChange={(e) => set("schedule_window", e.target.value)}
+            />
+            <label>{t("scheduleOutside")}</label>
+            <select
+              value={field("schedule_outside") || "pause"}
+              onChange={(e) => set("schedule_outside", e.target.value)}
+            >
+              <option value="pause">{t("outsidePause")}</option>
+              <option value="limit">{t("outsideLimit")}</option>
+            </select>
+            {field("schedule_outside") === "limit" && (
+              <>
+                <label>{t("scheduleOutsideBps")}</label>
+                {numInput("schedule_outside_bps", "1048576")}
+              </>
+            )}
+          </>
+        )}
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={!!remote?.enabled}
+            disabled={remoteBusy}
+            onChange={async (e) => {
+              setRemoteBusy(true);
+              try {
+                setRemote(await api.setRemoteEnabled(e.target.checked));
+              } catch (err) {
+                setSaveError(String(err));
+              } finally {
+                setRemoteBusy(false);
+              }
+            }}
+          />
+          {t("remoteAdd")}
+        </label>
+        {remote?.enabled && (
+          <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+            {remote.qr && (
+              <img
+                src={`data:image/svg+xml;utf8,${encodeURIComponent(remote.qr)}`}
+                width={118}
+                height={118}
+                alt="QR"
+                style={{ borderRadius: 8, border: "1px solid var(--border)", flexShrink: 0 }}
+              />
+            )}
+            <div style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}>
+              {t("remoteScanHint")}
+              {remote.urls.map((u) => (
+                <div key={u}>{u}</div>
+              ))}
+            </div>
+          </div>
+        )}
         <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
           {t("nmStatus")}:
           {nmOk == null ? (

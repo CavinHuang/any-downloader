@@ -1,0 +1,13 @@
+[package]
+name = "dl-remote"
+version.workspace = true
+edition.workspace = true
+description = "Anything Downloader 局域网远程添加：手机扫码/输地址推链接到桌面端"
+
+[dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "macros"] }
+serde_json.workspace = true
+tracing.workspace = true
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+dl-engine.workspace = true
+dl-model.workspace = true

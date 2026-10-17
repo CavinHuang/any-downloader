@@ -1,26 +1,71 @@
-# 发布流水线：版本号变更合入 main 或 tag 推送 → 构建 NSIS 安装包 + updater 签名产物 → GitHub Release。
-# 已安装客户端通过 tauri.conf.json 的 updater 端点
-# （releases/latest/download/latest.json）自动发现并升级，详见 docs/RELEASE.md。
+# 发布流水线：版本号变更合入 main（或推送 tag v*）→ 三平台并行构建
+# （Windows NSIS / macOS app+dmg / Linux AppImage）→ 上传安装包与 updater
+# 签名产物 → latest.json 多平台清单 → 客户端自动更新。详见 docs/RELEASE.md。
 
 name: Release
 
 on:
   push:
-    # A version bump merged to main publishes exactly one version. Tag pushes still work.
+    # 版本号变更合入 main 即精确发布一个版本；tag 推送仍然可用
     branches: [main]
     tags: ["v*"]
     paths:
       - "src-tauri/tauri.conf.json"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      releaseId: ${{ steps.create.outputs.releaseId }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        id: create
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # __VERSION__ 取自 tauri.conf.json，需与推送的 tag 一致
+          tagName: v__VERSION__
+          releaseName: "Anything Downloader v__VERSION__"
+          releaseBody: "Windows 安装包（x64-setup.exe）；macOS 应用未签名，首启需右键 → 打开；Linux 提供 AppImage。已安装用户通过应用内自动更新收到此版本。"
+          releaseDraft: false
+          prerelease: false
+
   build:
-    # 当前产物仅 Windows（bundle.targets=nsis，externalBin 均为 x86_64-pc-windows-msvc）
-    runs-on: windows-latest
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            bundles: ""
+            sidecars: pwsh
+          - os: macos-latest
+            name: macos-arm64
+            bundles: "--bundles app,dmg"
+            sidecars: sh
+          - os: ubuntu-22.04
+            name: linux-x64
+            bundles: "--bundles appimage"
+            sidecars: sh
+            linux: true
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies (WebKitGTK 等)
+        if: matrix.linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -43,16 +88,30 @@ jobs:
       - name: Build sidecar binaries (dl-cli / dl-server)
         run: cargo build --release -p dl-cli -p dl-server
 
-      - name: Copy sidecars into bundle layout
+      - name: Copy sidecars into bundle layout (Windows)
+        if: matrix.sidecars == 'pwsh'
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item target/release/dl-cli.exe src-tauri/binaries/dl-cli-x86_64-pc-windows-msvc.exe -Force
           Copy-Item target/release/dl-server.exe src-tauri/binaries/dl-server-x86_64-pc-windows-msvc.exe -Force
 
-      - name: Fetch bundled yt-dlp / deno
+      - name: Copy sidecars into bundle layout (macOS/Linux)
+        if: matrix.sidecars == 'sh'
+        run: |
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p src-tauri/binaries
+          cp target/release/dl-cli src-tauri/binaries/dl-cli-$TRIPLE
+          cp target/release/dl-server src-tauri/binaries/dl-server-$TRIPLE
+
+      - name: Fetch bundled yt-dlp / deno (Windows)
+        if: matrix.sidecars == 'pwsh'
         run: ./scripts/fetch-ytdlp.ps1
 
-      - name: Build & publish release
+      - name: Fetch bundled yt-dlp / deno (macOS/Linux)
+        if: matrix.sidecars == 'sh'
+        run: bash scripts/fetch-sidecars.sh
+
+      - name: Build & upload release assets
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,10 +119,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          # __VERSION__ 取自 tauri.conf.json，需与推送的 tag 一致
-          tagName: v__VERSION__
-          releaseName: "Anything Downloader v__VERSION__"
-          releaseBody: "下载 x64-setup 安装包安装；已安装用户会通过应用内自动更新收到此版本。"
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.releaseId }}
+          args: ${{ matrix.bundles }}
           includeUpdaterJson: true

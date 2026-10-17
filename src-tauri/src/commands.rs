@@ -147,6 +147,11 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "auto_categorize",
         "after_done",
         "clipboard_monitor",
+        "ytdlp_auto_update",
+        "schedule_enabled",
+        "schedule_window",
+        "schedule_outside",
+        "schedule_outside_bps",
     ] {
         let v = engine.get_setting(key).await.map_err(str_err)?;
         out.insert(
@@ -334,4 +339,127 @@ pub fn default_download_dir_impl() -> String {
     dirs::download_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_else(|| dl_engine::data_dir().display().to_string())
+}
+
+// ---- 远程添加（手机扫码推链接到桌面端）----
+
+/// 远程服务运行态（None = 未启动）。独立可变状态，与引擎解耦。
+#[derive(Default)]
+pub struct RemoteState {
+    pub server: std::sync::Mutex<Option<dl_remote::RemoteServer>>,
+}
+
+/// 配对令牌：时间纳秒 ⊕ 进程 id 折叠成 8 位 hex，仅局域网配对用。
+fn gen_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() ^ (d.subsec_nanos() as u64).rotate_left(20))
+        .unwrap_or(0)
+        ^ (std::process::id() as u64).rotate_left(13);
+    format!("{:08x}", n & 0xffff_ffff)
+}
+
+async fn remote_conf(engine: &Engine) -> (u16, String) {
+    let port = engine
+        .get_setting("remote_port")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(dl_remote::DEFAULT_PORT);
+    let token = match engine
+        .get_setting("remote_token")
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| s.len() >= 6)
+    {
+        Some(t) => t,
+        None => {
+            let t = gen_token();
+            let _ = engine.set_setting("remote_token", &t).await;
+            t
+        }
+    };
+    (port, token)
+}
+
+#[tauri::command]
+pub async fn remote_status(
+    state: State<'_, RemoteState>,
+    engine: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let enabled = state.server.lock().unwrap().is_some();
+    let (port, token) = remote_conf(&engine.engine).await;
+    let urls = dl_remote::lan_urls(port, &token);
+    let qr = urls.first().and_then(|u| dl_remote::qr_svg(u));
+    Ok(serde_json::json!({
+        "enabled": enabled,
+        "port": port,
+        "urls": urls,
+        "qr": qr,
+    }))
+}
+
+#[tauri::command]
+pub async fn set_remote_enabled(
+    on: bool,
+    state: State<'_, RemoteState>,
+    engine: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    if on {
+        let already = {
+            let guard = state.server.lock().unwrap();
+            guard.is_some()
+        };
+        if already {
+            return remote_status(state, engine).await;
+        }
+        let (port, token) = remote_conf(&engine.engine).await;
+        // 先启动后加锁（await 不持 std 锁）；竞态多启的实例随 drop 关闭
+        let server = dl_remote::RemoteServer::start(engine.engine.clone(), port, token)
+            .await
+            .map_err(|e| format!("启动失败（端口 {port} 可能被占用）：{e}"))?;
+        {
+            let mut guard = state.server.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(server);
+            }
+        }
+    } else if let Some(s) = state.server.lock().unwrap().take() {
+        s.stop();
+    }
+    let _ = engine
+        .engine
+        .set_setting("remote_enabled", if on { "on" } else { "off" })
+        .await;
+    remote_status(state, engine).await
+}
+
+/// 开机即恢复上次的远程开关（setup 同步上下文里调用）。
+pub fn remote_autostart(engine: &Engine, state: &RemoteState) {
+    let on = tauri::async_runtime::block_on(async {
+        engine
+            .get_setting("remote_enabled")
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|v| v == "on")
+    });
+    if !on {
+        return;
+    }
+    let (port, token) = tauri::async_runtime::block_on(remote_conf(engine));
+    match tauri::async_runtime::block_on(dl_remote::RemoteServer::start(
+        engine.clone(),
+        port,
+        token,
+    )) {
+        Ok(server) => {
+            *state.server.lock().unwrap() = Some(server);
+            tracing::info!(port, "remote add server started");
+        }
+        Err(e) => tracing::warn!(error = %e, "remote server autostart failed"),
+    }
 }

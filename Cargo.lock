@@ -605,8 +605,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -1054,6 +1056,7 @@ dependencies = [
 name = "dl-app"
 version = "0.2.7"
 dependencies = [
+ "chrono",
  "dirs 5.0.1",
  "dl-engine",
  "dl-error",
@@ -1061,6 +1064,8 @@ dependencies = [
  "dl-ipc",
  "dl-model",
  "dl-net",
+ "dl-remote",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
@@ -1221,6 +1226,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "dl-remote"
+version = "0.2.7"
+dependencies = [
+ "dl-engine",
+ "dl-model",
+ "qrcode",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3680,6 +3697,12 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"

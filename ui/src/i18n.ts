@@ -213,6 +213,16 @@ const zh: Dict = {
   updateReady: "更新已就绪，重启后生效",
   updateRestart: "立即重启",
   updateFailed: "更新失败",
+  // —— yt-dlp 自动更新 / 定时错峰 / 远程添加 ——
+  ytdlpAutoUpdate: "自动更新 yt-dlp（保持站点适配最新）",
+  schedule: "定时错峰下载",
+  scheduleWindow: "下载时段（如 23:00-07:00，可跨午夜）",
+  scheduleOutside: "时段外",
+  outsidePause: "自动暂停全部任务",
+  outsideLimit: "限制总速度",
+  scheduleOutsideBps: "时段外限速（字节/秒）",
+  remoteAdd: "远程添加（手机扫码推链接）",
+  remoteScanHint: "手机浏览器打开以下地址，即可推送链接：",
 };
 
 const en: Dict = {
@@ -427,6 +437,15 @@ const en: Dict = {
   updateReady: "Update ready — restart to apply",
   updateRestart: "Restart now",
   updateFailed: "Update failed",
+  ytdlpAutoUpdate: "Auto-update yt-dlp (keep site adapters fresh)",
+  schedule: "Scheduled off-peak downloads",
+  scheduleWindow: "Download window (e.g. 23:00-07:00, may cross midnight)",
+  scheduleOutside: "Outside the window",
+  outsidePause: "Pause all tasks",
+  outsideLimit: "Limit total speed",
+  scheduleOutsideBps: "Off-peak speed limit (B/s)",
+  remoteAdd: "Remote add (scan QR from phone)",
+  remoteScanHint: "Open this address in your phone browser to push links:",
 };
 
 const lang = navigator.language.toLowerCase().startsWith("zh") ? zh : en;

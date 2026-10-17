@@ -274,13 +274,21 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     let stem = out_stem(&raw_name);
     let out_path = std::path::Path::new(&dir).join(&stem);
 
-    // 解析链：设置显式路径 > 应用目录内置副本（安装器自带）> PATH
+    // 解析链：设置显式路径 > 数据目录托管副本（自动更新落点，跨版本存活）>
+    // 应用目录内置副本（安装器自带）> PATH
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|x| x.to_path_buf()));
+    let managed = crate::managed_bin_dir().join(crate::managed_ytdlp_name());
     let bundled = exe_dir
         .as_ref()
-        .map(|d| d.join("yt-dlp.exe"))
+        .map(|d| {
+            d.join(if cfg!(windows) {
+                "yt-dlp.exe"
+            } else {
+                "yt-dlp"
+            })
+        })
         .filter(|p| p.exists());
     let (exe, via_setting) = match ctx
         .engine
@@ -290,6 +298,7 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
         .filter(|s| !s.trim().is_empty())
     {
         Some(p) => (p, true),
+        None if managed.exists() => (managed.display().to_string(), false),
         None => match bundled {
             Some(p) => (p.display().to_string(), false),
             None => ("yt-dlp".into(), false),
@@ -315,7 +324,12 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     // PATH 注入：内置目录（yt-dlp/deno 同目录）、ffmpeg 目录
     let mut path_prepend = Vec::new();
     if let Some(d) = &exe_dir {
-        if d.join("yt-dlp.exe").exists() || d.join("deno.exe").exists() {
+        let has_sidecar = if cfg!(windows) {
+            d.join("yt-dlp.exe").exists() || d.join("deno.exe").exists()
+        } else {
+            d.join("yt-dlp").exists() || d.join("deno").exists()
+        };
+        if has_sidecar {
             path_prepend.push(d.clone());
         }
     }

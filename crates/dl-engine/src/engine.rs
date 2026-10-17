@@ -50,6 +50,8 @@ pub struct Engine {
     events: broadcast::Sender<EngineEvent>,
     runs: Arc<Mutex<HashMap<String, RunControl>>>,
     limiter: dl_throttle::Limiter,
+    /// 全局限速实时覆盖（B/s，0 = 不覆盖；错峰时段外限速用，设置值之上的临时值）。
+    global_override: Arc<std::sync::atomic::AtomicU64>,
     sequence: Arc<std::sync::atomic::AtomicU64>,
     /// 数据根目录（db 所在目录）；journal 等工作文件放在其下。
     root: std::path::PathBuf,
@@ -67,6 +69,7 @@ impl Engine {
             events,
             runs: Arc::new(Mutex::new(HashMap::new())),
             limiter: dl_throttle::Limiter::unlimited(),
+            global_override: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             root,
         })
@@ -95,8 +98,20 @@ impl Engine {
         global: Option<u64>,
         task: Option<u64>,
     ) -> dl_throttle::Limiter {
+        // 错峰覆盖优先：非 0 时压过设置里的全局限速（共享 Limiter 实时生效）
+        let o = self
+            .global_override
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let global = if o > 0 { Some(o) } else { global };
         self.limiter.set_global_rate(global);
         self.limiter.with_task(task)
+    }
+
+    /// 设置全局限速实时覆盖（B/s；0 = 清除覆盖，回到设置值）。
+    /// 对共享 Limiter 立即生效；托管子进程（yt-dlp）仅对新启动任务生效。
+    pub fn set_global_rate_override(&self, bps: u64) {
+        self.global_override
+            .store(bps, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub async fn start(&self, id: &str) -> Res<Task> {
@@ -120,6 +135,51 @@ impl Engine {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             c.token.cancel();
             n += 1;
+        }
+        n
+    }
+
+    /// 启动全部可恢复任务（paused/waiting_retry/queued），返回发起数量。
+    /// 供定时错峰进入下载时段使用；并发上限由队列准入控制，已在队列的任务跳过。
+    pub async fn start_resumable_all(&self) -> usize {
+        let ids: Vec<String> = match self.list_tasks(None).await {
+            Ok(list) => list
+                .into_iter()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        TaskStatus::Paused | TaskStatus::WaitingRetry | TaskStatus::Queued
+                    )
+                })
+                .map(|t| t.id)
+                .collect(),
+            Err(_) => return 0,
+        };
+        let mut n = 0;
+        for id in ids {
+            if self.start(&id).await.is_ok() {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 暂停全部活动与排队任务：运行中走协作 checkpoint，排队/等待重试转入 paused。
+    /// 供定时错峰离开下载时段（暂停策略）使用，返回处理数量。
+    pub async fn pause_all(&self) -> usize {
+        let mut n = self.request_pause_all();
+        let ids: Vec<String> = match self.list_tasks(None).await {
+            Ok(list) => list
+                .into_iter()
+                .filter(|t| matches!(t.status, TaskStatus::Queued | TaskStatus::WaitingRetry))
+                .map(|t| t.id)
+                .collect(),
+            Err(_) => return n,
+        };
+        for id in ids {
+            if self.pause(&id).await.is_ok() {
+                n += 1;
+            }
         }
         n
     }

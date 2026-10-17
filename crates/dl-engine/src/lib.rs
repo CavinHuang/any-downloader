@@ -21,3 +21,17 @@ pub fn data_dir() -> std::path::PathBuf {
         .map(|d| d.join("anything-downloader"))
         .unwrap_or_else(|| std::env::temp_dir().join("anything-downloader"))
 }
+
+/// 自动更新二进制的托管目录（数据目录下：可写、跨应用版本存活）。
+pub fn managed_bin_dir() -> std::path::PathBuf {
+    data_dir().join("managed")
+}
+
+/// 托管 yt-dlp 的文件名（平台后缀）。
+pub fn managed_ytdlp_name() -> &'static str {
+    if cfg!(windows) {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    }
+}

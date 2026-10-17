@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/dl-ipc", "crates/dl-error", "crates/dl-model", "crates/dl-persist", "crates/dl-throttle",
     "crates/dl-journal", "crates/dl-segment", "crates/dl-filename", "crates/dl-net",
-    "crates/dl-io", "crates/dl-engine", "crates/dl-testserver", "crates/dl-cli", "crates/dl-server", "crates/dl-ytdlp",
+    "crates/dl-io", "crates/dl-engine", "crates/dl-testserver", "crates/dl-cli", "crates/dl-server", "crates/dl-ytdlp", "crates/dl-remote",
     "src-tauri",
 ]
 
@@ -56,6 +56,7 @@ dl-net = { path = "crates/dl-net" }
 dl-io = { path = "crates/dl-io" }
 dl-engine = { path = "crates/dl-engine" }
 dl-testserver = { path = "crates/dl-testserver" }
+dl-remote = { path = "crates/dl-remote" }
 
 [profile.release]
 lto = "thin"

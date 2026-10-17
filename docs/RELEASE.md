@@ -51,12 +51,13 @@ cat ~/.tauri/any-downloader.key
 
 每次发布会产出：
 
-- `Anything.Downloader_<ver>_x64-setup.exe` — 常规安装包
-- `Anything.Downloader_<ver>_x64-setup.nsis.zip` + `.sig` — updater 增量载体（签名）
-- `latest.json` — 版本清单（版本号 / 发布时间 / 各平台包 URL + 签名）
+- Windows：`Anything.Downloader_<ver>_x64-setup.exe`（安装包）+ updater 签名产物
+- macOS arm64：`.dmg` / `.app`（未签名，首启需右键 → 打开）+ `.app.tar.gz` + `.sig`
+- Linux x64：`.AppImage` + `.AppImage.sig`
+- `latest.json` — 多平台版本清单（windows-x86_64 / darwin-aarch64 / linux-x86_64）
 
-当前仅构建 Windows x64（NSIS）。跨平台分发时扩展 release.yml 矩阵，
-并在 latest.json 生成对应平台键（`windows-x86_64`、`darwin-aarch64`…）。
+三平台并行构建（release.yml 矩阵）。macOS 应用未签名——如需消除 Gatekeeper
+提示，后续接入 Apple Developer ID 签名与公证（TAURI_APPLE 名下 Secrets）。
 
 ## 本地验证
 
