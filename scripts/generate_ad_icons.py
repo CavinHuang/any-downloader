@@ -10,7 +10,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "branding" / "ad-logo-source.png"
-source = Image.open(SOURCE).convert("RGB")
+source = Image.open(SOURCE).convert("RGBA")
 if source.size != (1254, 1254):
     raise ValueError(f"Unexpected AD source image dimensions: {source.size}")
 icon = source.crop((80, 80, 1174, 1174))

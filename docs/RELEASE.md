@@ -5,7 +5,7 @@
 ## 分发链路
 
 ```
-推送 tag v* → GitHub Actions（.github/workflows/release.yml）
+main 合并版本号变更（或推送 tag v*）→ GitHub Actions（.github/workflows/release.yml）
   → tauri build（NSIS 安装包 + updater 签名产物 *.nsis.zip / *.nsis.zip.sig）
   → 创建 GitHub Release，上传安装包与 latest.json
   → 已安装客户端按 tauri.conf.json 的端点轮询：
@@ -40,21 +40,12 @@ cat ~/.tauri/any-downloader.key
 
 ## 发布步骤
 
-1. 改版本号：`src-tauri/tauri.conf.json` 的 `version`（同时是安装包与
-   latest.json 的版本号）。注意根 `Cargo.toml` workspace 版本（当前 0.2.7）
-   与其不一致，不影响更新判定，可顺手对齐。
-2. 提交后打 tag，**tag 必须与配置版本一致**（工作流用 `v__VERSION__`
-   取自 tauri.conf.json，不一致会创建错位 tag）：
+1. 在 PR 中将 `src-tauri/tauri.conf.json` 的 `version` 更新到新版本（如 `0.4.1`）。
+2. 确认 CI 通过后将 PR 合并到 `main`。工作流只在配置文件版本变更时自动发布，`tauri-action` 根据配置创建相应的 `v__VERSION__` tag 和 GitHub Release。
+3. 也可手动推送与配置版本相同的 `v*` tag，沿用原有发布流程。**切勿用不匹配的版本 tag 发布。**
+4. Release 页核对安装包及签名、`latest.json`，再核对客户端自动更新端点。工作流采用 `releaseDraft: false`，成功后直接发布。
 
-   ```bash
-   git tag v0.4.1
-   git push origin v0.4.1
-   ```
-
-3. Actions 跑完即发布（`releaseDraft: false`）。`latest.json` 挂在
-   Release 资产里，端点 URL 只解析**最新已发布** release——draft 不会
-   下发给用户。想先人工审包，可把工作流改为 `releaseDraft: true`，
-   检查后点 Publish 放量。
+根 `Cargo.toml` workspace 版本可能独立于桌面产品版本，并非 updater 的判定依据。
 
 ## 更新包产物
 

@@ -1,4 +1,4 @@
-# 发布流水线：tag 推送 → 构建 NSIS 安装包 + updater 签名产物 → GitHub Release。
+# 发布流水线：版本号变更合入 main 或 tag 推送 → 构建 NSIS 安装包 + updater 签名产物 → GitHub Release。
 # 已安装客户端通过 tauri.conf.json 的 updater 端点
 # （releases/latest/download/latest.json）自动发现并升级，详见 docs/RELEASE.md。
 
@@ -6,7 +6,11 @@ name: Release
 
 on:
   push:
+    # A version bump merged to main publishes exactly one version. Tag pushes still work.
+    branches: [main]
     tags: ["v*"]
+    paths:
+      - "src-tauri/tauri.conf.json"
   workflow_dispatch:
 
 jobs:
