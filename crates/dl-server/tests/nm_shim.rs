@@ -46,9 +46,18 @@ struct Env {
 
 fn make_env(tag: &str) -> (tempfile::TempDir, Env) {
     let dir = tempfile::tempdir().unwrap();
+    // 端点形态随平台：Windows 命名管道；unix 为 tempdir 内 UDS 路径（dir 由调用方持有）
+    let pipe = if cfg!(windows) {
+        format!(r"\\.\pipe\anything-dl-test-{tag}")
+    } else {
+        dir.path()
+            .join(format!("anything-dl-test-{tag}.sock"))
+            .to_string_lossy()
+            .into_owned()
+    };
     let env = Env {
         db_dir: dir.path().join("data"),
-        pipe: format!(r"\\.\pipe\anything-dl-test-{tag}"),
+        pipe,
     };
     std::fs::create_dir_all(&env.db_dir).unwrap();
     (dir, env)

@@ -24,14 +24,25 @@ mod imp {
 
 pub use imp::{connect, IpcClient};
 
-pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\anything-dl";
+/// 平台默认端点：Windows 命名管道；macOS/Linux 走数据目录下的 UDS 路径。
+#[cfg(windows)]
+pub fn default_pipe_name() -> String {
+    r"\\.\pipe\anything-dl".to_string()
+}
 
-/// 解析 IPC 端点名称（参数 > 环境变量 > 默认）。
+#[cfg(unix)]
+pub fn default_pipe_name() -> String {
+    super::uds::default_socket_path()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// 解析 IPC 端点名称（参数 > 环境变量 > 平台默认）。
 pub fn resolve_pipe_name(explicit: Option<&str>) -> String {
     explicit
         .map(|s| s.to_string())
         .or_else(|| std::env::var("ANYTHING_DL_PIPE").ok())
-        .unwrap_or_else(|| DEFAULT_PIPE_NAME.to_string())
+        .unwrap_or_else(default_pipe_name)
 }
 
 impl IpcClient {

@@ -9,7 +9,7 @@ pub mod pipe;
 #[cfg(unix)]
 pub mod uds;
 
-pub use client_conn::{connect, resolve_pipe_name, IpcClient, DEFAULT_PIPE_NAME};
+pub use client_conn::{connect, default_pipe_name, resolve_pipe_name, IpcClient};
 pub use ipc::{read_frame, write_frame, Request, Response, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 
 /// 以默认端点托管引擎 IPC（阻塞当前 task；由宿主 spawn）。

@@ -1,6 +1,6 @@
 # Anything Downloader
 
-高性能网页资源下载管理器。设计文档见 [docs/DESIGN.md](docs/DESIGN.md)。
+高性能网页资源下载管理器。产品主页：[cavinhuang.github.io/any-downloader](https://cavinhuang.github.io/any-downloader/)（源码 [landing/](landing/),推送自动部署到 GitHub Pages）。设计文档见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 结构（按能力拆分，一能力一 crate）
 
