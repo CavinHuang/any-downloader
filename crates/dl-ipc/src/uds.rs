@@ -10,7 +10,7 @@ use tokio::net::UnixListener;
 use crate::ipc;
 
 pub fn default_socket_path() -> PathBuf {
-    dl_core::data_dir().join("ipc.sock")
+    dl_engine::data_dir().join("ipc.sock")
 }
 
 pub async fn serve(engine: Engine, path: &Path) -> io::Result<()> {
