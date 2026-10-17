@@ -1,0 +1,33 @@
+# 产品落地页 → GitHub Pages（landing/ 静态站,无构建步骤）
+# 首次启用:仓库 Pages 源需设为 GitHub Actions(build_type=workflow,已用 API 配置)。
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["landing/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing
+      - id: deployment
+        uses: actions/deploy-pages@v4
