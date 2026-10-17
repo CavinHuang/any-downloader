@@ -114,7 +114,7 @@ cargo build --release -p dl-app
 - [x] NM host 注册脚本（HKCU，Chrome+Edge）+ macOS 手册
 - [x] 全链路集成测试（浏览器之外：serve + shim + NM 帧 → 引擎下载字节一致）
 
-开发链路见 [docs/EXTENSION-DEV.md](docs/EXTENSION-DEV.md)。
+开发链路见 [docs/EXTENSION-DEV.md](docs/EXTENSION-DEV.md)。发布与自动更新见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 站点适配（v0.4.0 / 扩展 v0.6.0）
 

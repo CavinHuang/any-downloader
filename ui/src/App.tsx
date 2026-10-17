@@ -1,82 +1,61 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { api, isActive, listenEngineEvents, Task, TaskStatus } from "./api";
 
 // 剪贴板事件监听（复用 tauri event 通道）
 function listenEngineEventsClip(cb: (url: string) => void) {
-  return import("@tauri-apps/api/event").then(({ listen }) =>
-    listen<{ url: string }>("clipboard-url", (e) => cb(e.payload.url))
-  );
+  return listen<{ url: string }>("clipboard-url", (e) => cb(e.payload.url));
 }
 import { open as pickFile, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { t } from "./i18n";
 import { ROW_H } from "./const";
 import { dismissToast, getToasts, showToast, subscribeToasts } from "./toast";
+import {
+  dismissUpdate,
+  getUpdateState,
+  installUpdate,
+  restartToUpdate,
+  scheduleStartupCheck,
+  subscribeUpdate,
+} from "./updater";
 import { AddDialog } from "./components/AddDialog";
 import { DetailDrawer } from "./components/DetailDrawer";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TaskRow } from "./components/TaskRow";
 import { store } from "./store";
+import { CATEGORIES, categoryOf, Category } from "./fileTypes";
+import { Icon } from "./components/Icon";
+import { EmptyCollection } from "./components/EmptyCollection";
+import { TransferPanel } from "./components/TransferPanel";
 
 type Filter = "all" | "active" | "done" | "failed" | "other";
-type Category =
-  | "all"
-  | "video"
-  | "audio"
-  | "archive"
-  | "doc"
-  | "software"
-  | "image"
-  | "other";
-
-const CAT_RULES: [RegExp, Category][] = [
-  [/\.(mp4|mkv|webm|avi|mov|wmv|flv|m4v|ts|m3u8|mpd)$/i, "video"],
-  [/\.(mp3|flac|m4a|aac|ogg|wav|ape)$/i, "audio"],
-  [/\.(zip|rar|7z|tar|gz)$/i, "archive"],
-  [/\.(pdf|epub|docx?|xlsx?|pptx?)$/i, "doc"],
-  [/\.(exe|msi|apk|dmg)$/i, "software"],
-  [/\.(jpe?g|png|gif|webp)$/i, "image"],
-];
-
-function categoryOf(t: Task): Category {
-  if (t.kind === "hls") return "video";
-  const name = (t.filename ?? t.url.split("?")[0] ?? "").toLowerCase();
-  for (const [re, cat] of CAT_RULES) {
-    if (re.test(name)) return cat;
-  }
-  return "other";
-}
-
-const CAT_META: { key: Category; icon: string; label: string }[] = [
-  { key: "all", icon: "🗂", label: "catAll" },
-  { key: "video", icon: "🎬", label: "catVideo" },
-  { key: "audio", icon: "🎵", label: "catAudio" },
-  { key: "archive", icon: "📦", label: "catArchive" },
-  { key: "doc", icon: "📄", label: "catDoc" },
-  { key: "software", icon: "⚙️", label: "catSoftware" },
-  { key: "image", icon: "🖼", label: "catImage" },
-  { key: "other", icon: "•", label: "catOther" },
-];
-
 const OVERSCAN = 8;
 
 export function App() {
   const tasks = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const toasts = useSyncExternalStore(subscribeToasts, getToasts);
+  const upd = useSyncExternalStore(subscribeUpdate, getUpdateState);
   const [filter, setFilter] = useState<Filter>("all");
   const [catFilter, setCatFilter] = useState<Category>("all");
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [draftUrl, setDraftUrl] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
   // A12：只存 id，详情任务渲染时从 store 快照按 id 取（打开期间实时更新）
   const [detailId, setDetailId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [inTauri, setInTauri] = useState(true);
+  const [inTauri] = useState(() => "__TAURI_INTERNALS__" in window);
   const [totalBps, setTotalBps] = useState(0);
   const [clipUrl, setClipUrl] = useState<string | null>(null);
   const [clipBusy, setClipBusy] = useState(false);
-  const [seenClips, setSeenClips] = useState<Set<string>>(new Set());
+  const seenClips = useRef(new Set<string>());
   const [sortKey, setSortKey] = useState<null | "name" | "size" | "speed">(null);
   const [sortDir, setSortDir] = useState<1 | -1>(1);
+  const speedSortRef = useRef(false);
+  const [speedRevision, setSpeedRevision] = useState(0);
+  useEffect(() => { speedSortRef.current = sortKey === "speed"; }, [sortKey]);
   // A17：批量操作进行中标记（按钮 disabled + 「…」）
   const [busyOp, setBusyOp] = useState<string | null>(null);
   // —— 批量选择（行多选 + 上下文操作栏）：选中集合按任务 id 持有 ——
@@ -88,9 +67,14 @@ export function App() {
   const [skeletonOn, setSkeletonOn] = useState(false);
 
   useEffect(() => {
-    // 非 Tauri 环境（纯浏览器打开 vite 页）给出提示而非白屏
-    setInTauri("__TAURI_INTERNALS__" in window);
-  }, []);
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || showAdd || showSettings || detailId) return;
+      if (event.key.toLowerCase() === "k") { event.preventDefault(); searchRef.current?.focus(); }
+      if (event.key.toLowerCase() === "n") { event.preventDefault(); setShowAdd(true); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showAdd, showSettings, detailId]);
 
   useEffect(() => {
     if (!firstLoad) return;
@@ -105,15 +89,15 @@ export function App() {
       .catch(() => {})
       .finally(() => setFirstLoad(false));
     const poll = setInterval(() => store.pollIncremental(), 2000);
-    const unlisten = listenEngineEvents((ev) => store.applyEvent(ev));
+    const unlisten = listenEngineEvents((ev) => store.applyEvent(ev)).catch(() => () => {});
     const unclip = listenEngineEventsClip((url) => {
       // 同链接本会话只提示一次（DESIGN §8 防误触发）
-      setSeenClips((prev) => {
-        if (prev.has(url)) return prev;
-        setClipUrl(url);
-        return new Set(prev).add(url);
-      });
-    });
+      if (seenClips.current.has(url)) return;
+      seenClips.current.add(url);
+      setClipUrl(url);
+    }).catch(() => () => {});
+    // 自动更新：启动后静默检查一次（失败不打扰，§更新见 docs/RELEASE.md）
+    scheduleStartupCheck();
     // 汇总速度（从 live 数据聚合，节流 500ms）
     const speedTimer = setInterval(async () => {
       let sum = 0;
@@ -127,6 +111,7 @@ export function App() {
         }
       }
       setTotalBps(sum);
+      if (speedSortRef.current) setSpeedRevision(revision => revision + 1);
       try {
         // 任务栏进度条 + 标题栏速度
         const w = getCurrentWindow();
@@ -187,7 +172,7 @@ export function App() {
       else r = (store.liveOf(a.id)?.bps ?? 0) - (store.liveOf(b.id)?.bps ?? 0);
       return r * sortDir;
     });
-  }, [tasks, filter, catFilter, search, sortKey, sortDir]);
+  }, [tasks, filter, catFilter, search, sortKey, sortDir, speedRevision]);
 
   // —— 批量选择：筛选/搜索/数据变化后剪除已不在当前列表的选中项
   //（删除任务后随之自动清空，无需专门处理）——
@@ -248,25 +233,26 @@ export function App() {
     lastIndexRef.current = null;
   };
 
-  const toggleSort = (key: "name" | "size" | "speed") => {
-    if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1));
-    else {
-      setSortKey(key);
-      setSortDir(1);
-    }
-  };
-
-  const sortAttr = (key: "name" | "size" | "speed") =>
-    sortKey === key ? (sortDir === 1 ? "ascending" : "descending") : "none";
-  const arrow = (key: "name" | "size" | "speed") =>
-    sortKey === key ? (sortDir === 1 ? " ▲" : " ▼") : "";
-
   // —— 虚拟滚动（固定行高窗口化，万级行 60fps）
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(600);
   const start = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
   const end = Math.min(filtered.length, Math.ceil((scrollTop + viewportH) / ROW_H) + OVERSCAN);
   const visible = filtered.slice(start, end);
+
+  useEffect(() => {
+    const el = rowsRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => setViewportH(el.clientHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (rowsRef.current) rowsRef.current.scrollTop = 0;
+    setScrollTop(0);
+    lastIndexRef.current = null;
+  }, [filter, catFilter, search, sortKey, sortDir]);
 
   const counts = useMemo(() => {
     const c = { all: tasks.length, active: 0, done: 0, failed: 0, other: 0 };
@@ -275,15 +261,6 @@ export function App() {
       else if (x.status === "done") c.done += 1;
       else if (x.status === "failed") c.failed += 1;
       else c.other += 1;
-    }
-    return c;
-  }, [tasks]);
-
-  const catCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const x of tasks) {
-      const cat = categoryOf(x);
-      c[cat] = (c[cat] || 0) + 1;
     }
     return c;
   }, [tasks]);
@@ -299,6 +276,8 @@ export function App() {
     setBusyOp(op);
     try {
       await fn();
+    } catch (error) {
+      showToast(String(error), "error");
     } finally {
       setBusyOp(null);
     }
@@ -316,7 +295,7 @@ export function App() {
 
   const pauseAll = () =>
     runBatch("pauseAll", async () => {
-      const targets = tasks.filter((x) => x.status === "downloading");
+      const targets = tasks.filter((x) => isActive(x.status));
       const rs = await Promise.allSettled(targets.map((x) => api.pauseTask(x.id)));
       store.refresh();
       toastBatch(t("pausedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
@@ -427,388 +406,187 @@ export function App() {
 
   const showSkeleton = inTauri && firstLoad && tasks.length === 0 && skeletonOn;
 
+  const pausedCount = tasks.filter(task => task.status === "paused").length;
+  const openAdd = () => setShowAdd(true);
+  const requireDesktop = () => {
+    if (inTauri) return true;
+    showToast(t("desktopRequired"), "warn");
+    return false;
+  };
+  const exportTasks = async () => {
+    if (!requireDesktop()) return;
+    try {
+      const path = await pickSave({ defaultPath: "anything-tasks.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (!path) return;
+      const n = await api.exportTasks(path);
+      showToast(t("exported").replace("{n}", String(n)), "success");
+    } catch (e) { showToast(String(e), "error"); }
+  };
+  const importTasks = async () => {
+    if (!requireDesktop()) return;
+    try {
+      const path = await pickFile({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (!path || Array.isArray(path)) return;
+      const n = await api.importTasks(path);
+      await store.refresh();
+      showToast(t("imported").replace("{n}", String(n)), "success");
+    } catch (e) { showToast(String(e), "error"); }
+  };
+
   return (
-    <div className="app">
-      <header className="toolbar">
-        <div className="brand">
-          <span className="logo">⬇</span>
-          <b>{t("appTitle")}</b>
-        </div>
-        <button className="primary" onClick={() => setShowAdd(true)}>
-          ＋ {t("newTask")}
+    <div className={`app${tasks.length > 0 ? " has-collection" : ""}`}>
+      <header className="masthead">
+        <button className="brand" aria-label={t("home")} onClick={() => { setFilter("all"); setCatFilter("all"); setSearch(""); }}>
+          <span className="brand-mark"><span /><span /><span /></span>
+          <span>anything<span className="brand-period">.</span></span>
         </button>
-        <button onClick={() => setShowSettings(true)}>{t("settings")}</button>
-        <button
-          onClick={async () => {
-            const path = await pickSave({
-              defaultPath: "anything-tasks.json",
-              filters: [{ name: "JSON", extensions: ["json"] }],
-            });
-            if (!path) return;
-            try {
-              const n = await api.exportTasks(path);
-              showToast(t("exported").replace("{n}", String(n)), "success");
-            } catch (e) {
-              showToast(String(e), "error");
-            }
-          }}
-        >
-          {t("exportTasks")}
-        </button>
-        <button
-          onClick={async () => {
-            const path = await pickFile({
-              multiple: false,
-              filters: [{ name: "JSON", extensions: ["json"] }],
-            });
-            if (!path || Array.isArray(path)) return;
-            try {
-              const n = await api.importTasks(path);
-              showToast(t("imported").replace("{n}", String(n)), "success");
-              store.refresh();
-            } catch (e) {
-              showToast(String(e), "error");
-            }
-          }}
-        >
-          {t("importTasks")}
-        </button>
+        <span className="masthead-divider" />
+        <span className="workspace-label">{t("personalSpace")}</span>
         <div className="spacer" />
-        <input
-          className="search"
-          placeholder={t("search")}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setSearch("");
-          }}
-        />
-        {/* 高频变化不播报（§5.1 工具栏 P2） */}
-        <span className="total-speed" aria-live="off">
-          {totalBps > 0 ? `${fmtSpeed(totalBps)}` : ""}
-        </span>
+        <span className="edition-label">A LITTLE LESS LOST.</span>
+        <div className="header-actions">
+          <button className="icon-button" title={t("importTasks")} aria-label={t("importTasks")} onClick={importTasks}><Icon name="import" /></button>
+          <button className="icon-button" title={t("exportTasks")} aria-label={t("exportTasks")} onClick={exportTasks}><Icon name="export" /></button>
+          <span className="action-divider" />
+          <button className="icon-button" title={t("settings")} aria-label={t("settings")} onClick={() => requireDesktop() && setShowSettings(true)}><Icon name="settings" /></button>
+        </div>
       </header>
 
-      <div className="body">
-        <aside className="sidebar">
-          <div className="side-group">
-            <div className="side-title">{t("sideStatus")}</div>
-            {(
-              [
-                ["all", "🗂", t("all")],
-                ["active", "⏬", t("active")],
-                ["done", "✓", t("done")],
-                ["failed", "⚠", t("failed")],
-                ["other", "…", t("other")],
-              ] as [Filter, string, string][]
-            ).map(([key, icon, label]) => (
-              <button
-                key={key}
-                className={filter === key ? "side-item active" : "side-item"}
-                title={label}
-                onClick={() => setFilter(key)}
-              >
-                <span className="side-icon">{icon}</span>
-                <span className="side-label">{label}</span>
-                <span className="side-count">{counts[key]}</span>
-              </button>
-            ))}
-            <div className="side-actions">
-              <button
-                onClick={pauseAll}
-                disabled={busyOp === "pauseAll"}
-                title={t("pauseAll")}
-                aria-label={t("pauseAll")}
-              >
-                <span aria-hidden="true">⏸</span>
-                <span className="side-label">
-                  {t("pauseAll")}
-                  {busyOp === "pauseAll" ? "…" : ""}
-                </span>
-              </button>
-              <button
-                onClick={resumeAll}
-                disabled={busyOp === "resumeAll"}
-                title={t("resumeAll")}
-                aria-label={t("resumeAll")}
-              >
-                <span aria-hidden="true">▶</span>
-                <span className="side-label">
-                  {t("resumeAll")}
-                  {busyOp === "resumeAll" ? "…" : ""}
-                </span>
-              </button>
-            </div>
-          </div>
-          <div className="side-group">
-            <div className="side-title">{t("sideCategory")}</div>
-            {CAT_META.map(({ key, icon, label }) => (
-              <button
-                key={key}
-                className={catFilter === key ? "side-item active" : "side-item"}
-                title={t(label as never)}
-                onClick={() => setCatFilter(key)}
-              >
-                <span className="side-icon">{icon}</span>
-                <span className="side-label">{t(label as never)}</span>
-                <span className="side-count">
-                  {key === "all" ? tasks.length : catCounts[key] || 0}
-                </span>
-              </button>
-            ))}
-          </div>
-        </aside>
-
+      <div className="studio">
         <main className="main">
-          {!inTauri && <div className="banner">{t("needTauri")}</div>}
-          {/* toast（§3.8）：success 2.5s / error 5s，可手动关；error 用 role=alert */}
-          {toasts.map((x) => (
-            <div
-              key={x.id}
-              className={`banner toast ${x.kind}`}
-              role={x.kind === "error" ? "alert" : "status"}
-            >
-              <span className="banner-text">{x.text}</span>
-              <button
-                className="banner-close"
-                aria-label={t("close")}
-                onClick={() => dismissToast(x.id)}
-              >
-                ×
-              </button>
+          <section className="intro">
+            <div>
+              <div className="eyebrow"><span className="tiny-cross">✳</span> {t("collectionEyebrow")}</div>
+              <h1>{t("collectionHeading")}<span className="heading-period">{t("headingPunctuation")}</span></h1>
+              <p className="intro-description">{t("collectionDescription")}</p>
             </div>
-          ))}
-          {clipUrl && (
-            <div className="banner clip" role="status" aria-live="polite">
-              <div className="clip-info">
-                <b>{t("clipboardFound")}</b>
-                <span className="clip-url" title={clipUrl}>
-                  {clipUrl}
-                </span>
-              </div>
-              {/* A16：横幅动作降级 default（primary 每容器 ≤1，工具栏已有）；去掉与「忽略」重复的 × */}
-              <button onClick={addFromClip} disabled={clipBusy}>
-                {t("download")}
-                {clipBusy ? "…" : ""}
-              </button>
-              <button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
-            </div>
-          )}
+            <button className="new-collection" onClick={openAdd} title="Ctrl+N" aria-label={t("newCollection")}>
+              <Icon name="plus" size={23} /><span>{t("newCollection")}</span><span className="new-shortcut">↗</span>
+            </button>
+          </section>
 
-          {selected.size > 0 ? (
-            /* 上下文批量操作栏：替代面包屑行（选中态下导航信息让位给操作） */
-            <div
-              className="batchbar"
-              role="toolbar"
-              aria-label={t("selectedN").replace("{n}", String(selected.size))}
-            >
-              <span className="sel-count">
-                {t("selectedN").replace("{n}", String(selected.size))}
-              </span>
-              <button onClick={selStart} disabled={busyOp !== null}>
-                {t("start")}
-                {busyOp === "selStart" ? "…" : ""}
-              </button>
-              <button onClick={selPause} disabled={busyOp !== null}>
-                {t("pause")}
-                {busyOp === "selPause" ? "…" : ""}
-              </button>
-              <button onClick={selRetry} disabled={busyOp !== null}>
-                {t("retry")}
-                {busyOp === "selRetry" ? "…" : ""}
-              </button>
-              <button onClick={selCancel} disabled={busyOp !== null}>
-                {t("cancel")}
-                {busyOp === "selCancel" ? "…" : ""}
-              </button>
-              <button className="danger" onClick={selRemove} disabled={busyOp !== null}>
-                {t("remove")}
-                {busyOp === "selRemove" ? "…" : ""}
-              </button>
-              <div className="spacer" />
-              <button
-                onClick={() => setSelected(new Set())}
-                disabled={busyOp !== null}
-              >
-                {t("clearSel")}
-              </button>
+          <form className="link-entry" onSubmit={e => { e.preventDefault(); openAdd(); }}>
+            <span className="link-entry-icon"><Icon name="link" size={19} /></span>
+            <input aria-label={t("quickLinkLabel")} value={draftUrl} onChange={e => setDraftUrl(e.target.value)} placeholder={t("quickLinkPlaceholder")} />
+            <span className="link-entry-hint">{t("quickLinkHint")}</span>
+            <button className="link-submit" type="submit" aria-label={t("newCollection")} title={t("newCollection")}><Icon name="arrow" size={20} /></button>
+          </form>
+
+          <div className="collection-section">
+            <div className="collection-topline">
+              <div className="collection-title"><h2>{t("myCollection")}</h2><span>{String(tasks.length).padStart(2, "0")}</span></div>
+              <label className="search-box"><Icon name="search" size={16} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchCollection")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>⌃ K</kbd></label>
             </div>
-          ) : (
-            <div className="maintool">
-              <span className="crumb">
-                {t(filter as never)}
-                {catFilter !== "all" ? ` · ${t(("cat" + cap(catFilter)) as never)}` : ""}
-              </span>
-              <div className="spacer" />
-              {filter === "failed" && counts.failed > 0 && (
-                <button
-                  className="batch"
-                  onClick={retryAllFailed}
-                  disabled={busyOp === "retryAll"}
-                >
-                  {t("retryAllFailed")}
-                  {busyOp === "retryAll" ? "…" : ""}
+
+            <nav className="status-tabs" aria-label={t("sideStatus")}>
+              {(["all", "active", "done", "other", "failed"] as Filter[]).map(key => (
+                <button key={key} className={filter === key ? "status-tab active" : "status-tab"} onClick={() => setFilter(key)} aria-pressed={filter === key}>
+                  {key === "active" && <span className="tab-live-dot" />}{t(key)}<span>{counts[key]}</span>
                 </button>
-              )}
-              {filter === "done" && counts.done > 0 && (
-                <button
-                  className="batch"
-                  onClick={clearDone}
-                  disabled={busyOp === "clearDone"}
-                >
-                  {t("clearDone")}
-                  {busyOp === "clearDone" ? "…" : ""}
-                </button>
-              )}
-            </div>
-          )}
+              ))}
+            </nav>
 
-          <div className="table-head">
-            <div className="c-sel">
-              <input
-                ref={headerCbRef}
-                type="checkbox"
-                className="sel-cb"
-                checked={allSelected}
-                onChange={toggleAll}
-                title={t("selectAll")}
-                aria-label={t("selectAll")}
-              />
-            </div>
-            {/* A5：三个可排序列头用 button + aria-sort；「操作」列头还原纯文本；
-                大小排序挂在「进度」列头 */}
-            <button
-              className="c-file th-sort"
-              aria-sort={sortAttr("name")}
-              title={t("sortTip")}
-              onClick={() => toggleSort("name")}
-            >
-              {t("colFile")}
-              {arrow("name")}
-            </button>
-            <button
-              className="c-progress th-sort"
-              aria-sort={sortAttr("size")}
-              title={t("sortBySize")}
-              onClick={() => toggleSort("size")}
-            >
-              {t("colProgress")}
-              {sortKey === "size" ? ` · ${t("size")}${arrow("size")}` : ""}
-            </button>
-            <button
-              className="c-speed th-sort"
-              aria-sort={sortAttr("speed")}
-              title={t("sortTip")}
-              onClick={() => toggleSort("speed")}
-            >
-              {t("colSpeed")}
-              {arrow("speed")}
-            </button>
-            <span className="c-actions">{t("colActions")}</span>
-          </div>
-
-          <div
-            className="rows"
-            onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
-            ref={(el) => {
-              if (el && Math.abs(el.clientHeight - viewportH) > 4) {
-                setViewportH(el.clientHeight);
-              }
-            }}
-          >
-            {showSkeleton ? (
-              // A23：3 行灰条骨架，数据到达即撤（轮询/局部刷新绝不显示）
-              <div aria-hidden="true">
-                {[56, 38, 46].map((w, i) => (
-                  <div className="skel-row" key={i}>
-                    <div className="skel" style={{ width: `${w}%` }} />
-                    <div className="skel" style={{ width: "22%" }} />
-                    <div className="skel" style={{ width: "110px" }} />
-                  </div>
-                ))}
+            <div className="collection-tools">
+              <div className="category-filters" role="group" aria-label={t("sideCategory")}>
+                {CATEGORIES.map(({key, label}) => <button key={key} className={catFilter === key ? "category-chip active" : "category-chip"} aria-pressed={catFilter === key} onClick={() => setCatFilter(key)}>{t(label)}</button>)}
               </div>
-            ) : inTauri && firstLoad ? (
-              // 首载 300ms 窗口：宁空勿假，不渲染稍纵即逝的误导性空态（A23）
-              null
-            ) : filtered.length === 0 ? (
-              // A10：空态三分，各带一个出口
-              search.trim() ? (
-                <div className="empty">
-                  {t("emptySearch")}
-                  <button className="btn" onClick={() => setSearch("")}>
-                    {t("clearSearch")}
-                  </button>
+              <label className="sort-control"><span className="sr-only">{t("sortCollection")}</span><select value={sortKey ? sortKey + ":" + sortDir : "default"} onChange={e => {
+                const [key, direction] = e.target.value.split(":");
+                setSortKey(key === "default" ? null : key as "name" | "size" | "speed");
+                setSortDir(direction === "-1" ? -1 : 1);
+              }}>
+                <option value="default">{t("sortDefault")}</option>
+                <option value="name:1">{t("sortNameAsc")}</option>
+                <option value="name:-1">{t("sortNameDesc")}</option>
+                <option value="size:-1">{t("sortSizeDesc")}</option>
+                <option value="size:1">{t("sortSizeAsc")}</option>
+                <option value="speed:-1">{t("sortSpeedDesc")}</option>
+              </select></label>
+            </div>
+
+            {clipUrl && <div className="banner clip" role="status">
+              <Icon name="link" size={16} /><div className="clip-info"><b>{t("clipboardFound")}</b><span className="clip-url">{clipUrl}</span></div>
+              <button onClick={addFromClip} disabled={clipBusy}>{t("download")}{clipBusy ? "…" : ""}</button><button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
+            </div>}
+
+            {upd.status === "available" || upd.status === "installing" || upd.status === "ready" || upd.status === "error" ? (
+              <div className="banner update" role="status">
+                <Icon name="arrow" size={16} />
+                <div className="clip-info">
+                  <b>
+                    {upd.status === "available"
+                      ? t("updateAvailableTo").replace("{v}", upd.version ?? "")
+                      : upd.status === "installing"
+                        ? t("updateInstalling")
+                        : upd.status === "ready"
+                          ? t("updateReady")
+                          : t("updateFailed")}
+                  </b>
+                  {upd.status === "installing" && (
+                    <span className="clip-url">
+                      {upd.total != null
+                        ? `${Math.min(100, Math.round((upd.downloaded / upd.total) * 100))}% · ${fmtBytes(upd.downloaded)} / ${fmtBytes(upd.total)}`
+                        : fmtBytes(upd.downloaded)}
+                    </span>
+                  )}
+                  {upd.status === "error" && upd.error && <span className="clip-url">{upd.error}</span>}
                 </div>
-              ) : tasks.length === 0 ? (
-                <div className="empty">
-                  {t("emptyList")}
-                  <button className="btn primary" onClick={() => setShowAdd(true)}>
-                    ＋ {t("newTask")}
-                  </button>
-                </div>
-              ) : (
-                <div className="empty">
-                  {t("emptyFiltered")}
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setFilter("all");
-                      setCatFilter("all");
-                    }}
-                  >
-                    {t("clearFilter")}
-                  </button>
-                </div>
-              )
+                {upd.status === "available" && <button onClick={() => installUpdate()}>{t("updateDownload")}</button>}
+                {upd.status === "ready" && <button onClick={restartToUpdate}>{t("updateRestart")}</button>}
+                {upd.status !== "installing" && <button onClick={dismissUpdate}>{t("ignore")}</button>}
+              </div>
+            ) : null}
+
+            {selected.size > 0 ? (
+              <div className="batchbar" role="toolbar" aria-label={t("selectedN").replace("{n}", String(selected.size))}>
+                <span className="sel-count">{t("selectedN").replace("{n}", String(selected.size))}</span>
+                <button onClick={selStart} disabled={busyOp !== null}>{t("start")}</button>
+                <button onClick={selPause} disabled={busyOp !== null}>{t("pause")}</button>
+                <button onClick={selRetry} disabled={busyOp !== null}>{t("retry")}</button>
+                <button onClick={selCancel} disabled={busyOp !== null}>{t("cancel")}</button>
+                <button className="danger" onClick={selRemove} disabled={busyOp !== null}>{t("remove")}</button>
+                <div className="spacer" /><button className="icon-button" aria-label={t("clearSel")} title={t("clearSel")} onClick={() => setSelected(new Set())} disabled={busyOp !== null}><Icon name="close" size={15} /></button>
+              </div>
             ) : (
-              <div style={{ height: filtered.length * ROW_H, position: "relative" }}>
-                <div style={{ transform: `translateY(${start * ROW_H}px)` }}>
-                  {visible.map((task, vi) => (
-                    <TaskRow
-                      key={task.id}
-                      task={task}
-                      onDetail={() => setDetailId(task.id)}
-                      selected={selected.has(task.id)}
-                      onToggleSelect={(shift) => toggleSelect(task, start + vi, shift)}
-                    />
-                  ))}
-                </div>
+              <div className="list-caption">
+                <label className="selection-label"><input ref={headerCbRef} type="checkbox" className="sel-cb" checked={allSelected} onChange={toggleAll} aria-label={t("selectAll")} /><span>{t("collectionList")}</span></label>
+                <div className="spacer" />
+                {filter === "failed" && counts.failed > 0 && <button className="text-button" onClick={retryAllFailed} disabled={busyOp !== null}>{t("retryAllFailed")}</button>}
+                {filter === "done" && counts.done > 0 && <button className="text-button" onClick={clearDone} disabled={busyOp !== null}>{t("clearDone")}</button>}
+                <span>{filtered.length} {t("itemsUnit")}</span>
               </div>
             )}
+
+            <div className="rows" ref={rowsRef} onScroll={e => setScrollTop(e.currentTarget.scrollTop)}>
+              {showSkeleton ? (
+                <div aria-hidden="true">{[56, 38, 46].map((w, i) => <div className="skel-row" key={i}><span className="skel-file" /><div className="skel" style={{width: w + "%"}} /></div>)}</div>
+              ) : inTauri && firstLoad ? null : filtered.length === 0 ? (
+                <div className="empty">
+                  {search.trim() ? <><Icon name="search" size={35} /><h3>{t("emptySearch")}</h3><button onClick={() => setSearch("")}>{t("clearSearch")}</button></>
+                  : tasks.length === 0 ? <><EmptyCollection /><span className="empty-number">YOUR COLLECTION STARTS HERE</span><h3>{t("emptyCollectionTitle")}</h3><p>{t("emptyCollectionDescription")}</p><button className="text-button empty-action" onClick={openAdd}>{t("addFirstCollection")}<Icon name="arrow" size={16} /></button></>
+                  : <><Icon name="folder" size={35} /><h3>{t("emptyFiltered")}</h3><button onClick={() => { setFilter("all"); setCatFilter("all"); }}>{t("clearFilter")}</button></>}
+                </div>
+              ) : (
+                <div style={{height: filtered.length * ROW_H, position: "relative"}}>
+                  <div style={{transform: `translateY(${start * ROW_H}px)`}}>
+                    {visible.map((task, vi) => <TaskRow key={task.id} task={task} onDetail={() => setDetailId(task.id)} selected={selected.has(task.id)} onToggleSelect={shift => toggleSelect(task, start + vi, shift)} />)}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </main>
+        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} paused={pausedCount} inTauri={inTauri} busy={busyOp !== null} onPause={pauseAll} onResume={resumeAll} category={catFilter} onCategory={setCatFilter} />
       </div>
 
-      {showAdd && (
-        <AddDialog
-          onClose={() => setShowAdd(false)}
-          onAdded={() => {
-            setShowAdd(false);
-            store.refresh();
-          }}
-        />
-      )}
+      <footer className="app-footer"><span className="footer-brand">ANYTHING, WELL KEPT.</span><span>{t("footerNote")}</span><span className="footer-mode">{!inTauri && <span className="preview-indicator" />}{t(inTauri ? "desktopMode" : "previewMode")}</span></footer>
+
+      <div className="toast-stack">{toasts.map(x => <div key={x.id} className={`banner toast ${x.kind}`} role={x.kind === "error" ? "alert" : "status"}><span className="banner-text">{x.text}</span><button className="banner-close" aria-label={t("close")} onClick={() => dismissToast(x.id)}>×</button></div>)}</div>
+      {showAdd && <AddDialog initialUrls={draftUrl} desktopAvailable={inTauri} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); setDraftUrl(""); store.refresh(); }} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
-      {detailId && detailTask && (
-        <DetailDrawer
-          key={detailTask.id}
-          task={detailTask}
-          onClose={() => setDetailId(null)}
-          onChanged={(nt) => {
-            store.upsert(nt);
-          }}
-          onRemoved={() => {
-            setDetailId(null);
-            store.refresh();
-          }}
-        />
-      )}
+      {detailId && detailTask && <DetailDrawer key={detailTask.id} task={detailTask} onClose={() => setDetailId(null)} onChanged={nt => store.upsert(nt)} onRemoved={() => { setDetailId(null); store.refresh(); }} />}
     </div>
   );
-}
-
-function cap(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 export function fmtSpeed(bps: number): string {

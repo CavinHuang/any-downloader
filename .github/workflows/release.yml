@@ -1,0 +1,65 @@
+# 发布流水线：tag 推送 → 构建 NSIS 安装包 + updater 签名产物 → GitHub Release。
+# 已安装客户端通过 tauri.conf.json 的 updater 端点
+# （releases/latest/download/latest.json）自动发现并升级，详见 docs/RELEASE.md。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 当前产物仅 Windows（bundle.targets=nsis，externalBin 均为 x86_64-pc-windows-msvc）
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # beforeBuildCommand 只跑 vite build，依赖需先行安装
+      - name: Install UI dependencies
+        run: npm ci --prefix ui
+
+      # sidecar 准备（src-tauri/binaries/ 不入库）：
+      # dl-cli/dl-server 由本仓库源码构建；yt-dlp/deno 由脚本抓取（<1MB 视为缺失强制重下）
+      - name: Build sidecar binaries (dl-cli / dl-server)
+        run: cargo build --release -p dl-cli -p dl-server
+
+      - name: Copy sidecars into bundle layout
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Copy-Item target/release/dl-cli.exe src-tauri/binaries/dl-cli-x86_64-pc-windows-msvc.exe -Force
+          Copy-Item target/release/dl-server.exe src-tauri/binaries/dl-server-x86_64-pc-windows-msvc.exe -Force
+
+      - name: Fetch bundled yt-dlp / deno
+        run: ./scripts/fetch-ytdlp.ps1
+
+      - name: Build & publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 更新包签名私钥（Repo Secrets；公钥已内嵌 tauri.conf.json）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # __VERSION__ 取自 tauri.conf.json，需与推送的 tag 一致
+          tagName: v__VERSION__
+          releaseName: "Anything Downloader v__VERSION__"
+          releaseBody: "下载 x64-setup 安装包安装；已安装用户会通过应用内自动更新收到此版本。"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

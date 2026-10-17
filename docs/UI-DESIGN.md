@@ -1,7 +1,9 @@
 # Anything Downloader · 跨端统一交互规范 v1.0
 
+> 桌面与浏览器扩展均已按新的「个人收集室」方向重新设计，当前视觉以 [UI-STUDIO.md](UI-STUDIO.md)、`ui/src/styles.css` 和 `extension/studio.css` 为准。本文保留旧版交互约束作为参考。
+
 适用范围：桌面应用（Tauri + React，`ui/src/`）、浏览器扩展（`extension/popup.html`、`extension/sync.html`、`extension/float-button.js`）。
-本文档是唯一视觉与交互事实源。所有界面改造以本文为准；改造时**不重写业务逻辑**（虚拟滚动、store 轮询架构、适配器管线、manifest 权限均不动），只动视觉、反馈、键盘可达性与交互流畅度。
+下文为旧版规范，视觉值与布局已由 Studio 设计替代。关于操作反馈、数据保护、键盘可达性及适配器管线的约束继续适用；扩展不增加 manifest 权限。
 
 行号引用基于当前 main 分支（454f4db）。
 

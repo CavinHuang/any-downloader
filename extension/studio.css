@@ -1,0 +1,56 @@
+/* Anything Studio — shared with the desktop collection room. Local assets only. */
+:root {
+  color-scheme: light;
+  --bg:#f4f3ec; --panel:#fbfaf6; --text:#293c34; --muted:#687263;
+  --border:#dedfd5; --border-soft:#e9e9df;
+  --accent:#47644d; --accent-strong:#344e3c; --accent-ink:#36543e; --accent-soft:#e9eddf;
+  --lime:#e4edb5; --button-ink:#fbfaf6;
+  --violet:#7c698c; --violet-soft:#ece5ef;
+  --ok:#5c7954; --ok-soft:#e9eddf; --ok-ink:#45633e;
+  --err:#ba6553; --err-soft:#f7e6df; --err-ink:#a14d3d;
+  --warn:#b68a46; --warn-soft:#f1e9d7; --warn-ink:#856225;
+  --shadow-1:none; --shadow-2:0 16px 50px #23312624;
+  --scroll-thumb:#cccec1; --scroll-thumb-hover:#aeb4a2;
+  --r-sm:4px; --r-md:6px; --r-lg:9px; --r-xl:12px; --r-pill:999px;
+  --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:16px; --fs-xl:26px;
+  --font-ui:13px/1.6 "Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;
+  --font-editorial:"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",Georgia,serif;
+  --font-mono:11px/1.6 Consolas,ui-monospace,monospace;
+}
+* { box-sizing:border-box; scrollbar-width:thin; scrollbar-color:var(--scroll-thumb) transparent; }
+body { margin:0; background:var(--bg); color:var(--text); font:var(--font-ui); -webkit-font-smoothing:antialiased; }
+button,input,textarea,select { font:inherit; }
+button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:30px; padding:5px 11px; border:1px solid var(--border); border-radius:var(--r-md); background:var(--panel); color:var(--text); cursor:pointer; transition:background .15s,border-color .15s; }
+button:hover { border-color:var(--accent); background:var(--accent-soft); }
+button:active { transform:translateY(1px); }
+button:disabled { opacity:.45; cursor:default; transform:none; }
+button.primary { background:var(--accent-strong); border-color:var(--accent-strong); color:var(--button-ink); }
+button.primary:hover { filter:brightness(1.1); }
+button.lime { background:var(--lime); border-color:var(--lime); color:#293c34; }
+button.lime:hover { border-color:var(--accent); }
+input,select,textarea { color:var(--text); background:var(--panel); border:1px solid var(--border); border-radius:var(--r-md); padding:8px 10px; }
+input::placeholder,textarea::placeholder { color:var(--muted); }
+input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; margin:0; flex-shrink:0; cursor:pointer; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+input:focus,textarea:focus,select:focus { border-color:var(--accent); }
+svg { flex-shrink:0; vertical-align:middle; }
+.hidden { display:none !important; }
+.brand { display:inline-flex; align-items:center; gap:9px; text-decoration:none; color:var(--text); font:600 27px/1 Georgia,"Times New Roman",serif; letter-spacing:-1.5px; }
+.brand-mark { width:24px; height:26px; position:relative; display:block; transform:rotate(-12deg); }
+.brand-mark i { position:absolute; width:12px; height:17px; border:1.5px solid var(--text); border-radius:1px; }
+.brand-mark i:nth-child(1) { top:1px; left:0; }
+.brand-mark i:nth-child(2) { top:5px; left:5px; background:var(--bg); }
+.brand-mark i:nth-child(3) { top:9px; left:10px; background:var(--lime); }
+.brand-period { color:var(--accent); }
+.eyebrow { font:9px/1.8 Consolas,"Microsoft YaHei UI",monospace; letter-spacing:1.7px; color:var(--muted); }
+.icon-btn { width:30px; height:30px; min-height:30px; padding:0; border-color:transparent; background:transparent; }
+.icon-btn:hover,.icon-btn.active { background:var(--accent-soft); border-color:transparent; color:var(--accent-ink); }
+.hint,.set-note { color:var(--muted); font-size:11px; }
+.error,.errmsg { color:var(--err-ink); font-size:11px; overflow-wrap:anywhere; }
+.warn,.warn-text { color:var(--warn-ink); font-size:11px; }
+@media (prefers-color-scheme:dark) {
+  :root { color-scheme:dark; --bg:#1d2621; --panel:#242e27; --text:#e3e7d9; --muted:#a0ad9b; --border:#3b463c; --border-soft:#303b32; --accent:#b6c99c; --accent-strong:#bdd29c; --accent-ink:#c1d5aa; --accent-soft:#34432f; --lime:#cedc9e; --button-ink:#22301f; --violet:#c9b1db; --violet-soft:#3f3447; --ok:#a8c393; --ok-soft:#34432f; --ok-ink:#c1d5aa; --err:#d58e79; --err-soft:#4d302b; --err-ink:#edaf98; --warn:#d2b577; --warn-soft:#453d2b; --warn-ink:#e0c18b; --scroll-thumb:#4b5948; --scroll-thumb-hover:#687860; --shadow-2:0 16px 50px #0005; }
+}
+@media (prefers-reduced-motion:reduce) {
+  *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; }
+}

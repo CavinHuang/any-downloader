@@ -5,15 +5,20 @@ import { t } from "../i18n";
 import { store } from "../store";
 import { showToast } from "../toast";
 import { useOverlay } from "../useOverlay";
+import { Icon } from "./Icon";
 
 export function AddDialog({
   onClose,
   onAdded,
+  initialUrls = "",
+  desktopAvailable = true,
 }: {
   onClose: () => void;
   onAdded: () => void;
+  initialUrls?: string;
+  desktopAvailable?: boolean;
 }) {
-  const [urls, setUrls] = useState("");
+  const [urls, setUrls] = useState(initialUrls);
   const [dir, setDir] = useState("");
   const [filename, setFilename] = useState("");
   const [checksum, setChecksum] = useState("");
@@ -34,6 +39,7 @@ export function AddDialog({
 
   // §3.6：表单浮层 Esc / 遮罩在有未提交修改时先确认
   const requestClose = () => {
+    if (busy) return;
     if (dirty && !window.confirm(t("dirtyConfirm"))) return;
     onClose();
   };
@@ -41,12 +47,13 @@ export function AddDialog({
 
   // 默认目录：设置值 > 系统下载目录
   useEffect(() => {
+    if (!desktopAvailable) return;
     api.getSettings().then(async (s) => {
       const d = s.default_dir || (await api.defaultDownloadDir());
       setDir(d);
       setBaselineDir(d);
-    });
-  }, []);
+    }).catch(e => setError(String(e)));
+  }, [desktopAvailable]);
 
   const urlList = urls.split(/\s+/).filter((u) => /^https?:\/\//i.test(u));
   const firstUrl = urlList[0] ?? "";
@@ -71,7 +78,7 @@ export function AddDialog({
   // A3：checksum/mirrors 真正传入 add_task（不再做摆设字段），仅单链接启用；
   // A14：批量 Promise.allSettled 逐条尝试，单条失败不中断，结束汇总成败。
   const doAdd = async () => {
-    if (urlList.length === 0) return;
+    if (busy || urlList.length === 0) return;
     setBusy(true);
     setError(null);
     const results = await Promise.allSettled(
@@ -129,52 +136,62 @@ export function AddDialog({
       <div
         className="modal"
         role="dialog"
+        aria-busy={busy || probing}
         aria-modal="true"
         aria-label={t("addTitle")}
         ref={ref}
         onKeyDown={onKeyDown}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3>{t("addTitle")}</h3>
-        <label>{t("urlLabel")}</label>
+        <div className="dialog-header"><div><div className="eyebrow">KEEP SOMETHING GOOD</div><h3>{t("addTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={busy} aria-label={t("close")}><Icon name="close" /></button></div>
+        <p className="dialog-description">{t("addDescription")}</p>
+        {!desktopAvailable && <div className="probe">{t("desktopRequired")}</div>}
+        <fieldset className="add-fields" disabled={busy}>
+        <label htmlFor="collection-urls">{t("urlLabel")}</label>
         <textarea
           rows={4}
+          id="collection-urls"
           value={urls}
           onChange={(e) => setUrls(e.target.value)}
           placeholder="https://…"
           autoFocus
         />
-        <label>
+        <details className="advanced-options"><summary>{t("advancedOptions")}</summary>
+        <label htmlFor="collection-checksum">
           {t("checksumLabel")}
           {multi ? `（${t("singleOnly")}）` : ""}
         </label>
         <input
+          id="collection-checksum"
           value={checksum}
           disabled={multi}
           placeholder={t("checksumPlaceholder")}
           onChange={(e) => setChecksum(e.target.value)}
         />
-        <label>
+        <label htmlFor="collection-mirrors">
           {t("mirrorLabel")}
           {multi ? `（${t("singleOnly")}）` : ""}
         </label>
         <textarea
+          id="collection-mirrors"
           rows={2}
           value={mirrorText}
           disabled={multi}
           placeholder={"https://mirror1.example.com/...\nhttps://mirror2.example.com/..."}
           onChange={(e) => setMirrorText(e.target.value)}
         />
+        </details>
         <div className="grid2">
           <div>
-            <label>{t("dirLabel")}</label>
-            <input value={dir} onChange={(e) => setDir(e.target.value)} />
+            <label htmlFor="collection-dir">{t("dirLabel")}</label>
+            <input id="collection-dir" value={dir} onChange={(e) => setDir(e.target.value)} />
           </div>
           <div>
-            <label>{t("filenameLabel")}</label>
-            <input value={filename} onChange={(e) => setFilename(e.target.value)} />
+            <label htmlFor="collection-filename">{t("filenameLabel")}</label>
+            <input id="collection-filename" value={filename} onChange={(e) => setFilename(e.target.value)} />
           </div>
         </div>
+        </fieldset>
         {probe && (
           <div className="probe">
             <b>{t("probeResult")}: </b>
@@ -184,13 +201,13 @@ export function AddDialog({
         )}
         {error && <div className="error">{error}</div>}
         <div className="modal-actions">
-          <button onClick={doProbe} disabled={!firstUrl || probing}>
+          <button onClick={doProbe} disabled={!desktopAvailable || !firstUrl || probing || busy}>
             {probing ? t("probing") : t("probe")}
           </button>
           <div className="spacer" />
-          <button onClick={requestClose}>{t("cancelBtn")}</button>
-          <button className="primary" onClick={doAdd} disabled={busy || !urls.trim()}>
-            {t("addAndStart")}
+          <button onClick={requestClose} disabled={busy}>{t("cancelBtn")}</button>
+          <button className="primary" onClick={doAdd} disabled={!desktopAvailable || busy || !firstUrl}>
+            {busy ? t("addingCollection") : t("addAndStart")}
           </button>
         </div>
       </div>

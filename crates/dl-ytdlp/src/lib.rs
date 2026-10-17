@@ -262,7 +262,9 @@ async fn next_line_capped<R: AsyncBufRead + Unpin>(
                 }
                 None => {
                     if !truncated {
-                        let take = available.len().min(MAX_LINE_BYTES.saturating_sub(buf.len()));
+                        let take = available
+                            .len()
+                            .min(MAX_LINE_BYTES.saturating_sub(buf.len()));
                         buf.extend_from_slice(&available[..take]);
                         truncated = take < available.len();
                     }
@@ -325,7 +327,10 @@ fn opt_bytes(s: &str) -> Option<u64> {
 /// 均可能带右对齐前导空格）
 fn parse_speed(s: &str) -> Option<u64> {
     let s = s.trim().trim_end_matches("/s").trim();
-    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(s.len()));
+    let (num, unit) = s.split_at(
+        s.find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(s.len()),
+    );
     let v: f64 = num.trim().parse().ok()?;
     let mult = match unit.trim().to_ascii_uppercase().as_str() {
         "KIB" => 1024.0,
@@ -492,11 +497,17 @@ mod tests {
         let mut reader: &[u8] = b"a\r\nlast-line-no-newline";
         let mut buf = Vec::new();
         assert_eq!(
-            next_line_capped(&mut reader, &mut buf).await.unwrap().unwrap(),
+            next_line_capped(&mut reader, &mut buf)
+                .await
+                .unwrap()
+                .unwrap(),
             "a"
         );
         assert_eq!(
-            next_line_capped(&mut reader, &mut buf).await.unwrap().unwrap(),
+            next_line_capped(&mut reader, &mut buf)
+                .await
+                .unwrap()
+                .unwrap(),
             "last-line-no-newline"
         );
         assert!(next_line_capped(&mut reader, &mut buf)

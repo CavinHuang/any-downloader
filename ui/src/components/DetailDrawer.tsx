@@ -4,6 +4,8 @@ import { fmtBytes } from "../App";
 import { t } from "../i18n";
 import { store } from "../store";
 import { useOverlay } from "../useOverlay";
+import { Icon, IconName } from "./Icon";
+import { categoryOf } from "../fileTypes";
 
 interface Variant {
   bandwidth: number;
@@ -116,7 +118,9 @@ export function DetailDrawer({
         onKeyDown={onKeyDown}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3>{label}</h3>
+        <div className="dialog-header"><div className="eyebrow">{t("detailEyebrow")}</div><button className="icon-button" onClick={onClose} aria-label={t("close")}><Icon name="close" /></button></div>
+        <div className={`detail-file-icon file-badge ${categoryOf(task)}`}><Icon name={categoryOf(task) as IconName} size={30} /></div>
+        <h3 className="detail-title">{label}</h3>
         <table className="kv">
           <tbody>
             {/* A6：首列固定字段名「状态」，值列显示译名（不再「下载中 | downloading」同义重复） */}

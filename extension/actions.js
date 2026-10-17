@@ -37,40 +37,52 @@
 
   // ---------------------------------------------------------------- UI 基件
 
+  const uiTheme = () => window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? { panel: "#242e27", text: "#e3e7d9", muted: "#a0ad9b", border: "#3b463c", accent: "#bdd29c", ink: "#22301f", soft: "#34432f", accentInk: "#c1d5aa" }
+    : { panel: "#fbfaf6", text: "#293c34", muted: "#687263", border: "#dedfd5", accent: "#344e3c", ink: "#fbfaf6", soft: "#e9eddf", accentInk: "#36543e" };
+
   // 轻提示（1.8s 自动消失）
   function toast(msg) {
+    const theme = uiTheme();
     const t = document.createElement("div");
     t.textContent = msg;
     t.style.cssText =
       "position:fixed;left:50%;top:24px;transform:translateX(-50%);z-index:2147483647;" +
-      "background:#0f172a;color:#fff;font:13px/1.5 system-ui,sans-serif;padding:8px 14px;" +
-      "border-radius:8px;box-shadow:0 4px 14px rgba(15,23,42,.3);opacity:.96;";
+      `background:${theme.panel};color:${theme.text};border:1px solid ${theme.border};font:13px/1.5 system-ui,sans-serif;padding:10px 16px;` +
+      "border-radius:7px;box-shadow:0 8px 28px rgba(35,49,38,.2);";
     document.documentElement.appendChild(t);
     setTimeout(() => t.remove(), 1800);
   }
 
   // 模态：返回 { close }。buildBody(body, close) 负责填充内容。
   function modal(title, buildBody) {
+    const theme = uiTheme();
+    const opener = document.activeElement;
     const mask = document.createElement("div");
     mask.style.cssText =
-      "position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.45);";
+      "position:fixed;inset:0;z-index:2147483647;background:rgba(24,39,31,.4);backdrop-filter:blur(3px);";
     const box = document.createElement("div");
     box.style.cssText =
       "position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);" +
       "width:min(720px,92vw);max-height:86vh;display:flex;flex-direction:column;" +
-      "background:#fff;color:#0f172a;border-radius:12px;overflow:hidden;" +
-      "box-shadow:0 16px 48px rgba(15,23,42,.35);font:14px/1.6 system-ui,sans-serif;";
+      `background:${theme.panel};color:${theme.text};border:1px solid ${theme.border};border-radius:12px;overflow:hidden;` +
+      "box-shadow:0 16px 48px rgba(35,49,38,.2);font:14px/1.6 system-ui,sans-serif;";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
     const head = document.createElement("div");
     head.style.cssText =
-      "display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid #e2e8f0;font-weight:600;";
+      `display:flex;align-items:center;padding:21px 24px 17px;border-bottom:1px solid ${theme.border};font:400 25px/1.5 SimSun,Georgia,serif;`;
     head.textContent = title;
-    const x = document.createElement("span");
+    const x = document.createElement("button");
+    x.type = "button";
+    x.setAttribute("aria-label", "关闭");
     x.textContent = "✕";
-    x.style.cssText = "margin-left:auto;cursor:pointer;color:#64748b;padding:0 4px;";
+    x.style.cssText = `margin-left:auto;cursor:pointer;color:${theme.muted};padding:0;width:30px;height:30px;border:0;background:transparent;font:16px/1 system-ui,sans-serif;`;
     x.addEventListener("click", close);
     head.append(x);
     const body = document.createElement("div");
-    body.style.cssText = "padding:14px 16px;overflow:auto;";
+    body.style.cssText = "padding:20px 24px;overflow:auto;";
     box.append(head, body);
     mask.append(box);
     mask.addEventListener("click", (e) => {
@@ -78,18 +90,30 @@
     });
     function close() {
       mask.remove();
+      if (opener && opener.isConnected) opener.focus({ preventScroll: true });
     }
+    mask.addEventListener("keydown", e => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+      if (e.key !== "Tab") return;
+      const elements = [...box.querySelectorAll('button:not(:disabled),textarea:not(:disabled),input:not(:disabled),a[href]')].filter(el => el.getClientRects().length);
+      const first = elements[0], last = elements[elements.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
     document.documentElement.append(mask);
     buildBody(body, close);
+    x.focus();
     return { close };
   }
 
   function btn(label, primary) {
+    const theme = uiTheme();
     const b = document.createElement("button");
     b.textContent = label;
     b.style.cssText =
       "border:none;border-radius:7px;padding:7px 14px;cursor:pointer;font-weight:600;" +
-      "background:" + (primary ? "#2563eb;color:#fff" : "#f1f5f9;color:#2563eb") + ";";
+      "font:12px/1.6 system-ui,sans-serif;" +
+      "background:" + (primary ? `${theme.accent};color:${theme.ink}` : `${theme.soft};color:${theme.accentInk}`) + ";";
     return b;
   }
 
@@ -118,13 +142,14 @@
   function textModal(title, text, opts) {
     const o = opts || {};
     modal(title, (body, close) => {
+      const theme = uiTheme();
       const ta = document.createElement("textarea");
       ta.value = text;
       ta.readOnly = !!o.readOnly;
       ta.spellcheck = false;
       ta.style.cssText =
-        "width:100%;height:" + (o.height || "56vh") + ";resize:vertical;border:1px solid #e2e8f0;" +
-        "border-radius:8px;padding:10px;font:13px/1.7 ui-monospace,Consolas,monospace;color:#0f172a;";
+        "width:100%;height:" + (o.height || "56vh") + `;resize:vertical;border:1px solid ${theme.border};background:${theme.panel};` +
+        `border-radius:6px;padding:14px;font:13px/1.8 ui-monospace,Consolas,monospace;color:${theme.text};`;
       const foot = document.createElement("div");
       foot.style.cssText = "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;";
       const cp = btn("复制", true);
@@ -151,7 +176,7 @@
         foot.append(b);
       }
       const hint = document.createElement("span");
-      hint.style.cssText = "margin-left:auto;align-self:center;color:#94a3b8;font-size:12px;";
+      hint.style.cssText = `margin-left:auto;align-self:center;color:${theme.muted};font-size:11px;`;
       hint.textContent = o.hint || "";
       foot.append(hint);
       body.append(ta, foot);

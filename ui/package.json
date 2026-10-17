@@ -6,11 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "export:preview": "node ../scripts/export-ui-preview.mjs",
+    "test:store": "node ../scripts/test_ui_store.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.0",
     "@tauri-apps/plugin-dialog": "^2.8.0",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "2.13.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

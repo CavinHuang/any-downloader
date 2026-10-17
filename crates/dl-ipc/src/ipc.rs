@@ -282,38 +282,10 @@ pub(crate) async fn dispatch(engine: &Engine, req: Request) -> Response {
             Response::ok(req.id, serde_json::json!({ "opened": true }))
         }
         "task.start" => {
-            // 由宿主进程（GUI / serve）执行下载：进度经宿主事件流分发给 UI
             let Some(p) = serde_json::from_value::<IdParams>(req.params).ok() else {
-                return Response::simple_err(req.id, "bad_params", "expected {\"id\": ...}");
+                return Response::simple_err(req.id, "bad_params", "expected id");
             };
-            let task = match engine.get_task(&p.id).await {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    return Response::simple_err(
-                        req.id,
-                        "not_found",
-                        format!("task {} not found", p.id),
-                    )
-                }
-                Err(e) => return Response::err(req.id, &e),
-            };
-            let opts = dl_engine::DownloadOptions {
-                dir: task
-                    .dir
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
-                ..engine
-                    .download_options_from_settings()
-                    .await
-                    .unwrap_or_default()
-            };
-            let engine2 = engine.clone();
-            tokio::spawn(async move {
-                if let Err(e) = engine2.download(&p.id, opts).await {
-                    tracing::warn!(task = %p.id, error = %e, "ipc-started download failed");
-                }
-            });
-            Response::ok(req.id, serde_json::json!({ "started": true }))
+            task_response(req.id, engine.start(&p.id).await)
         }
         method @ ("task.pause" | "task.resume" | "task.cancel" | "task.retry" | "task.remove") => {
             let Some(p) = serde_json::from_value::<IdParams>(req.params).ok() else {
@@ -399,9 +371,15 @@ mod tests {
         assert!(resp.ok);
         let id = resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
+        // Queued → Paused 已允许（迁移表新增：排队中可暂停）；resume 回排队
         let resp = dispatch(&engine, req("task.pause", serde_json::json!({ "id": id }))).await;
-        assert!(!resp.ok, "pause on queued must be rejected");
-        assert_eq!(resp.error.unwrap().code, "invalid_transition");
+        assert!(
+            resp.ok,
+            "pause on queued is allowed by the transition table"
+        );
+
+        let resp = dispatch(&engine, req("task.resume", serde_json::json!({ "id": id }))).await;
+        assert!(resp.ok, "paused → queued must be allowed");
 
         let resp = dispatch(
             &engine,

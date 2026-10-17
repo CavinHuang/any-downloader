@@ -479,7 +479,7 @@ pub(crate) async fn phase(ctx: Arc<Ctx>) -> Result<(), DriveErr> {
         }
     }
 
-    finalize(ctx, &paths)?;
+    finalize(ctx, &paths).await?;
     let _ = std::fs::remove_dir_all(&*tmp);
 
     ctx.engine

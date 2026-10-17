@@ -16,6 +16,8 @@ pub fn can_transition(from: TaskStatus, to: TaskStatus) -> bool {
     matches!(
         (from, to),
         (Queued, Probing)
+            | (Queued, Paused)
+            | (Failed, WaitingRetry)
             | (Probing, Downloading)
             | (Probing, WaitingRetry)
             | (Probing, Failed)
@@ -53,7 +55,11 @@ mod tests {
 
     #[test]
     fn happy_path_http() {
-        assert!(can_transition(Queued, Probing));
+        assert!(
+            can_transition(Queued, Probing)
+                && can_transition(Queued, Paused)
+                && can_transition(Failed, WaitingRetry)
+        );
         assert!(can_transition(Probing, Downloading));
         assert!(can_transition(Downloading, Verifying));
         assert!(can_transition(Verifying, Done));
@@ -129,7 +135,7 @@ mod tests {
         assert!(can_transition(Paused, Failed));
         assert!(can_transition(Paused, Queued));
         // 非法路径抽查
-        assert!(!can_transition(Queued, Paused));
+        assert!(can_transition(Queued, Paused));
         assert!(!can_transition(Paused, Done));
         assert!(!can_transition(Queued, Downloading));
     }

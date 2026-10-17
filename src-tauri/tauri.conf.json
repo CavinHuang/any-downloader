@@ -24,6 +24,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],
@@ -47,5 +48,16 @@
       "binaries/yt-dlp",
       "binaries/deno"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyODlBMUYwNzgwMkZCRkEKUldUNit3SjQ4S0dKSW5NUkdma0JUaVFHNVpJa2EvZmpud3dZY1lRWEJHL3VBd2ZnMkQ0ZHY0RVkK",
+      "endpoints": [
+        "https://github.com/CavinHuang/any-downloader/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

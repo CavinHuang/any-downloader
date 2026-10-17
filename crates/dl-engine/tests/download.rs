@@ -482,9 +482,10 @@ async fn ytdlp_paused_task_resumes_download() {
     // 收尾：再次暂停，确认 driver 停下（不等假 yt-dlp 的自旋）
     let _ = engine.pause(&t.id).await;
     step("wait Paused#2");
-    if tokio::time::timeout(std::time::Duration::from_secs(15), wait_status(
-        &engine, &t.id, TaskStatus::Paused,
-    ))
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        wait_status(&engine, &t.id, TaskStatus::Paused),
+    )
     .await
     .is_err()
     {

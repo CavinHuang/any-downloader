@@ -146,6 +146,8 @@ pub const HEADER_ALLOWLIST: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
+    #[serde(default)]
+    pub file_size: Option<u64>,
     pub id: String,
     /// 用户给定的原始 URL。续传一律从此处重走重定向链，不用 final_url
     /// （签名 URL 过期后 final_url 不可复活，见 DESIGN §5.3）。

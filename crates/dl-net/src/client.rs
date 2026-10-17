@@ -14,6 +14,7 @@ pub fn build_client(proxy: Option<&str>) -> Res<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(10));
     if let Some(p) = proxy {
         // 手动代理；支持 http://、https://、socks5://、socks5h://（远端 DNS，推荐默认）

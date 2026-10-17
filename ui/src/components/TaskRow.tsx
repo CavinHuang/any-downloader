@@ -5,6 +5,8 @@ import { ROW_H } from "../const";
 import { t } from "../i18n";
 import { store } from "../store";
 import { showToast } from "../toast";
+import { categoryOf, sourceOf } from "../fileTypes";
+import { Icon, IconName } from "./Icon";
 
 export function TaskRow({
   task,
@@ -22,21 +24,24 @@ export function TaskRow({
   const live = useSyncExternalStore(store.subscribe, () => store.liveOf(task.id));
   const segs = live?.segs ?? null;
   const [flash, setFlash] = useState(false);
+  const [busy, setBusy] = useState(false);
   const flashTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
 
   // 操作错误唯一口径（A18/§4.1）：error toast + 出错行闪红 2s；行内不渲染错误文本
-  // （56px 固定行高是虚拟滚动硬约束）。捕获与自动清除的时序逻辑保留，仅换出口。
+  // 固定行高是虚拟滚动硬约束，错误反馈不改变布局。
   const guard = (fn: () => Promise<unknown>) => async () => {
+    if (busy) return;
+    setBusy(true);
     try {
       await fn();
+      await store.refresh();
     } catch (e) {
       showToast(String(e), "error");
       setFlash(true);
       window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setFlash(false), 2000);
-    }
-    store.refresh();
+    } finally { setBusy(false); }
   };
 
   const active = isActive(task.status);
@@ -52,6 +57,8 @@ export function TaskRow({
   // A7：exe/msi/apk/dmg 完成态显示警告，且「打开」前确认（§4.5）
   const isExe = /\.(exe|msi|apk|dmg)$/i.test(name);
   const indet = !total && active; // A11：总大小未知且进行中 → indeterminate（multi 不渲染，一律单条）
+  const category = categoryOf(task);
+  const extension = name.match(/\.([a-z0-9]{1,6})$/i)?.[1]?.toUpperCase() ?? "FILE";
 
   const openFile = guard(async () => {
     if (task.status === "done" && isExe && !window.confirm(t("exeWarn"))) return;
@@ -76,19 +83,19 @@ export function TaskRow({
           checked={selected}
           title={t("selRangeHint")}
           aria-label={t("selRangeHint")}
+          readOnly
           onClick={(e) => {
             e.stopPropagation();
             onToggleSelect(e.shiftKey);
           }}
         />
       </div>
+      <div className={`file-badge ${category}`}><Icon name={category as IconName} size={23} /><span>{extension}</span></div>
       <div className="c-file">
-        <div className="name" title={task.url}>
-          <span className={`dot ${task.status}`} />
-          {name}
-        </div>
+        <button className="name" title={name} onClick={onDetail}>{name}</button>
         <div className="sub">
-          <span className={`status ${task.status}`}>{t(`status_${task.status}` as never)}</span>
+          <span className={`status ${task.status}`}><span className={`dot ${task.status}`} />{t(`status_${task.status}` as never)}</span>
+          <span className="source" title={task.url}>{sourceOf(task.url)}</span>
           {task.status === "failed" && task.error ? (
             <span className="err" title={JSON.stringify(task.error)}>
               {errorCode(task.error)}
@@ -101,10 +108,16 @@ export function TaskRow({
           ) : null}
         </div>
       </div>
-      <div className="c-progress">
+      <div className={`c-progress ${task.status}`}>
+        <div className="progress-summary"><span>{task.status === "done" ? fmtBytes(total ?? task.downloaded_bytes) : active && bps > 0 ? fmtSpeed(bps) : t(`status_${task.status}`)}</span><span>{task.status === "done" ? <Icon name="check" size={14} /> : total ? `${pct}%` : ""}</span></div>
         {segs && segs.length > 1 && total ? (
           <div
             className="bar multi"
+            role="progressbar"
+            aria-label={t("colProgress")}
+            aria-valuenow={pct}
+            aria-valuemin={0}
+            aria-valuemax={100}
             title={
               live?.segSpeeds
                 ? segs
@@ -138,7 +151,7 @@ export function TaskRow({
             })}
           </div>
         ) : (
-          <div className={indet ? "bar indet" : "bar"}>
+          <div className={indet ? "bar indet" : "bar"} role="progressbar" aria-label={t("colProgress")} aria-valuenow={indet ? undefined : task.status === "done" ? 100 : pct} aria-valuemin={0} aria-valuemax={100}>
             {!indet && (
               <div
                 className={`fill ${task.status}`}
@@ -149,39 +162,39 @@ export function TaskRow({
         )}
         <span className="pct">
           {task.kind === "hls" && total
-            ? `${downloaded || 0}/${total} ${t("segsUnit")}${task.status === "done" ? "" : ` ${pct}%`}`
+            ? `${downloaded || 0}/${total} ${t("segsUnit")}`
             : total
-              ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}${task.status === "done" ? "" : ` ${pct}%`}`
+              ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}`
               : task.status === "done"
                 ? "✓"
                 : // A11：「—」时说明总大小未知，避免误读为卡死
                   <span title={t("sizeUnknown")}>—</span>}
         </span>
       </div>
-      <div className="c-speed">
-        {active && bps > 0 ? fmtSpeed(bps) : ""}
-      </div>
-      <div className="c-actions" onClick={(e) => e.stopPropagation()}>
+      <fieldset className="c-actions" disabled={busy} aria-busy={busy} onClick={(e) => e.stopPropagation()}>
         {active ? (
           <>
-            <ActionBtn label={t("pause")} onClick={guard(() => api.pauseTask(task.id))} />
-            <ActionBtn label={t("cancel")} onClick={guard(() => api.cancelTask(task.id))} />
+            <ActionBtn icon="pause" label={t("pause")} onClick={guard(() => api.pauseTask(task.id))} />
+            <ActionBtn icon="close" label={t("cancel")} onClick={guard(() => api.cancelTask(task.id))} />
+            <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
         ) : task.status === "done" ? (
           <>
             {/* A1：完成态固定 [打开][文件夹][详情]，行内 ≤3；删除统一收进详情抽屉 */}
-            <ActionBtn label={t("open")} onClick={openFile} />
+            <ActionBtn icon="arrow" label={t("open")} onClick={openFile} />
             <ActionBtn
+              icon="folder"
               label={t("openFolder")}
               onClick={guard(() => api.revealTask(task.id))}
             />
-            <ActionBtn label={t("detail")} onClick={onDetail} />
+            <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
         ) : (
           <>
             {task.status === "failed" || task.status === "canceled" ? (
               <ActionBtn
                 primary
+                icon="retry"
                 label={t("retry")}
                 onClick={guard(async () => {
                   await api.retryTask(task.id);
@@ -191,14 +204,15 @@ export function TaskRow({
             ) : (
               <ActionBtn
                 primary
+                icon="play"
                 label={t("start")}
                 onClick={guard(() => api.startDownload(task.id))}
               />
             )}
-            <ActionBtn label={t("detail")} onClick={onDetail} />
+            <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
         )}
-      </div>
+      </fieldset>
     </div>
   );
 }
@@ -207,14 +221,16 @@ function ActionBtn({
   label,
   onClick,
   primary,
+  icon,
 }: {
   label: string;
   onClick: () => void;
   primary?: boolean;
+  icon: IconName;
 }) {
   return (
-    <button className={primary ? "btn primary" : "btn"} onClick={onClick}>
-      {label}
+    <button className={primary ? "icon-button action-primary" : "icon-button"} onClick={onClick} title={label} aria-label={label}>
+      <Icon name={icon} size={16} />
     </button>
   );
 }

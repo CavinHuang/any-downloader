@@ -9,26 +9,26 @@
   if (window.__adlFloat) return;
   window.__adlFloat = true;
 
-  // —— 面板 token：ADL-DESIGN-TOKENS v1 硬编码副本（同步自 docs/UI-DESIGN.md §2）。
+  // —— Anything Studio 色板副本（与 extension/studio.css 一致）。
   //     内容脚本无法跨 document 共享 CSS 变量，故按主题各存一组，matchMedia 切换
   const TOKENS = {
     light: {
-      panel: "#ffffff", text: "#1f2937", muted: "#6b7280",
-      border: "#e5e7eb", borderSoft: "#f1f5f9",
-      accent: "#2563eb", accentStrong: "#2563eb", accentInk: "#2563eb", accentSoft: "#eff6ff",
-      okSoft: "#f0fdf4", okInk: "#15803d",
-      errSoft: "#fef2f2", errInk: "#b91c1c",
-      warnSoft: "#fffbeb", warnInk: "#b45309",
-      shadow: "0 6px 24px rgba(15,23,42,.2)",
+      panel: "#fbfaf6", text: "#293c34", muted: "#687263",
+      border: "#dedfd5", borderSoft: "#e9e9df",
+      accent: "#47644d", accentStrong: "#344e3c", accentInk: "#36543e", accentSoft: "#e9eddf", buttonInk: "#fbfaf6",
+      okSoft: "#e9eddf", okInk: "#45633e",
+      errSoft: "#f7e6df", errInk: "#a14d3d",
+      warnSoft: "#f1e9d7", warnInk: "#856225",
+      shadow: "0 12px 40px rgba(35,49,38,.16)",
     },
     dark: {
-      panel: "#1a1d24", text: "#e5e7eb", muted: "#9ca3af",
-      border: "#2a2e37", borderSoft: "#1e222b",
-      accent: "#3b82f6", accentStrong: "#2563eb", accentInk: "#93c5fd", accentSoft: "#1e293b",
-      okSoft: "#052e16", okInk: "#4ade80",
-      errSoft: "#450a0a", errInk: "#f87171",
-      warnSoft: "#451a03", warnInk: "#fbbf24",
-      shadow: "0 6px 24px rgba(0,0,0,.5)",
+      panel: "#242e27", text: "#e3e7d9", muted: "#a0ad9b",
+      border: "#3b463c", borderSoft: "#303b32",
+      accent: "#b6c99c", accentStrong: "#bdd29c", accentInk: "#c1d5aa", accentSoft: "#34432f", buttonInk: "#22301f",
+      okSoft: "#34432f", okInk: "#c1d5aa",
+      errSoft: "#4d302b", errInk: "#edaf98",
+      warnSoft: "#453d2b", warnInk: "#e0c18b",
+      shadow: "0 12px 40px rgba(0,0,0,.3)",
     },
   };
 
@@ -36,24 +36,27 @@
     return `
 :host {
   all: initial; /* 阻断宿主页可继承样式渗入；关键盒样式另由宿主元素 inline 提供 */
-  display: block; box-sizing: border-box; padding: 8px;
+  display: block; box-sizing: border-box; padding: 16px;
   background: ${t.panel}; color: ${t.text};
-  border: 1px solid ${t.border}; border-radius: 10px;
+  border: 1px solid ${t.border}; border-radius: 12px;
   box-shadow: ${t.shadow};
-  font: 12px/1.5 system-ui, sans-serif;
+  font: 12px/1.6 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
 }
 * { box-sizing: border-box; }
 button {
   font: inherit; color: ${t.text}; background: ${t.panel};
   border: 1px solid ${t.border}; border-radius: 6px;
-  padding: 6px 4px; cursor: pointer; box-sizing: border-box;
+  padding: 7px 9px; cursor: pointer; box-sizing: border-box;
 }
 button:hover { border-color: ${t.accentInk}; color: ${t.accentInk}; }
 button:active { opacity: .85; }
 button:focus-visible { outline: 2px solid ${t.accentInk}; outline-offset: 2px; }
 button:disabled { opacity: .5; cursor: default; }
 input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
-.head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-weight: 600; }
+.head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+.wordmark { font: 600 25px/1 Georgia, serif; letter-spacing: -1.5px; }
+.context-line { color: ${t.muted}; font-size: 10px; padding-bottom: 13px; margin-bottom: 10px; border-bottom: 1px solid ${t.border}; }
+.section-label { display: flex; align-items: center; gap: 8px; font-size: 11px; color: ${t.muted}; padding: 2px 0 9px; }
 .x {
   margin-left: auto; flex: none; width: 28px; height: 28px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -66,16 +69,17 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
   padding: 6px 8px; margin-bottom: 8px; font-size: 12px;
 }
 .menu {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
-  margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid ${t.border};
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; max-height: 260px; overflow-y: auto;
+  margin-bottom: 13px; padding-bottom: 10px; border-bottom: 1px solid ${t.border};
 }
 .menu button {
-  padding: 6px 4px; text-align: center; overflow: hidden;
+  display: flex; align-items: center; gap: 8px; padding: 7px 5px; text-align: left; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
-  background: ${t.borderSoft}; font-size: 12px;
+  background: transparent; border-color: transparent; font-size: 11px;
 }
+.menu button::before { content: attr(data-index); color: ${t.muted}; font: 9px/1.5 Consolas, monospace; }
 .menu button:hover { background: ${t.accentSoft}; }
-.res-row { display: flex; align-items: center; gap: 6px; padding: 3px 2px; cursor: pointer; border-radius: 4px; }
+.res-row { display: flex; align-items: center; gap: 8px; padding: 9px 2px; cursor: pointer; border-bottom: 1px solid ${t.borderSoft}; font-size: 11px; }
 .res-row:hover { background: ${t.accentSoft}; }
 .res-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .res-row .tag { font-size: 10px; color: ${t.accentInk}; flex: none; }
@@ -85,12 +89,12 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
   font-size: 12px; word-break: break-all;
 }
 .err-row.on { display: block; }
-.foot { display: flex; gap: 6px; margin-top: 8px; }
+.foot { display: flex; gap: 6px; margin-top: 15px; }
 .push {
-  flex: 1; background: ${t.accentStrong}; color: #fff; border: none;
-  border-radius: 7px; padding: 6px 0; font-weight: 600;
+  flex: 1; background: ${t.accentStrong}; color: ${t.buttonInk}; border: none;
+  border-radius: 6px; padding: 9px 0; font-weight: 500;
 }
-.push:hover { color: #fff; opacity: .88; border: none; }
+.push:hover { color: ${t.buttonInk}; opacity: .88; border: none; }
 .push:disabled { opacity: .5; cursor: default; }
 .open-doc {
   flex: 0 0 auto; background: ${t.borderSoft}; color: ${t.accentInk};
@@ -163,20 +167,23 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
     btn.type = "button";
     btn.setAttribute("aria-label", baseTitle);
     btn.setAttribute("aria-haspopup", "dialog");
-    btn.textContent = "⬇";
+    btn.setAttribute("aria-expanded", "false");
+    const bookmarkIcon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 4 11-1 1 4M3 6l11-1 2 15-11 1z"/><path d="m14 8 6-1 1 14-6 1M7 11h4m-3 4h4"/></svg>';
+    const restoreButton = () => { btn.innerHTML = bookmarkIcon; btn.title = baseTitle; };
+    restoreButton();
     btn.title = baseTitle;
     S(btn, {
       // button 复位（宿主页样式表无法穿透 inline style）
       margin: "0", padding: "0", border: "none", boxSizing: "border-box",
       lineHeight: "1", appearance: "none",
       // 显式声明 background 与 font（Tailwind preflight 会重置这两项）
-      background: "#2563eb", color: "#fff",
+      background: "#e4edb5", color: "#293c34", border: "1px solid #c7d19f",
       font: "16px/1 system-ui, sans-serif",
       // 形态
       position: "fixed", right: "18px", bottom: "18px", zIndex: "2147483646",
-      width: "40px", height: "40px", borderRadius: "50%", cursor: "pointer",
+      width: "46px", height: "46px", borderRadius: "12px", cursor: "pointer",
       display: "flex", alignItems: "center", justifyContent: "center",
-      boxShadow: "0 2px 10px rgba(15,23,42,.35)", userSelect: "none",
+      boxShadow: "0 4px 18px rgba(35,49,38,.18)", userSelect: "none",
       opacity: "0.85",
     });
     btn.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
@@ -184,10 +191,10 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
     // 键盘焦点环（inline 无法表达 :focus-visible；双色 ring 保证任意页面可辨）
     btn.addEventListener("focus", () => {
       btn.style.boxShadow =
-        "0 2px 10px rgba(15,23,42,.35), 0 0 0 2px #ffffff, 0 0 0 4px #2563eb";
+        "0 4px 18px rgba(35,49,38,.18), 0 0 0 2px #fbfaf6, 0 0 0 4px #47644d";
     });
     btn.addEventListener("blur", () => {
-      btn.style.boxShadow = "0 2px 10px rgba(15,23,42,.35)";
+      btn.style.boxShadow = "0 4px 18px rgba(35,49,38,.18)";
     });
 
     // —— 面板状态（闭包内；host= Shadow DOM 宿主元素）
@@ -255,6 +262,7 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       panelShadow = null;
       panelEl = null;
       liveSheet = null;
+      btn.setAttribute("aria-expanded", "false");
       host.remove();
       if (restoreFocus) btn.focus(); // 关闭后焦点归还触发元素
     }
@@ -282,10 +290,11 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       const host = document.createElement("div");
       // 关键盒样式 inline 在宿主元素上（优先级高于宿主页样式表，防挤破布局）
       S(host, {
-        position: "fixed", right: "18px", bottom: "66px", zIndex: "2147483646",
-        width: "300px", maxHeight: "60vh", overflowY: "auto",
+        position: "fixed", right: "18px", bottom: "76px", zIndex: "2147483646",
+        width: "min(348px, calc(100vw - 36px))", maxHeight: "min(70vh, 580px)", overflowY: "auto",
       });
       host.setAttribute("role", "dialog");
+      host.tabIndex = -1;
       host.setAttribute("aria-label", "Anything Downloader 下载面板");
       const shadow = host.attachShadow({ mode: "closed" });
       const panel = document.createElement("div");
@@ -297,11 +306,15 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       panelHost = host;
       panelShadow = shadow;
       panelEl = panel;
+      btn.setAttribute("aria-expanded", "true");
       host.addEventListener("keydown", onHostKeydown);
 
       const head = document.createElement("div");
       head.className = "head";
-      head.append(`${label}${r && r.ok && r.resources ? ` · ${r.resources.length} 项` : ""}`);
+      const wordmark = document.createElement("span");
+      wordmark.className = "wordmark";
+      wordmark.textContent = "anything.";
+      head.append(wordmark);
       // F1：✕ span → button，命中区 28×28，带 aria-label
       const x = document.createElement("button");
       x.type = "button";
@@ -311,6 +324,10 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       x.addEventListener("click", () => closePanel(true));
       head.append(x);
       panel.append(head);
+      const contextLine = document.createElement("div");
+      contextLine.className = "context-line";
+      contextLine.textContent = `${label} / 把这一页，收好。`;
+      panel.append(contextLine);
 
       // —— 旧版脚本提示：扩展重载后未刷新的页面缺新注入（actions.js 不在）
       if (staleScripts) {
@@ -322,6 +339,10 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
 
       // —— 文章操作菜单（对齐 code-box；非文章站无此区）
       if (actions.length) {
+        const menuLabel = document.createElement("div");
+        menuLabel.className = "section-label";
+        menuLabel.textContent = "文章工具";
+        panel.append(menuLabel);
         const menu = document.createElement("div");
         menu.className = "menu";
         for (const act of actions) {
@@ -329,6 +350,7 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
           b.type = "button";
           b.textContent = act.label;
           b.title = act.label;
+          b.dataset.index = String(menu.children.length + 1).padStart(2, "0");
           b.addEventListener("click", () => {
             let r2 = null;
             try {
@@ -353,6 +375,10 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
 
       // —— 媒体资源区
       if (r && r.ok && r.resources && r.resources.length) {
+        const resourceLabel = document.createElement("div");
+        resourceLabel.className = "section-label";
+        resourceLabel.textContent = `本页发现 / ${r.resources.length} 项`;
+        panel.append(resourceLabel);
         const boxes = [];
         for (const res of r.resources) {
           const row = document.createElement("label");
@@ -387,7 +413,7 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
         // F3：计数随勾选实时联动；0 项禁用并给 title 说明（替代静默 return）
         const syncCount = () => {
           const n = boxes.filter(([cb]) => cb.checked).length;
-          push.textContent = `推送 ${n} 项`;
+          push.textContent = `收下 ${n} 项 ↗`;
           push.disabled = n === 0;
           push.title = n === 0 ? "请先勾选要推送的资源" : "";
         };
@@ -484,11 +510,12 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       probing = false;
       btn.disabled = false;
       btn.removeAttribute("aria-busy");
+      restoreButton();
       if (timedOut) {
         // 迟到的 probe 结果不保存引用即不会被应用；用户再次点击 = 全新 probe
         btn.textContent = "⌛";
         setTimeout(() => {
-          if (!probing && !panelHost) { btn.textContent = "⬇"; btn.title = baseTitle; }
+          if (!probing && !panelHost) restoreButton();
         }, 1500);
         return;
       }
@@ -499,7 +526,7 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
         btn.textContent = "✕";
         btn.title = r && r.error === "adapter_disabled" ? "此平台已禁用" : "本页未发现可下载媒体";
         setTimeout(() => {
-          if (!probing && !panelHost) { btn.textContent = "⬇"; btn.title = baseTitle; }
+          if (!probing && !panelHost) restoreButton();
         }, 1500);
         return;
       }

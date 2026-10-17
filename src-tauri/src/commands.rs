@@ -9,6 +9,8 @@ use tauri::State;
 
 use crate::AppState;
 
+/// 备用直调入口（尚未注册为命令；注册时需改收 `State<AppState>`）
+#[allow(dead_code)]
 pub async fn download_options(engine: &Engine) -> Result<DownloadOptions, String> {
     engine
         .download_options_from_settings()
@@ -92,63 +94,20 @@ pub async fn retry_task(state: State<'_, AppState>, id: String) -> Result<Task, 
 /// 失败自动重试：网络类错误按退避重排至多 max_auto_retry 次（设置可调，0 = 关闭）。
 #[tauri::command]
 pub async fn start_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    const MAX_CONCURRENT_DEFAULT: usize = 0; // 0 = 不限
-    let max_concurrent = state
-        .engine
-        .get_setting("max_concurrent")
-        .await
-        .map_err(str_err)?
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(MAX_CONCURRENT_DEFAULT);
-    if max_concurrent > 0 && state.engine.running_count() >= max_concurrent {
-        return Err(format!(
-            "并发任务已达上限（{max_concurrent}），请等待或到设置中调整"
-        ));
-    }
+    state.engine.start(&id).await.map(|_| ()).map_err(str_err)
+}
 
-    let engine = state.engine.clone();
-    let max_auto_retry = state
+#[tauri::command]
+pub async fn rename_task(
+    state: State<'_, AppState>,
+    id: String,
+    filename: String,
+) -> Result<Task, String> {
+    state
         .engine
-        .get_setting("max_auto_retry")
+        .rename_task(&id, &filename)
         .await
-        .map_err(str_err)?
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(3);
-    let opts = download_options(&state.engine).await?;
-    tauri::async_runtime::spawn(async move {
-        let mut attempts: u32 = 0;
-        loop {
-            let r = engine.download(&id, opts.clone()).await;
-            match r {
-                Ok(_) => return,
-                Err(e) => {
-                    let retryable = e.kind.is_retryable();
-                    let canceled_like = matches!(
-                        e.kind.code(),
-                        "invalid_transition" // 暂停/取消引发的迁移错误，不再自动重试
-                    );
-                    attempts += 1;
-                    if !retryable
-                        || canceled_like
-                        || attempts > max_auto_retry
-                        || engine.get_task(&id).await.ok().map(|t| t.map(|t| t.status))
-                            != Some(Some(dl_model::TaskStatus::Failed))
-                    {
-                        tracing::warn!(task = %id, error = %e, "download ended");
-                        return;
-                    }
-                    // 指数退避后重排
-                    let backoff = std::time::Duration::from_secs(1u64 << attempts.min(4));
-                    tracing::info!(task = %id, attempt = attempts, "auto retry in {backoff:?}");
-                    tokio::time::sleep(backoff).await;
-                    if engine.retry(&id).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    });
-    Ok(())
+        .map_err(str_err)
 }
 
 /// 暂停：运行中走协作取消（checkpoint 后落 Paused）；非运行态直接状态迁移。
@@ -182,9 +141,12 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "proxy",
         "conflict",
         "ffmpeg_path",
+        "yt_dlp_path",
         "max_concurrent",
         "max_auto_retry",
         "auto_categorize",
+        "after_done",
+        "clipboard_monitor",
     ] {
         let v = engine.get_setting(key).await.map_err(str_err)?;
         out.insert(

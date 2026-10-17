@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_filename ON tasks(filename);
+CREATE TABLE IF NOT EXISTS task_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, deleted INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS tasks_insert AFTER INSERT ON tasks BEGIN INSERT INTO task_changes(task_id,deleted) VALUES(NEW.id,0); END;
+CREATE TRIGGER IF NOT EXISTS tasks_update AFTER UPDATE ON tasks BEGIN INSERT INTO task_changes(task_id,deleted) VALUES(NEW.id,0); END;
+CREATE TRIGGER IF NOT EXISTS tasks_delete AFTER DELETE ON tasks BEGIN INSERT INTO task_changes(task_id,deleted) VALUES(OLD.id,1); END;
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -126,12 +130,43 @@ fn migrate(conn: &Connection) -> Result<(), DownloadError> {
         conn.execute("ALTER TABLE tasks ADD COLUMN postprocess_json TEXT", [])
             .map_err(sql_err)?;
     }
+    if conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='file_size'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(sql_err)?
+        == 0
+    {
+        conn.execute("ALTER TABLE tasks ADD COLUMN file_size INTEGER", [])
+            .map_err(sql_err)?;
+    }
     Ok(())
 }
 
-const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,error,created_at,updated_at";
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TaskSnapshot {
+    pub cursor: u64,
+    pub full: bool,
+    pub tasks: Vec<Task>,
+    pub deleted: Vec<String>,
+}
+
+const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,error,created_at,updated_at,file_size";
 
 enum Op {
+    Snapshot {
+        cursor: Option<u64>,
+        tx: oneshot::Sender<Res<TaskSnapshot>>,
+    },
+    Output {
+        id: String,
+        dir: String,
+        filename: String,
+        file_size: Option<u64>,
+        tx: oneshot::Sender<Res<()>>,
+    },
     SetSetting {
         key: String,
         value: String,
@@ -206,6 +241,33 @@ pub struct Db {
 }
 
 impl Db {
+    pub async fn snapshot(&self, cursor: Option<u64>) -> Res<TaskSnapshot> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::Snapshot { cursor, tx })
+            .map_err(|_| writer_gone())?;
+        rx.await.map_err(|_| writer_gone())?
+    }
+    pub async fn set_output(
+        &self,
+        id: &str,
+        dir: &str,
+        filename: &str,
+        file_size: Option<u64>,
+    ) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::Output {
+                id: id.into(),
+                dir: dir.into(),
+                filename: filename.into(),
+                file_size,
+                tx,
+            })
+            .map_err(|_| writer_gone())?;
+        rx.await.map_err(|_| writer_gone())?
+    }
+
     pub fn open(path: &Path) -> Res<Db> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -456,6 +518,19 @@ fn writer_gone() -> DownloadError {
 fn writer_loop(conn: Connection, rx: Receiver<Op>) {
     while let Ok(op) = rx.recv() {
         match op {
+            Op::Snapshot { cursor, tx } => {
+                let _ = tx.send(snapshot(&conn, cursor));
+            }
+            Op::Output {
+                id,
+                dir,
+                filename,
+                file_size,
+                tx,
+            } => {
+                let result=conn.execute("UPDATE tasks SET dir=?1,filename=?2,file_size=COALESCE(?3,file_size),updated_at=?4 WHERE id=?5",rusqlite::params![dir,filename,file_size,now_ms(),id]).map(|_|()).map_err(sql_err);
+                let _ = tx.send(result);
+            }
             Op::SetSetting { key, value, tx } => {
                 let res = conn
                     .execute(
@@ -628,11 +703,58 @@ fn writer_loop(conn: Connection, rx: Receiver<Op>) {
     }
 }
 
+fn snapshot(conn: &Connection, since: Option<u64>) -> Res<TaskSnapshot> {
+    let transaction = conn.unchecked_transaction().map_err(sql_err)?;
+    let cursor: u64 = transaction
+        .query_row("SELECT COALESCE(MAX(seq),0) FROM task_changes", [], |r| {
+            r.get(0)
+        })
+        .map_err(sql_err)?;
+    let oldest: u64 = transaction
+        .query_row("SELECT COALESCE(MIN(seq),0) FROM task_changes", [], |r| {
+            r.get(0)
+        })
+        .map_err(sql_err)?;
+    let full = since.is_none_or(|s| s > cursor || (oldest > 0 && s < oldest.saturating_sub(1)));
+    let tasks = if full {
+        list(&transaction, None)?
+    } else {
+        let sql=format!("SELECT {COLS} FROM tasks WHERE id IN (SELECT task_id FROM task_changes WHERE seq>?1 AND seq<=?2)");
+        let mut stmt = transaction.prepare(&sql).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![since.unwrap_or(0), cursor], row_to_task)
+            .map_err(sql_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)?
+    };
+    let deleted = if full {
+        Vec::new()
+    } else {
+        let mut stmt=transaction.prepare("SELECT DISTINCT task_id FROM task_changes WHERE deleted=1 AND seq>?1 AND seq<=?2 AND task_id NOT IN (SELECT id FROM tasks)").map_err(sql_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![since.unwrap_or(0), cursor], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)?
+    };
+    transaction.commit().map_err(sql_err)?;
+    if cursor > 100_000 {
+        conn.execute("DELETE FROM task_changes WHERE seq<?1", [cursor - 100_000])
+            .map_err(sql_err)?;
+    }
+    Ok(TaskSnapshot {
+        cursor,
+        full,
+        tasks,
+        deleted,
+    })
+}
+
 fn insert(conn: &Connection, t: &Task) -> Res<()> {
     let error_json = t.error.as_ref().and_then(|e| serde_json::to_string(e).ok());
     conn.execute(
-        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,error,created_at,updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,error,created_at,updated_at,file_size)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
         rusqlite::params![
             &t.id,
             &t.url,
@@ -656,6 +778,7 @@ fn insert(conn: &Connection, t: &Task) -> Res<()> {
             error_json,
             t.created_at,
             t.updated_at,
+            t.file_size,
         ],
     )
     .map_err(sql_err)?;
@@ -728,6 +851,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         error: error_json.and_then(|s| serde_json::from_str(&s).ok()),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        file_size: row.get("file_size")?,
     })
 }
 
@@ -743,6 +867,7 @@ mod tests {
             final_url: None,
             filename: Some("video.mp4".into()),
             dir: Some("D:\\Downloads".into()),
+            file_size: None,
             total_bytes: Some(12345),
             etag: Some("\"abc\"".into()),
             last_modified: None,

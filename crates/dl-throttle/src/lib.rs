@@ -48,16 +48,31 @@ impl Bucket {
 /// 两级限速器。None = 不限速。
 #[derive(Clone, Debug, Default)]
 pub struct Limiter {
-    global: Option<Arc<Mutex<Bucket>>>,
+    global: Arc<Mutex<Option<Bucket>>>,
     task: Option<Arc<Mutex<Bucket>>>,
 }
 
 impl Limiter {
     pub fn new(global_bps: Option<u64>, task_bps: Option<u64>) -> Self {
-        Limiter {
-            global: global_bps
-                .map(|r| Arc::new(Mutex::new(Bucket::new(r, GLOBAL_BURST.max(r / 2))))),
-            task: task_bps.map(|r| Arc::new(Mutex::new(Bucket::new(r, TASK_BURST.max(r / 2))))),
+        let limiter = Self::default();
+        limiter.set_global_rate(global_bps);
+        limiter.with_task(task_bps)
+    }
+
+    pub fn set_global_rate(&self, rate: Option<u64>) {
+        let rate = rate.filter(|r| *r > 0);
+        let mut bucket = self.global.lock().unwrap();
+        if bucket.as_ref().map(|b| b.rate_bps) != rate {
+            *bucket = rate.map(|r| Bucket::new(r, GLOBAL_BURST.max(r / 2)));
+        }
+    }
+
+    pub fn with_task(&self, rate: Option<u64>) -> Self {
+        Self {
+            global: self.global.clone(),
+            task: rate
+                .filter(|r| *r > 0)
+                .map(|r| Arc::new(Mutex::new(Bucket::new(r, TASK_BURST.max(r / 2))))),
         }
     }
 
@@ -72,48 +87,72 @@ impl Limiter {
     /// want 会被截断到 ACQUIRE_CAP——burst 之下的额度才可能被全额满足，
     /// 否则 `want > burst` 时永远凑不满（死等）。
     pub async fn acquire(&self, want: u64) {
-        let want = want.min(Self::ACQUIRE_CAP);
-        loop {
-            let g_short = match &self.global {
-                Some(b) => {
-                    let mut b = b.lock().unwrap();
-                    let got = b.take(want);
-                    if got == want {
-                        None
-                    } else {
-                        b.give_back(got);
-                        Some(b.deficit_secs(want))
-                    }
-                }
-                None => None,
-            };
-            let t_short = match &self.task {
-                Some(b) => {
-                    let mut b = b.lock().unwrap();
-                    let got = b.take(want);
-                    if got == want {
-                        None
-                    } else {
-                        b.give_back(got);
-                        Some(b.deficit_secs(want))
-                    }
-                }
-                None => None,
-            };
-            match (g_short, t_short) {
-                (None, None) => return,
-                (g, t) => {
-                    let secs = [g, t].into_iter().flatten().fold(0.0f64, f64::max);
-                    let secs = if secs.is_finite() && secs > 0.0 {
-                        secs
-                    } else {
-                        0.05
-                    };
-                    let d = MAX_SLEEP.min(Duration::from_secs_f64(secs));
-                    tokio::time::sleep(d).await;
+        let mut remaining = want;
+        while remaining > 0 {
+            let amount = remaining.min(Self::ACQUIRE_CAP);
+            self.acquire_chunk(amount).await;
+            remaining -= amount;
+        }
+    }
+
+    async fn acquire_chunk(&self, want: u64) {
+        while let Some(delay) = self.try_acquire(want) {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    fn try_acquire(&self, want: u64) -> Option<Duration> {
+        // Take both budgets under their locks; refund either successful take
+        // when the other budget cannot yet satisfy the request.
+        let mut global = self.global.lock().unwrap();
+        let mut task = self.task.as_ref().map(|b| b.lock().unwrap());
+        let g_short = match global.as_mut() {
+            Some(b) => {
+                let got = b.take(want);
+                if got == want {
+                    None
+                } else {
+                    b.give_back(got);
+                    Some(b.deficit_secs(want))
                 }
             }
+            None => None,
+        };
+        let t_short = match task.as_mut() {
+            Some(b) => {
+                let got = b.take(want);
+                if got == want {
+                    None
+                } else {
+                    b.give_back(got);
+                    Some(b.deficit_secs(want))
+                }
+            }
+            None => None,
+        };
+        if g_short.is_some() && t_short.is_none() {
+            if let Some(b) = task.as_mut() {
+                b.give_back(want);
+            }
         }
+        if t_short.is_some() && g_short.is_none() {
+            if let Some(b) = global.as_mut() {
+                b.give_back(want);
+            }
+        }
+        let delay = match (g_short, t_short) {
+            (None, None) => return None,
+            (g, t) => {
+                let secs = [g, t].into_iter().flatten().fold(0.0f64, f64::max);
+                let secs = if secs.is_finite() && secs > 0.0 {
+                    secs
+                } else {
+                    0.05
+                };
+                MAX_SLEEP.min(Duration::from_secs_f64(secs))
+            }
+        };
+        Some(delay)
     }
 }
 

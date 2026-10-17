@@ -164,6 +164,7 @@
       state.mdOriginal = r.article.markdown || "";
       $("title").value = r.article.title || "";
       $("md").value = state.mdOriginal;
+      updateEditorCount();
       const bits = [r.article.siteLabel, r.article.wordCount + " 字"];
       if (r.article.cover) bits.push("有封面");
       $("srcInfo").textContent = bits.join(" · ");
@@ -433,6 +434,7 @@
   }
 
   function wire() {
+    $("md").addEventListener("input", updateEditorCount);
     $("btnRefreshTabs").addEventListener("click", refreshTabs);
     $("btnExtract").addEventListener("click", extract);
     $("btnDetect").addEventListener("click", () => detectAuth(true));
@@ -465,5 +467,8 @@
   }
 
   wire();
+  function updateEditorCount() {
+    $("editor-count").textContent = $("md").value.length.toLocaleString("zh-CN") + " 字符";
+  }
   boot();
 })();

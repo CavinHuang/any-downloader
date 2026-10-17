@@ -1,9 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { api, Settings } from "../api";
 import { t } from "../i18n";
+import {
+  checkForUpdate,
+  getUpdateState,
+  installUpdate,
+  restartToUpdate,
+  subscribeUpdate,
+} from "../updater";
 import { useOverlay } from "../useOverlay";
+import { Icon } from "./Icon";
 
 const SAVE_KEYS = [
   "default_dir",
@@ -33,6 +41,7 @@ const NUM_BOUNDS: Partial<Record<keyof Settings, [number, number]>> = {
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   // hooks 全部置于顶部、无条件执行（条件渲染只在 return 阶段）
   const [s, setS] = useState<Settings | null>(null);
+  const upd = useSyncExternalStore(subscribeUpdate, getUpdateState);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -44,6 +53,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [invalid, setInvalid] = useState<Record<string, boolean>>({});
   // dirty 基线（§3.6）：载入值；保存成功后基线重置为已保存值
   const [baseline, setBaseline] = useState("");
+  const savedValues = useRef<Settings | null>(null);
 
   const snapshotOf = (v: Settings, clip: boolean, done: string, auto: boolean) =>
     JSON.stringify([v, clip, done, auto]);
@@ -59,13 +69,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       const clip = v.clipboard_monitor !== "off";
       const done = v.after_done || "none";
       setS(v);
+      savedValues.current = v;
       setClipOn(clip);
       setAfterDone(done);
       setAutoOn(auto);
       setVersion(ver);
       setNmOk(nm);
       setBaseline(snapshotOf(v, clip, done, auto));
-    });
+    }).catch(e => setSaveError(String(e)));
   }, []);
 
   const dirty =
@@ -73,16 +84,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   // §3.6：Esc / 遮罩 / 取消在有未保存修改时先确认
   const requestClose = () => {
+    if (saving) return;
     if (dirty && !window.confirm(t("dirtyConfirm"))) return;
     onClose();
   };
   const { ref, onKeyDown } = useOverlay(requestClose);
 
-  if (!s) return null;
-
-  const field = (key: keyof Settings) => s[key] ?? "";
-  const set = (key: keyof Settings, value: string) =>
-    setS({ ...s, [key]: value === "" ? null : value });
+  const field = (key: keyof Settings) => s?.[key] ?? "";
+  const set = (key: keyof Settings, value: string) => {
+    if (s) setS({ ...s, [key]: value === "" ? null : value });
+  };
 
   const clampField = (key: keyof Settings) => {
     const bounds = NUM_BOUNDS[key];
@@ -103,7 +114,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   };
 
   const save = async () => {
-    if (saving) return;
+    if (saving || !s) return;
     setSaveError(null);
     // 保存时 clamp + 校验（§3.2）
     const next: Settings = { ...s };
@@ -129,11 +140,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     try {
       for (const key of SAVE_KEYS) {
         const v = next[key];
-        if (v != null) await api.setSetting(key, v);
+        // 已配置字段清空时也提交空串；从未配置的字段继续使用后端默认值。
+        if (v != null || savedValues.current?.[key] != null) {
+          await api.setSetting(key, v ?? "");
+        }
       }
       await api.setAutostart(autoOn);
       // 基线重置为已保存值（§3.6）：此后取消/Esc 不再提示
       setBaseline(snapshotOf(next, clipOn, afterDone, autoOn));
+      savedValues.current = next;
       setSaved(true);
       // §3.6 取舍：保留自动关闭——「改一项 → 存 → 关」保持 1 次点击；
       // 800ms 保证「已保存」可读。失败静默/遮罩丢改动的风险已由
@@ -175,7 +190,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-mask" onClick={requestClose}>
       <div
-        className="modal"
+        className="modal settings-modal"
         role="dialog"
         aria-modal="true"
         aria-label={t("settingsTitle")}
@@ -183,7 +198,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         onKeyDown={onKeyDown}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3>{t("settingsTitle")}</h3>
+        <div className="settings-heading">
+        <div className="dialog-header"><div><div className="eyebrow">MAKE YOURSELF AT HOME</div><h3>{t("settingsTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={saving} aria-label={t("close")}><Icon name="close" /></button></div>
+        <p className="dialog-description">{t("settingsDescription")}</p>
+        </div>
+        <div className="settings-content">
+        {!s ? !saveError && <div className="hint">{t("probing")}</div> : <>
+        <div className="form-section-title">01 / {t("saveLocation")}</div>
         <label>{t("defaultDir")}</label>
         <div style={{ display: "flex", gap: 6 }}>
           <input
@@ -194,8 +215,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <button
             style={{ whiteSpace: "nowrap" }}
             onClick={async () => {
-              const picked = await pickFolder({ directory: true });
-              if (typeof picked === "string") set("default_dir", picked);
+              try {
+                const picked = await pickFolder({ directory: true });
+                if (typeof picked === "string") set("default_dir", picked);
+              } catch (error) { setSaveError(String(error)); }
             }}
           >
             {t("browse")}
@@ -219,6 +242,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </select>
           </div>
         </div>
+        <div className="form-section-title">02 / {t("transferPreferences")}</div>
         <div className="grid2">
           <div>
             <label>{t("taskSpeed")}</label>
@@ -239,6 +263,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {numInput("max_auto_retry", "3")}
           </div>
         </div>
+        <div className="form-section-title">03 / {t("toolPreferences")}</div>
         <label>{t("proxy")}</label>
         <input
           value={field("proxy")}
@@ -257,6 +282,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           placeholder={t("ytdlpPlaceholder")}
           onChange={(e) => set("yt_dlp_path", e.target.value)}
         />
+        <div className="form-section-title">04 / {t("behaviorPreferences")}</div>
         <label>{t("afterDone")}</label>
         <select
           value={afterDone}
@@ -314,18 +340,52 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             <span style={{ color: "var(--err-ink)" }}>{t("nmMissing")}</span>
           )}
         </label>
-        {version && (
-          <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 11 }}>
-            v{version}
-          </div>
-        )}
+        <div className="form-section-title">05 / {t("updateSection")}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {version && <span style={{ color: "var(--muted)", fontSize: 11 }}>v{version}</span>}
+          <button
+            className="text-button"
+            onClick={() => checkForUpdate()}
+            disabled={upd.status === "checking" || upd.status === "installing"}
+          >
+            {upd.status === "checking" ? t("updateChecking") : t("updateCheckNow")}
+          </button>
+          {upd.status === "upToDate" && (
+            <span style={{ color: "var(--ok-ink)", fontSize: 12 }}>{t("updateUpToDate")}</span>
+          )}
+          {upd.status === "available" && (
+            <>
+              <span style={{ fontSize: 12 }}>{t("updateAvailableTo").replace("{v}", upd.version ?? "")}</span>
+              <button className="text-button" onClick={() => installUpdate()}>{t("updateDownload")}</button>
+            </>
+          )}
+          {upd.status === "installing" && (
+            <span style={{ color: "var(--muted)", fontSize: 12 }}>
+              {t("updateInstalling")}
+              {upd.total != null
+                ? ` ${Math.min(100, Math.round((upd.downloaded / upd.total) * 100))}%`
+                : "…"}
+            </span>
+          )}
+          {upd.status === "ready" && (
+            <>
+              <span style={{ fontSize: 12 }}>{t("updateReady")}</span>
+              <button className="text-button" onClick={restartToUpdate}>{t("updateRestart")}</button>
+            </>
+          )}
+          {upd.status === "error" && (
+            <span style={{ color: "var(--err-ink)", fontSize: 12 }}>{t("updateFailed")}: {upd.error}</span>
+          )}
+        </div>
+        </>}
         {saveError && <div className="error">{saveError}</div>}
+        </div>
         <div className="modal-actions">
           <button onClick={openLogs}>{t("openLogs")}</button>
           <div className="spacer" />
           {saved && <span className="saved">{t("saved")}</span>}
-          <button onClick={requestClose}>{t("cancelBtn")}</button>
-          <button className="primary" onClick={save} disabled={saving}>
+          <button onClick={requestClose} disabled={saving}>{t("cancelBtn")}</button>
+          <button className="primary" onClick={save} disabled={saving || !s}>
             {t("save")}
             {saving ? "…" : ""}
           </button>

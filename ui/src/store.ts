@@ -36,12 +36,14 @@ class TaskStore {
 
   liveOf = (id: string): Live | undefined => this.live.get(id);
 
-  private emit() {
+  private emit(rebuild = true) {
     // 排序：活跃 > 等待/暂停 > 完成/失败，组内按创建时间倒序
-    const rank = (t: Task) => (isActive(t.status) ? 0 : t.status === "queued" || t.status === "paused" || t.status === "waiting_retry" ? 1 : 2);
-    this.snapshot = [...this.tasks.values()].sort(
-      (a, b) => rank(a) - rank(b) || b.created_at - a.created_at
-    );
+    if (rebuild) {
+      const rank = (t: Task) => (isActive(t.status) ? 0 : t.status === "queued" || t.status === "paused" || t.status === "waiting_retry" ? 1 : 2);
+      this.snapshot = [...this.tasks.values()].sort(
+        (a, b) => rank(a) - rank(b) || b.created_at - a.created_at
+      );
+    }
     this.listeners.forEach((l) => l());
   }
 
@@ -66,7 +68,10 @@ class TaskStore {
     if (!this.everFull) return this.refresh();
     try {
       const rows = await api.tasksUpdatedSince(this.lastSync - 50);
-      for (const t of rows) this.tasks.set(t.id, t);
+      for (const t of rows) {
+        this.tasks.set(t.id, t);
+        if (!isActive(t.status)) this.live.delete(t.id);
+      }
       if (rows.length > 0) {
         this.lastSync = rows.reduce((m, x) => Math.max(m, x.updated_at), this.lastSync);
         this.emit();
@@ -85,6 +90,7 @@ class TaskStore {
     if (ev.type === "progress") {
       let t = this.tasks.get(ev.task_id);
       if (!t) return; // 不在列表（如刚清除）→ 忽略，等 refresh
+      const metadataChanged = ev.total != null && t.total_bytes !== ev.total;
       if (ev.total != null && t.total_bytes !== ev.total) {
         t = { ...t, total_bytes: ev.total };
         this.tasks.set(ev.task_id, t);
@@ -112,13 +118,15 @@ class TaskStore {
         segsT: now,
         segSpeeds: segSpeeds ?? prev?.segSpeeds ?? null,
       });
-      this.emit();
+      // 进度只更新行订阅。保持列表快照引用稳定，避免每次事件重排全量任务。
+      this.emit(metadataChanged);
     } else {
       const t = this.tasks.get(ev.task_id);
       if (t) {
         this.tasks.set(ev.task_id, {
           ...t,
           status: ev.status as TaskStatus,
+          downloaded_bytes: this.live.get(ev.task_id)?.downloaded ?? t.downloaded_bytes,
         });
         if (!isActive(ev.status as TaskStatus)) this.live.delete(ev.task_id);
       }

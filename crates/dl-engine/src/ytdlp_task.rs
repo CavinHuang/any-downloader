@@ -96,7 +96,8 @@ fn platform_id(url: &str) -> Option<(&'static str, String)> {
     let after_key = |keys: &[&str]| -> Option<String> {
         let pos = segs.iter().position(|s| keys.contains(s))?;
         let id = *segs.get(pos + 1)?;
-        id.chars().all(|c| c.is_ascii_alphanumeric())
+        id.chars()
+            .all(|c| c.is_ascii_alphanumeric())
             .then(|| id.to_string())
     };
     if host_is(&host, "x.com") || host_is(&host, "twitter.com") {
@@ -107,20 +108,17 @@ fn platform_id(url: &str) -> Option<(&'static str, String)> {
         // BV… 直接收；av<数字> 收；其余路径段（如分区页残留）不猜。
         // get(..2) 而非 [..2]：路径段以多字节字符开头时后者会 panic
         let is_av = match id.get(..2) {
-            Some(p) => {
-                p.eq_ignore_ascii_case("av")
-                    && id[2..].chars().all(|c| c.is_ascii_digit())
-            }
+            Some(p) => p.eq_ignore_ascii_case("av") && id[2..].chars().all(|c| c.is_ascii_digit()),
             None => false,
         };
-        return (id.starts_with("BV") || is_av).then(|| ("bili", id));
+        return (id.starts_with("BV") || is_av).then_some(("bili", id));
     }
     if host_is(&host, "tiktok.com") {
         let id = after_key(&["video", "photo"])?;
         return id
             .chars()
             .all(|c| c.is_ascii_digit())
-            .then(|| ("tiktok", id));
+            .then_some(("tiktok", id));
     }
     if host_is(&host, "douyin.com") || host_is(&host, "iesdouyin.com") {
         // /video/{id}、/note/{id}（图集）、/share/video|note/{id}（分享页）；
@@ -129,7 +127,7 @@ fn platform_id(url: &str) -> Option<(&'static str, String)> {
         return id
             .chars()
             .all(|c| c.is_ascii_digit())
-            .then(|| ("douyin", id));
+            .then_some(("douyin", id));
     }
     None
 }
@@ -338,7 +336,12 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
         extra_args.push("--proxy".into());
         extra_args.push(proxy.to_string());
     }
-    if let Some(bps) = ctx.opts.task_bps {
+    if let Some(bps) = [ctx.opts.task_bps, ctx.opts.global_bps]
+        .into_iter()
+        .flatten()
+        .filter(|v| *v > 0)
+        .min()
+    {
         extra_args.push("--limit-rate".into());
         extra_args.push(bps.to_string());
     }
@@ -377,7 +380,10 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
         Ok(p) => p,
         Err(dl_ytdlp::YtdlpError::Canceled) => return Err(DriveErr::Paused),
         Err(dl_ytdlp::YtdlpError::Failed(msg)) => {
-            return Err(DriveErr::Fatal(ErrorKind::Internal, format!("yt-dlp: {msg}")))
+            return Err(DriveErr::Fatal(
+                ErrorKind::Internal,
+                format!("yt-dlp: {msg}"),
+            ))
         }
     };
     // 取消竞态护栏：cancel 恰在 yt-dlp 成功退出后、收尾前触发时，与 HTTP 驱动
@@ -400,7 +406,10 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     };
 
     // 产出 → .dlpart → 复用 finalize（冲突处理/改名/journal 清理一致）
-    let journal = ctx.engine.journal_dir().join(format!("{}.dlctrl", ctx.task_id));
+    let journal = ctx
+        .engine
+        .journal_dir()
+        .join(format!("{}.dlctrl", ctx.task_id));
     let paths = TargetPaths {
         dir: std::path::PathBuf::from(&dir),
         name: final_name,
@@ -431,7 +440,7 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
             ));
         }
     }
-    crate::driver::finalize(&ctx, &paths)?;
+    crate::driver::finalize(&ctx, &paths).await?;
     ctx.engine
         .transition(&ctx.task_id, TaskStatus::Done, None)
         .await
@@ -515,7 +524,11 @@ mod tests {
             "youtube_abcdefghijk"
         );
         assert_eq!(
-            base_name(None, "https://www.youtube.com/live/dQw4w9WgXcQ?feature=share", 1),
+            base_name(
+                None,
+                "https://www.youtube.com/live/dQw4w9WgXcQ?feature=share",
+                1
+            ),
             "youtube_dQw4w9WgXcQ"
         );
     }
@@ -635,7 +648,11 @@ mod tests {
             "bili_BV1xx411c7mD"
         );
         assert_eq!(
-            base_name(None, "https://www.tiktok.com/@u/video/7301234567890123456", 1),
+            base_name(
+                None,
+                "https://www.tiktok.com/@u/video/7301234567890123456",
+                1
+            ),
             "tiktok_7301234567890123456"
         );
         assert_eq!(

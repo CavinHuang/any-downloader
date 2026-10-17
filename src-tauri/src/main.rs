@@ -60,6 +60,9 @@ thread: {:?}
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // 自动更新（GitHub Releases 分发）+ 重启装新版本
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -224,6 +227,7 @@ thread: {:?}
             commands::open_logs_dir,
             commands::nm_registered,
             commands::set_priority,
+            commands::rename_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

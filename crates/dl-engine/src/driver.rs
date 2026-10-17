@@ -264,7 +264,7 @@ pub(crate) async fn run(
         ));
     }
     let client = build_client(opts.proxy.as_deref())?;
-    let limiter = Limiter::new(opts.global_bps, opts.task_bps);
+    let limiter = engine.task_limiter(opts.global_bps, opts.task_bps);
     let ctx = Arc::new(Ctx {
         engine: engine.clone(),
         opts,
@@ -373,9 +373,10 @@ async fn phase(ctx: Arc<Ctx>, mirrors_raw: &[String]) -> Result<(), DriveErr> {
         return crate::hls::phase(ctx).await;
     }
 
-    let probe = probe::probe(&ctx.client, &task.url, &ctx.task_headers)
-        .await
-        .map_err(drive_from)?;
+    let probe = tokio::select! {
+        _=ctx.cancel.cancelled()=>return Err(DriveErr::Paused),
+        result=probe::probe(&ctx.client,&task.url,&ctx.task_headers)=>result.map_err(drive_from)?,
+    };
     // 多镜像探测：Range 可用且总长与主源一致才启用（超时 10s/个，失败跳过）
     let mut mirrors: Vec<String> = Vec::new();
     for m in mirrors_raw.iter().take(8) {
@@ -410,6 +411,10 @@ async fn phase(ctx: Arc<Ctx>, mirrors_raw: &[String]) -> Result<(), DriveErr> {
         .map_err(drive_from)?;
 
     let paths = target_paths(&ctx, &task, &probe)?;
+    ctx.engine
+        .record_output(&ctx.task_id, &paths.dir, &paths.name, None)
+        .await
+        .map_err(drive_from)?;
     let total = probe.total_bytes;
 
     // 空文件直接完成（plan(0) 的单段天然 done，走通用路径即可，无需特判）
@@ -542,7 +547,7 @@ async fn finish_completed(
             ));
         }
     }
-    finalize(ctx, paths)?;
+    finalize(ctx, paths).await?;
     ctx.engine
         .transition(&ctx.task_id, TaskStatus::Done, None)
         .await
@@ -1036,7 +1041,11 @@ async fn stream_range(
         if let Some(v) = validator {
             req = req.header("If-Range", v);
         }
-        let resp = match req.send().await {
+        let response = tokio::select! {
+            _=ctx.cancel.cancelled()=>return Ok(StreamOutcome::Done),
+            result=req.send()=>result,
+        };
+        let resp = match response {
             Ok(r) => r,
             Err(e) => {
                 attempts += 1;
@@ -1276,7 +1285,11 @@ async fn stream_whole(
         if cursor > 0 {
             req = req.header("Range", format!("bytes={cursor}-"));
         }
-        let resp = match req.send().await {
+        let response = tokio::select! {
+            _=ctx.cancel.cancelled()=>return Ok(StreamOutcome::Done),
+            result=req.send()=>result,
+        };
+        let resp = match response {
             Ok(r) => r,
             Err(_) => {
                 attempts += 1;
@@ -1443,7 +1456,7 @@ async fn spot_check(ctx: &Ctx, part: &Path, off: u64, len: u64) -> Res<()> {
 }
 
 /// 收尾：冲突策略 → `.dlpart` 原子 rename → journal 清理（DESIGN §5.5）。
-pub(crate) fn finalize(ctx: &Ctx, paths: &TargetPaths) -> Result<(), DriveErr> {
+pub(crate) async fn finalize(ctx: &Ctx, paths: &TargetPaths) -> Result<(), DriveErr> {
     let target = resolve_conflict(&paths.dir, &paths.name, ctx.opts.conflict)
         .map_err(|e| DriveErr::Fatal(e.kind, e.message))?;
     let Some(target) = target else {
@@ -1494,6 +1507,12 @@ pub(crate) fn finalize(ctx: &Ctx, paths: &TargetPaths) -> Result<(), DriveErr> {
             ),
         ));
     }
+    let size = std::fs::metadata(&target).ok().map(|m| m.len());
+    let name = target.file_name().unwrap().to_string_lossy();
+    ctx.engine
+        .record_output(&ctx.task_id, &paths.dir, &name, size)
+        .await
+        .map_err(drive_from)?;
     Journal::remove(&paths.journal);
     Ok(())
 }

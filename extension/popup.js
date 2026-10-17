@@ -14,12 +14,44 @@ const STATUS_TEXT = {
   waiting_retry: "等待重试",
   merging: "合并中",
   verifying: "校验中",
+  decrypting: "解密中",
   done: "已完成",
   failed: "失败",
   canceled: "已取消",
 };
 
-const ACTIVE = ["probing", "downloading", "merging", "verifying"];
+const ACTIVE = ["probing", "downloading", "merging", "verifying", "decrypting"];
+
+const TYPE_NAMES = { video: "视频", hls: "流媒体", audio: "音频", archive: "压缩包", binary: "软件", file: "文档", doc: "文档", image: "图片", segment: "分片", other: "文件", dash: "DASH · 暂不支持" };
+const FILE_PATHS = {
+  video: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/>',
+  audio: '<path d="M9 17V5l11-2v12M9 8l11-2"/><ellipse cx="6" cy="17" rx="3" ry="3"/><ellipse cx="17" cy="15" rx="3" ry="3"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 6-5 4 4 3-3 5 5"/>',
+  archive: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M11 3v3h2v3h-2v3m0 0h3v5h-3z"/>',
+  file: '<path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h5"/>',
+};
+
+function resourceIcon(type) {
+  const icon = document.createElement("span");
+  icon.className = "resource-icon " + type;
+  icon.setAttribute("aria-hidden", "true");
+  const key = type === "hls" || type === "dash" || type === "segment" ? "video" : type === "binary" ? "archive" : type;
+  icon.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${FILE_PATHS[key] || FILE_PATHS.file}</svg>`;
+  return icon;
+}
+
+function taskType(task) {
+  const name = displayName(task);
+  if (task.kind === "hls" || /\.(mp4|mkv|webm|mov|ts)$/i.test(name)) return "video";
+  if (/\.(mp3|wav|flac|m4a|ogg)$/i.test(name)) return "audio";
+  if (/\.(jpe?g|png|webp|gif|svg)$/i.test(name)) return "image";
+  if (/\.(zip|rar|7z|gz|exe|msi|apk|dmg)$/i.test(name)) return "archive";
+  return "file";
+}
+
+function emptyMarkup(title, note = "") {
+  return `<div class="empty"><svg width="86" height="54" viewBox="0 0 120 76" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="m17 42 12-24h62l12 24v24H17z"/><path d="M17 42h28l6 8h18l6-8h28"/><path d="M41 33V7h35v26"/><path d="M48 15h21M48 21h16"/><path d="M51 59h18"/></svg><strong>${escapeHtml(title)}</strong>${note ? `<p>${escapeHtml(note)}</p>` : ""}</div>`;
+}
 
 function send(msg, timeoutMs = 5000) {
   // 兜底：任何情况下 sendMessage 都在超时内落定，绝不永久挂起
@@ -39,7 +71,7 @@ function statusTag(status) {
       : status === "failed"
         ? "s-failed"
         : "s-warn";
-  return `<span class="tag ${cls}">${STATUS_TEXT[status] || status}</span>`;
+  return `<span class="tag ${cls}">${escapeHtml(String(STATUS_TEXT[status] || status))}</span>`;
 }
 
 function fmtBytes(n) {
@@ -151,13 +183,20 @@ function updateBatchBar() {
     document.getElementById("sel-n").textContent = String(n);
   }
   const selChip = document.getElementById("chip-select-all");
-  if (selChip) selChip.classList.toggle("on", n > 0);
+  if (selChip) {
+    const allOn = filteredRes().filter(x => x.type !== "dash").every(x => selected.has(x.url));
+    selChip.classList.toggle("on", n > 0);
+    selChip.textContent = allOn ? "取消全选" : "全选";
+  }
 }
 
 function renderFilters() {
   const el = document.getElementById("filters");
   if (!Array.isArray(resItems)) resItems = [];
   el.innerHTML = "";
+  const tools = document.getElementById("resource-tools");
+  tools.textContent = "";
+  document.getElementById("resource-count").textContent = String(resItems.length).padStart(2, "0");
   const counts = { all: resItems.length };
   for (const item of resItems) {
     const g = resTypeGroup(item.type);
@@ -167,7 +206,14 @@ function renderFilters() {
     if (key !== "all" && !counts[key]) continue;
     const b = document.createElement("button");
     b.className = "chip-f" + (resFilter === key ? " active" : "");
-    b.textContent = `${label}${counts[key] ? ` ${counts[key]}` : ""}`;
+    b.append(label);
+    if (counts[key]) {
+      const count = document.createElement("span");
+      count.className = "filter-count";
+      count.textContent = String(counts[key]);
+      b.append(count);
+    }
+    b.setAttribute("aria-pressed", String(resFilter === key));
     b.addEventListener("click", () => {
       resFilter = key;
       renderFilters();
@@ -180,9 +226,9 @@ function renderFilters() {
     const sel = document.createElement("button");
     sel.id = "chip-select-all";
     sel.className = "chip-f select";
-    sel.textContent = selected.size >= pushable.length ? "取消全选" : "全选";
+    sel.textContent = pushable.every(x => selected.has(x.url)) ? "取消全选" : "全选";
     sel.addEventListener("click", () => {
-      const allOn = selected.size >= pushable.length;
+      const allOn = pushable.every(x => selected.has(x.url));
       if (allOn) {
         for (const x of pushable) selected.delete(x.url);
       } else {
@@ -191,10 +237,10 @@ function renderFilters() {
       renderResList();
       updateBatchBar();
     });
-    el.append(sel);
+    tools.append(sel);
     const pa = document.createElement("button");
     pa.className = "chip-f push-all";
-    pa.textContent = `全部推送 (${pushable.length})`;
+    pa.textContent = `全部收下 · ${pushable.length}`;
     pa.addEventListener("click", async () => {
       pa.disabled = true;
       pa.textContent = "推送中…";
@@ -209,7 +255,7 @@ function renderFilters() {
         renderFilters();
       }, 2000);
     });
-    el.append(pa);
+    tools.append(pa);
   }
   updateBatchBar();
 }
@@ -219,13 +265,13 @@ function renderResList() {
   if (!Array.isArray(resItems)) resItems = [];
   list.innerHTML = "";
   if (!resItems.length) {
-    list.innerHTML = '<div class="empty">本页暂未嗅探到资源</div>';
+    list.innerHTML = emptyMarkup("好东西，值得等一等。", "试试播放媒体，再点「重新发现」。");
     updateBatchBar();
     return;
   }
   const items = filteredRes().sort((a, b) => (b.bytes || 0) - (a.bytes || 0));
   if (!items.length) {
-    list.innerHTML = '<div class="empty">该类型无资源</div>';
+    list.innerHTML = emptyMarkup("这里暂时还没有发现。", "换一种类型，看看还有什么。");
     updateBatchBar();
     return;
   }
@@ -236,12 +282,12 @@ function renderResList() {
 function renderResItem(item) {
   const div = document.createElement("div");
   div.className = "item" + (selected.has(item.url) ? " selected" : "");
-  void 0;
 
   if (item.type !== "dash") {
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = selected.has(item.url);
+    cb.setAttribute("aria-label", "选择 " + displayNameOfUrl(item.url));
     cb.addEventListener("change", () => {
       if (cb.checked) selected.add(item.url);
       else selected.delete(item.url);
@@ -251,6 +297,7 @@ function renderResItem(item) {
     div.append(cb);
   }
 
+  div.append(resourceIcon(item.type));
   const mid = document.createElement("div");
   mid.className = "mid";
 
@@ -261,13 +308,14 @@ function renderResItem(item) {
 
   const url = document.createElement("div");
   url.className = "url";
-  url.textContent = item.url;
+  try { url.textContent = new URL(item.url).hostname.replace(/^www\./, ""); } catch { url.textContent = item.url; }
+  url.title = item.url;
 
   const meta = document.createElement("div");
   meta.className = "meta";
   const tag = document.createElement("span");
   tag.className = "tag t-" + item.type;
-  tag.textContent = item.type === "dash" ? "dash·暂不支持" : item.type;
+  tag.textContent = TYPE_NAMES[item.type] || "文件";
   const size = document.createElement("span");
   size.className = "size";
   size.textContent = item.bytes != null ? fmtBytes(item.bytes) : "大小未知";
@@ -277,12 +325,13 @@ function renderResItem(item) {
   const actions = document.createElement("div");
   actions.className = "actions";
   const btn = document.createElement("button");
+  btn.className = "collect-button";
   if (item.type === "dash") {
     btn.disabled = true;
     btn.title = "DASH 暂不支持";
     btn.textContent = "–";
   } else {
-    btn.textContent = "推送";
+    btn.textContent = "收下 ↗";
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       btn.textContent = "…";
@@ -306,7 +355,7 @@ function renderResItem(item) {
   // HLS master：逐清晰度推送
   if (item.type === "hls" && item.variants && item.variants.length > 1) {
     const vrow = document.createElement("div");
-    vrow.style.cssText = "display:flex;gap:5px;flex-wrap:wrap;margin-top:5px";
+    vrow.className = "variants";
     for (const v of item.variants) {
       const vb = document.createElement("button");
       vb.className = "copy";
@@ -320,7 +369,7 @@ function renderResItem(item) {
       });
       vrow.append(vb);
     }
-    div.append(vrow);
+    mid.append(vrow);
   }
 
   return div;
@@ -341,7 +390,7 @@ function applyPushResult(div, btn, resp) {
   } else {
     err.textContent = "失败: " + (ERROR_TEXT[code] || code || "未知");
   }
-  div.append(err);
+  (div.querySelector(".mid") || div).append(err);
   btn.disabled = false;
   btn.textContent = "重试";
   return false;
@@ -361,7 +410,7 @@ async function pushTask(url, headers) {
 }
 
 async function pushSelected() {
-  const items = filteredRes().filter((x) => selected.has(x.url) && x.type !== "dash");
+  const items = resItems.filter((x) => selected.has(x.url) && x.type !== "dash");
   const btn = document.getElementById("sel-push");
   btn.disabled = true;
   btn.textContent = "推送中…";
@@ -381,10 +430,10 @@ async function pushSelected() {
   }
   selected.clear();
   btn.disabled = false;
-  btn.textContent = "推送选中";
+  btn.textContent = "收下选中";
   updateBatchBar();
   renderResList();
-  const bar = document.getElementById("batchbar");
+  const feedback = document.getElementById("collection-result");
   const note = document.createElement("span");
   note.className = fail > 0 ? "result-skip" : "result-ok";
   note.style.fontSize = "11px";
@@ -393,7 +442,7 @@ async function pushSelected() {
     fail > 0
       ? `成功 ${ok}（含重复 ${dup}）· 失败 ${fail}`
       : `已推送 ${ok} 项`;
-  bar.prepend(note);
+  feedback.replaceChildren(note);
   setTimeout(() => note.remove(), 3000);
 }
 
@@ -415,11 +464,13 @@ function setStatusPill(ok) {
   el.classList.toggle("ok", ok);
   el.classList.toggle("err", !ok);
   el.title = ok ? "主程序连接正常" : "主程序未连接，点击查看指引";
+  if (ok) showGuide(false);
 }
 
 function showGuide(open) {
   const guide = document.getElementById("offline-guide");
   guide.classList.toggle("hidden", !open);
+  document.getElementById("status").setAttribute("aria-expanded", String(open));
   if (open) guide.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
@@ -437,13 +488,16 @@ function computeSpeed(t) {
 
 function renderTask(t, bps) {
   const div = document.createElement("div");
-  div.className = "item";
+  div.className = "item task-item";
+  const mid = document.createElement("div");
+  mid.className = "mid";
+  div.append(resourceIcon(taskType(t)), mid);
   const active = ACTIVE.includes(t.status);
   const name = document.createElement("div");
-  name.style.cssText =
-    "display:flex;align-items:center;gap:6px;min-width:0";
-  name.innerHTML = `${statusTag(t.status)} <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;font-size:12.5px">${escapeHtml(displayName(t))}</span>`;
-  div.append(name);
+  name.className = "task-head";
+  name.innerHTML = `${statusTag(t.status)} <span class="name">${escapeHtml(displayName(t))}</span>`;
+  name.title = displayName(t);
+  mid.append(name);
 
   if (t.total_bytes != null && t.total_bytes > 0) {
     const pct =
@@ -456,9 +510,9 @@ function renderTask(t, bps) {
     const bar = document.createElement("div");
     bar.className = "bar";
     bar.innerHTML = `<div class="fill ${t.status === "done" ? "done" : t.status === "failed" ? "failed" : ""}" style="width:${pct}%"></div>`;
-    div.append(bar);
+    mid.append(bar);
     const row = document.createElement("div");
-    row.style.cssText = "display:flex;align-items:center;gap:6px;margin-top:3px";
+    row.className = "task-meta";
     const size = document.createElement("span");
     size.className = "size";
     size.textContent =
@@ -470,13 +524,13 @@ function renderTask(t, bps) {
     speed.style.marginLeft = "auto";
     speed.textContent = active && bps > 0 ? fmtSpeed(bps) : "";
     row.append(size, speed);
-    div.append(row);
+    mid.append(row);
   }
   if (t.status === "failed" && t.error) {
     const err = document.createElement("div");
     err.className = "error";
     err.textContent = "错误: " + String(t.error.code ?? "");
-    div.append(err);
+    mid.append(err);
   }
 
   const actions = document.createElement("div");
@@ -575,7 +629,7 @@ async function renderTasks() {
 
   el.innerHTML = "";
   if (shown.length === 0) {
-    el.innerHTML = '<div class="empty">主程序暂无任务</div>';
+    el.innerHTML = emptyMarkup("暂时安静，随时出发。", "收下一份新发现，它会在这里抵达。");
     return;
   }
   for (const t of shown) el.append(renderTask(t, speedMap.get(t.id) || 0));
@@ -654,6 +708,7 @@ async function renderTakeoverInfo() {
     return; // 主程序不可达时静默退出（离线态由任务区统一呈现）
   }
   if (!data) return;
+  el.textContent = "";
   const hosts = data.ignoredHosts || [];
   const parts = [];
   for (const h of hosts) {
@@ -703,6 +758,8 @@ function switchToTasks() {
   view = "tasks";
   document.getElementById("tab-res").classList.remove("active");
   document.getElementById("tab-tasks").classList.add("active");
+  document.getElementById("tab-res").setAttribute("aria-pressed", "false");
+  document.getElementById("tab-tasks").setAttribute("aria-pressed", "true");
   document.getElementById("res-wrap").classList.add("hidden");
   document.getElementById("tasks").classList.remove("hidden");
   document.getElementById("batchbar").classList.add("hidden");
@@ -714,16 +771,41 @@ function switchToRes() {
   view = "res";
   document.getElementById("tab-res").classList.add("active");
   document.getElementById("tab-tasks").classList.remove("active");
+  document.getElementById("tab-res").setAttribute("aria-pressed", "true");
+  document.getElementById("tab-tasks").setAttribute("aria-pressed", "false");
   document.getElementById("res-wrap").classList.remove("hidden");
   document.getElementById("tasks").classList.add("hidden");
   clearInterval(taskTimer);
 }
 
+function setSettingsOpen(open) {
+  const settings = document.getElementById("settings");
+  settings.classList.toggle("hidden", !open);
+  const trigger = document.getElementById("btn-settings");
+  trigger.classList.toggle("active", open);
+  trigger.setAttribute("aria-expanded", String(open));
+  for (const id of ["popup-main", "popup-bottom", "offline-guide"]) document.getElementById(id).inert = open;
+  document.querySelector("header").inert = open;
+  (open ? document.getElementById("btn-settings-close") : trigger).focus();
+}
+
 function init() {
   // —— 静态控件接线（同步，最先执行；此后数据加载错误不影响按钮可用）
   const settingsEl = document.getElementById("settings");
+  const takeover = document.getElementById("takeover");
+  chrome.storage.local.get("takeover").then(data => { takeover.checked = data.takeover === "on"; }).catch(() => {});
+  takeover.addEventListener("change", async () => {
+    takeover.disabled = true;
+    try { await chrome.storage.local.set({ takeover: takeover.checked ? "on" : "off" }); }
+    catch { takeover.checked = !takeover.checked; document.getElementById("paste-result").textContent = "偏好未能保存，请重试。"; }
+    finally { takeover.disabled = false; }
+  });
   document.getElementById("tab-res").addEventListener("click", switchToRes);
   document.getElementById("tab-tasks").addEventListener("click", switchToTasks);
+  document.getElementById("btn-sync").addEventListener("click", async () => {
+    try { await chrome.runtime.openOptionsPage(); }
+    catch { document.getElementById("paste-result").textContent = "工作台未能打开，请在扩展管理中打开「选项」。"; }
+  });
   document.getElementById("sel-cancel").addEventListener("click", () => {
     selected.clear();
     renderResList();
@@ -740,7 +822,7 @@ function init() {
     try {
       const r = await send({ type: "scan-page", tabId: tab.id });
       btn.disabled = false;
-      btn.textContent = "主动嗅探页面";
+      btn.textContent = "重新发现 ↻";
       if (r && r.ok) {
         note.textContent = `新增 ${r.added} 项（共 ${r.total}）`;
         if (r.blobVideos > 0) {
@@ -756,15 +838,22 @@ function init() {
       }
     } catch (e) {
       btn.disabled = false;
+      btn.textContent = "重新发现 ↻";
       note.textContent = "扫描失败: " + e;
     }
     setTimeout(() => (note.textContent = ""), 4000);
   });
   document.getElementById("btn-settings").addEventListener("click", () => {
-    const opening = settingsEl.classList.contains("hidden");
-    settingsEl.classList.toggle("hidden");
-    document.getElementById("btn-settings").classList.toggle("active", opening);
-    if (opening) settingsEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    setSettingsOpen(settingsEl.classList.contains("hidden"));
+  });
+  document.getElementById("btn-settings-close").addEventListener("click", () => setSettingsOpen(false));
+  settingsEl.addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); setSettingsOpen(false); return; }
+    if (event.key !== "Tab") return;
+    const elements = [...settingsEl.querySelectorAll("button:not(:disabled), input:not(:disabled)")].filter(el => el.getClientRects().length);
+    const first = elements[0], last = elements[elements.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   });
   // E7：未运行 pill 可点击 → 展开用户向连接指引（替换开发者术语）
   document.getElementById("status").addEventListener("click", () => {
@@ -897,6 +986,8 @@ async function start() {
     tab = await getActiveTab();
   } catch (_) {}
   if (tab) {
+    try { document.getElementById("page-source").textContent = new URL(tab.url).hostname.replace(/^www\./, ""); }
+    catch { document.getElementById("page-source").textContent = "当前页面"; }
     try {
       const resp = await send({ type: "list", tabId: tab.id });
       if (resp && resp.items) {
@@ -967,7 +1058,7 @@ async function renderSiteCard(tabId) {
     }
     setTimeout(() => {
       fresh.disabled = false;
-      fresh.textContent = "一键推送";
+      fresh.textContent = "收好这一页 ↗";
     }, 2500);
   });
   card.classList.remove("hidden");

@@ -359,36 +359,7 @@ async fn main() -> anyhow::Result<()> {
             let ctrl_engine = engine.clone();
             let ctrl = tokio::spawn(wait_ctrl_c_then_pause(ctrl_engine, vec![id.clone()]));
             spawn_printer(engine.subscribe(), id.clone());
-            // 弱网韧性：失败自动重试（与 GUI 一致：仅网络类错误 + 退避，可配次数）
-            let max_auto_retry = engine
-                .get_setting("max_auto_retry")
-                .await
-                .unwrap_or(None)
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(3);
-            let mut attempts: u32 = 0;
-            let t = loop {
-                match engine.download(&id, opts.clone()).await {
-                    Ok(t) => break t,
-                    Err(e) => {
-                        attempts += 1;
-                        let current_failed = engine
-                            .get_task(&id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|t| t.status == TaskStatus::Failed)
-                            .unwrap_or(false);
-                        if !e.kind.is_retryable() || !current_failed || attempts > max_auto_retry {
-                            return Err(e.into());
-                        }
-                        let backoff = std::time::Duration::from_secs(1u64 << attempts.min(4));
-                        eprintln!("download failed ({e}); retry {attempts}/{max_auto_retry} in {backoff:?}");
-                        tokio::time::sleep(backoff).await;
-                        engine.retry(&id).await?;
-                    }
-                }
-            };
+            let t = engine.download(&id, opts).await?;
             ctrl.abort();
             println!("finished: {} [{}]", t.id, t.status.as_str());
             if t.status != TaskStatus::Done {
