@@ -437,7 +437,7 @@ export function App() {
     <div className={`app${tasks.length > 0 ? " has-collection" : ""}`}>
       <header className="masthead">
         <button className="brand" aria-label={t("home")} onClick={() => { setFilter("all"); setCatFilter("all"); setSearch(""); }}>
-          <span className="brand-mark"><span /><span /><span /></span>
+          <img className="brand-mark" src="/brand-mark.svg" alt="" aria-hidden="true" />
           <span>anything<span className="brand-period">.</span></span>
         </button>
         <span className="masthead-divider" />
