@@ -25,7 +25,18 @@ a { color: inherit; }
 .eyebrow { font-size: 12px; letter-spacing: .22em; color: var(--muted); margin: 0 0 14px; }
 .eyebrow.center { text-align: center; }
 .tiny-cross { color: var(--accent); margin-right: 6px; }
-.heading-period, .brand-period { color: var(--accent-strong); background: var(--lime); border-radius: 4px; padding: 0 2px; }
+.heading-period { color: var(--accent-strong); }
+/* 全角句号墨迹偏左下，背景块会显得又大又偏——改为句号后跟一枚小 lime 方块 */
+.heading-period::after {
+  content: "";
+  display: inline-block;
+  width: 0.24em;
+  height: 0.24em;
+  margin-left: 0.08em;
+  background: var(--lime);
+  border-radius: 0.05em;
+}
+.brand-period { color: var(--accent-strong); background: var(--lime); border-radius: 4px; padding: 0 2px; }
 .section-title { font: 600 34px/1.3 var(--font-editorial); letter-spacing: .02em; margin: 0 0 18px; }
 .section-title.left { text-align: left; }
 
