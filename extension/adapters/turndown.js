@@ -13,11 +13,13 @@
     "MENU", "NAV", "OL", "P", "PRE", "SECTION", "SUMMARY", "TABLE", "TBODY",
     "TD", "TFOOT", "TH", "THEAD", "TR", "UL",
   ]);
-  // 不可离线化的元素（交互控件/媒体/脚本）：Markdown 输出里一律丢弃
+  // 不可离线化的元素（交互控件/脚本）：Markdown 输出里一律丢弃。
+  // IFRAME/VIDEO/AUDIO 不在列——嵌入的在线视频/音频转为链接保留（mdInline/mdBlock），
+  // OBJECT/EMBED 无可靠 src 语义仍丢弃。
   const DROP = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "LINK", "META", "BUTTON",
-    "INPUT", "SELECT", "TEXTAREA", "OBJECT", "EMBED", "IFRAME", "SVG",
-    "AUDIO", "VIDEO", "CANVAS", "MAP", "AREA", "DATALIST", "DIALOG",
+    "INPUT", "SELECT", "TEXTAREA", "OBJECT", "EMBED", "SVG",
+    "CANVAS", "MAP", "AREA", "DATALIST", "DIALOG",
   ]);
 
   const isElem = (n) => !!n && n.nodeType === 1;
@@ -102,6 +104,13 @@
       case "S":
       case "STRIKE":
         return emphasis(node, base, (s) => `~~${s}~~`);
+      case "MARK":
+        // ==高亮==：GFM 生态事实标准（Obsidian/Typora 渲染；不支持的查看器显示等号）
+        return emphasis(node, base, (s) => `==${s}==`);
+      case "IFRAME":
+      case "VIDEO":
+      case "AUDIO":
+        return mediaLink(node, base);
       case "CODE": {
         const text = collapseWs(node.textContent).trim();
         if (!text) return "";
@@ -115,6 +124,23 @@
 
   const mdInlineChildren = (node, base) =>
     childNodesArr(node).map((n) => mdInline(n, base)).join("");
+
+  // —— 嵌入媒体 → 链接（B 站/YouTube 播放器 iframe、<video>/<audio>）。
+  //    src 懒加载形态取 data-src；<video> 无 src 时取 <source> 子元素。
+  function mediaSrc(node, base) {
+    let u = absUrl(node.getAttribute("src") || node.getAttribute("data-src"), base);
+    if (!u && tagOf(node) === "VIDEO") {
+      const srcEl = kids(node).find((k) => tagOf(k) === "SOURCE");
+      if (srcEl) u = absUrl(srcEl.getAttribute("src"), base);
+    }
+    return u;
+  }
+  function mediaLink(node, base) {
+    const u = mediaSrc(node, base);
+    if (!u) return "";
+    const kind = tagOf(node) === "AUDIO" ? "♪ 音频" : "▶ 视频";
+    return `[${kind}](${u})`;
+  }
 
   // 行内文本节点的空白折叠：保留首尾单空格避免中英文词粘连；
   // 不可见空白（纯换行缩进）折叠后为空串
@@ -153,6 +179,15 @@
     const out = [];
     for (const li of kids(list)) {
       if (tagOf(li) !== "LI") continue;
+      // GFM 任务列表：li 直属 checkbox（articles.cleanup 会保留并禁用它）
+      const cb = childNodesArr(li).find(
+        (n) => isElem(n) && tagOf(n) === "INPUT" && (n.getAttribute("type") || "").toLowerCase() === "checkbox"
+      );
+      const task = cb
+        ? cb.getAttribute("checked") != null || cb.getAttribute("data-checked") === "true"
+          ? "[x] "
+          : "[ ] "
+        : "";
       let inline = "";
       const nested = [];
       for (const n of li.childNodes || []) {
@@ -166,8 +201,8 @@
         }
       }
       const lines = tidy(inline).split("\n").filter((l, i) => i === 0 || l);
-      const marker = ordered ? idx + ". " : "- ";
-      const indent = " ".repeat(ordered ? String(idx).length + 2 : 2);
+      const marker = (ordered ? idx + ". " : "- ") + task;
+      const indent = " ".repeat((ordered ? String(idx).length + 2 : 2) + task.length);
       let item = marker + (lines.shift() || "");
       for (const l of lines) item += "\n" + indent + l;
       for (const nb of nested) {
@@ -288,6 +323,29 @@
       case "FIGCAPTION": {
         const cap = tidy(mdInlineChildren(node, base));
         return cap ? `*${cap}*` : "";
+      }
+      case "DETAILS": {
+        // 折叠块 → 原生 HTML details（GFM 允许内嵌 HTML；内部正文仍走 Markdown）
+        let summary = "";
+        const parts = [];
+        for (const n of childNodesArr(node)) {
+          if (!isElem(n)) continue;
+          if (tagOf(n) === "SUMMARY") {
+            summary = tidy(mdInlineChildren(n, base));
+            continue;
+          }
+          const b = mdBlock(n, base);
+          if (b) parts.push(b);
+        }
+        const head = `<details>\n<summary>${summary || "详情"}</summary>\n`;
+        const body = parts.join("\n\n");
+        return body ? `${head}\n${body}\n</details>` : `${head}</details>`;
+      }
+      case "IFRAME":
+      case "VIDEO":
+      case "AUDIO": {
+        const s = mediaLink(node, base);
+        return s || "";
       }
       case "IMG": {
         const s = mdInline(node, base);

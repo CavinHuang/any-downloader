@@ -181,6 +181,9 @@ pub struct Task {
     /// 后处理步骤 JSON（[{algo,seed}]；完成下载后按序执行）。
     #[serde(default)]
     pub postprocess_json: Option<String>,
+    /// 任务级代理覆盖（http(s)/socks5(h)；None = 跟随全局代理设置）。
+    #[serde(default)]
+    pub proxy: Option<String>,
     pub error: Option<dl_error::ErrorKind>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -206,6 +209,9 @@ pub struct CreateTask {
     /// 下载完成后的后处理（如视频号解密；站点适配器透传）。
     #[serde(default)]
     pub postprocess: Option<Vec<PostProcess>>,
+    /// 任务级代理（http(s)/socks5(h)，覆盖全局代理设置；缺省跟随全局）。
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 impl CreateTask {
@@ -220,6 +226,7 @@ impl CreateTask {
             checksum: None,
             mirrors: None,
             postprocess: None,
+            proxy: None,
         }
     }
 }

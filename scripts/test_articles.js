@@ -360,8 +360,14 @@ console.log("articles: 注册表与站点表交叉一致");
       ? "mp.weixin.qq.com/s/abc"
       : s.re.source.includes("csdn")
       ? "blog.csdn.net/x/article/1"
-      : s.re.source.includes("zhihu")
+      : s.re.source.includes("zhuanlan")
       ? "zhuanlan.zhihu.com/p/1"
+      : s.re.source.includes("zhihu")
+      ? "www.zhihu.com/question/123/answer/456"
+      : s.re.source.includes("bilibili")
+      ? "www.bilibili.com/read/cv123"
+      : s.re.source.includes("sspai")
+      ? "sspai.com/post/123"
       : s.re.source.includes("jianshu")
       ? "www.jianshu.com/p/abc"
       : s.re.source.includes("juejin")
@@ -770,6 +776,131 @@ console.log("turndown: 真实 DOM NodeList 形态（回归：childNodes 无 filt
   const md = ADL.turndown(root);
   ok(md.includes("段落一") && md.includes("**加粗**"), "NodeList 形态下 turndown 正常输出", md);
   ok(typeof inner.childNodes.filter === "undefined", "确认测试对象确实无 filter（防桩失真）");
+}
+
+// ---------------------------------------------------------------- 能力增强（ext 0.8.6）
+console.log("turndown: GFM 任务列表（li 内 checkbox → - [ ]/[x]）");
+{
+  const root = el("ul", {},
+    el("li", {}, el("input", { type: "checkbox", checked: "" }), "已完成项"),
+    el("li", {}, el("input", { type: "checkbox" }), "待办项"),
+    el("li", {}, "普通项")
+  );
+  const md = ADL.turndown(root);
+  ok(md.includes("- [x] 已完成项"), "已勾选 → [x]", md);
+  ok(md.includes("- [ ] 待办项"), "未勾选 → [ ]", md);
+  ok(md.includes("- 普通项"), "无 checkbox 仍是普通列表项", md);
+}
+
+console.log("turndown: 嵌入媒体 → 链接（iframe/video 不再丢失）");
+{
+  const root = el("div", {},
+    el("p", {}, "看视频："),
+    el("iframe", { src: "https://player.bilibili.com/player.html?bvid=BV1xx" }),
+    el("video", { "data-src": "https://cdn.example.com/a.mp4" }),
+    el("audio", { src: "https://cdn.example.com/a.mp3" }),
+    el("video", {}, el("source", { src: "https://cdn.example.com/b.mp4" }))
+  );
+  const md = ADL.turndown(root);
+  ok(md.includes("[▶ 视频](https://player.bilibili.com/player.html?bvid=BV1xx)"), "iframe → 视频链接", md);
+  ok(md.includes("[▶ 视频](https://cdn.example.com/a.mp4)"), "video data-src 懒加载", md);
+  ok(md.includes("[♪ 音频](https://cdn.example.com/a.mp3)"), "audio → 音频链接", md);
+  ok(md.includes("[▶ 视频](https://cdn.example.com/b.mp4)"), "video 无 src 取 source 子元素", md);
+  ok(!/IFRAME|<video/i.test(md), "不残留原始标签", md);
+}
+
+console.log("turndown: <details>/<summary> 原生保留 + <mark> ==高亮==");
+{
+  const root = el("div", {},
+    el("p", {}, "重点", el("mark", {}, "高亮词"), "结束"),
+    el("details", {},
+      el("summary", {}, "展开看代码"),
+      el("pre", {}, el("code", { class: "language-js" }, "let a = 1;"))
+    )
+  );
+  const md = ADL.turndown(root);
+  ok(md.includes("==高亮词=="), "mark → ==…==", md);
+  ok(md.includes("<details>") && md.includes("<summary>展开看代码</summary>"), "details/summary 原生保留", md);
+  ok(md.includes("```js\nlet a = 1;") && md.includes("</details>"), "details 内正文仍走 Markdown", md);
+}
+
+console.log("articles: front matter 作者与发布时间（有值写入、无值省略）");
+{
+  const page = doc(el("div", { class: "blog-content-box" },
+    el("h1", { class: "title-article" }, "元数据测试"),
+    el("div", { id: "content_views" }, el("p", {}, "正文")),
+    el("meta", { name: "author", content: "李四" }),
+    el("meta", { property: "article:published_time", content: "2026-03-05 10:00" })
+  ));
+  const p = ADL.articlePrepare({ url: "https://blog.csdn.net/x/a/1", dom: () => page, captured: () => [], inlineJson: () => null });
+  const out = ADL.adapters.articles.extract({ url: "https://blog.csdn.net/x/a/1", dom: () => page, captured: () => [], inlineJson: () => null });
+  const md = out[0].meta.document.content;
+  ok(p.meta.author === "李四", "meta author 提取", p.meta);
+  ok(p.meta.published === "2026-03-05", "发布时间归一 YYYY-MM-DD", p.meta);
+  ok(md.includes('author: "李四"') && md.includes('published: "2026-03-05"'), "front matter 写入 author/published", md);
+  // 无元数据：字段整体省略
+  const page2 = doc(el("div", { class: "blog-content-box" },
+    el("h1", { class: "title-article" }, "无元数据文章"),
+    el("div", { id: "content_views" }, el("p", {}, "正文"))
+  ));
+  const out2 = ADL.adapters.articles.extract({ url: "https://blog.csdn.net/x/b/2", dom: () => page2, captured: () => [], inlineJson: () => null });
+  const md2 = out2[0].meta.document.content;
+  ok(!md2.includes("author:") && !md2.includes("published:"), "缺省时省略 author/published 字段", md2.split("\n").slice(0, 8).join("\n"));
+  ok(md2.includes('title: "无元数据文章"') && md2.includes("exported:"), "基础字段仍在", md2);
+}
+
+console.log("articles: normalizeDate 中式日期与非法值");
+{
+  const page = doc(el("div", { class: "blog-content-box" },
+    el("h1", { class: "title-article" }, "日期格式"),
+    el("div", { id: "content_views" }, el("p", {}, "正文"))
+  ));
+  // 直接走内部逻辑等价路径：不同的 meta 日期形态
+  const mk = (content) => {
+    const pg = doc(el("div", { class: "blog-content-box" },
+      el("h1", { class: "title-article" }, "日期格式"),
+      el("div", { id: "content_views" }, el("p", {}, "正文")),
+      el("meta", { property: "article:published_time", content })
+    ));
+    return ADL.articlePrepare({ url: "https://blog.csdn.net/x/c/3", dom: () => pg, captured: () => [], inlineJson: () => null }).meta.published;
+  };
+  eq(mk("2026年3月5日"), "2026-03-05", "中式日期归一");
+  eq(mk("2026/03/15"), "2026-03-15", "斜杠日期归一");
+  eq(mk("not-a-date"), null, "非法日期 → null");
+}
+
+console.log("articles: 知乎回答页提取（新站点）");
+{
+  const page = doc(el("div", { class: "AnswerItem" },
+    el("h1", { class: "QuestionHeader-title" }, "如何评价 Anything？"),
+    el("div", { class: "AuthorInfo-name" }, el("a", {}, "张三")),
+    el("meta", { itemprop: "datePublished", content: "2026-05-06" }),
+    el("div", { class: "RichContent-inner" },
+      el("p", {}, "回答正文 ", el("b", {}, "很有料")),
+      el("img", { "data-actualsrc": "https://picx.zhimg.com/answer.png", src: "data:image/gif;base64,x" })
+    )
+  ));
+  const url = "https://www.zhihu.com/question/123/answer/456";
+  ok(ADL.articleSite(url) && ADL.articleSite(url).id === "zhihu-answer", "回答页命中 zhihu-answer 适配器");
+  ok(ADL.ARTICLES_RE.test(url), "ARTICLES_RE 命中回答页");
+  const out = ADL.adapters.articles.extract({ url, dom: () => page, captured: () => [], inlineJson: () => null });
+  ok(out.length >= 2, "输出 MD + 图片", out.length);
+  const md = out.find((r) => r.kind === "document").meta.document.content;
+  ok(md.includes('title: "如何评价 Anything？"'), "回答页标题", md);
+  ok(md.includes('author: "张三"'), "作者取自 AuthorInfo-name", md);
+  ok(md.includes('site: "知乎回答"'), "站点标签", md);
+  ok(md.includes("回答正文 **很有料**"), "正文转换", md);
+  ok(out.some((r) => r.kind === "image" && r.url === "https://picx.zhimg.com/answer.png"), "data-actualsrc 懒加载原图入清单");
+}
+
+console.log("articles: B站专栏 / 少数派 URL 命中");
+{
+  ok(ADL.ARTICLES_RE.test("https://www.bilibili.com/read/cv25576166"), "B站专栏命中 ARTICLES_RE");
+  ok(ADL.ARTICLES_RE.test("https://sspai.com/post/71500"), "少数派命中 ARTICLES_RE");
+  ok(ADL.articleSite("https://www.bilibili.com/read/cv25576166").id === "bilibili-read", "B站专栏 site id");
+  ok(ADL.articleSite("https://sspai.com/post/71500").id === "sspai", "少数派 site id");
+  ok(!ADL.ARTICLES_RE.test("https://www.bilibili.com/video/BV1xx"), "视频页不误命中");
+  ok(!ADL.ARTICLES_RE.test("https://www.zhihu.com/question/123"), "问题页（无回答 id）不命中");
 }
 
 // ---------------------------------------------------------------- 汇总

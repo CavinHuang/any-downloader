@@ -360,6 +360,41 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
         extra_args.push(bps.to_string());
     }
 
+    // —— 采集增强选项（设置驱动，缺省关；docs/MEDIA-ADAPTERS.md P0）：
+    //    字幕（全语言转 srt）、缩略图+元数据嵌入（需 ffmpeg，安装器已内置）、
+    //    cookies.txt（会员/登录态内容）。
+    let subs = match ctx.engine.get_setting("yt_dlp_subs").await {
+        Ok(Some(v)) => v == "on",
+        _ => false,
+    };
+    if subs {
+        for a in [
+            "--write-subs",
+            "--sub-langs",
+            "all",
+            "--convert-subs",
+            "srt",
+        ] {
+            extra_args.push(a.into());
+        }
+    }
+    let meta = match ctx.engine.get_setting("yt_dlp_meta").await {
+        Ok(Some(v)) => v == "on",
+        _ => false,
+    };
+    if meta {
+        for a in ["--embed-thumbnail", "--embed-metadata"] {
+            extra_args.push(a.into());
+        }
+    }
+    if let Ok(Some(ck)) = ctx.engine.get_setting("yt_dlp_cookies").await {
+        let ck = ck.trim();
+        if !ck.is_empty() {
+            extra_args.push("--cookies".into());
+            extra_args.push(ck.to_string());
+        }
+    }
+
     let spec = dl_ytdlp::YtdlpSpec {
         url: ctx.url.clone(),
         exe,

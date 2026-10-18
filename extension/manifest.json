@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Anything Downloader",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "嗅探网页媒体资源 + 站点适配下载（抖音/小红书/X/微信文章）并推送到 Anything Downloader",
   "permissions": [
     "downloads.ui",
@@ -10,7 +10,8 @@
     "nativeMessaging",
     "storage",
     "contextMenus",
-    "scripting"
+    "scripting",
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -65,6 +66,9 @@
         "*://*.blog.csdn.net/*",
         "*://devpress.csdn.net/*",
         "*://zhuanlan.zhihu.com/*",
+        "*://www.zhihu.com/*",
+        "*://www.bilibili.com/read/*",
+        "*://sspai.com/post/*",
         "*://www.jianshu.com/*",
         "*://juejin.cn/*",
         "*://*.cnblogs.com/*",
@@ -98,6 +102,9 @@
         "*://*.blog.csdn.net/*",
         "*://devpress.csdn.net/*",
         "*://zhuanlan.zhihu.com/*",
+        "*://www.zhihu.com/*",
+        "*://www.bilibili.com/read/*",
+        "*://sspai.com/post/*",
         "*://www.jianshu.com/*",
         "*://juejin.cn/*",
         "*://*.cnblogs.com/*",

@@ -39,7 +39,7 @@ struct RunControl {
     ready: Arc<std::sync::atomic::AtomicBool>,
     priority: Arc<std::sync::atomic::AtomicI32>,
     order: u64,
-    external: bool,
+    external: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 引擎句柄：任务生命周期 + 下载驱动 + 事件流。
@@ -55,6 +55,26 @@ pub struct Engine {
     sequence: Arc<std::sync::atomic::AtomicU64>,
     /// 数据根目录（db 所在目录）；journal 等工作文件放在其下。
     root: std::path::PathBuf,
+}
+
+/// 任务级代理规范化：空 → None（跟随全局）；仅接受 reqwest 支持的
+/// http(s) / socks5(h) scheme，其余拒绝（InvalidParams）。
+fn normalize_proxy(v: &Option<String>) -> Res<Option<String>> {
+    let Some(p) = v.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let lower = p.to_ascii_lowercase();
+    if ["http://", "https://", "socks5://", "socks5h://"]
+        .iter()
+        .any(|s| lower.starts_with(s))
+    {
+        Ok(Some(p.to_string()))
+    } else {
+        Err(DownloadError::new(
+            ErrorKind::InvalidParams,
+            "proxy must start with http(s):// or socks5(h)://".to_string(),
+        ))
+    }
 }
 
 impl Engine {
@@ -115,9 +135,13 @@ impl Engine {
     }
 
     pub async fn start(&self, id: &str) -> Res<Task> {
-        let opts = self.download_options_from_settings().await?;
+        let mut opts = self.download_options_from_settings().await?;
         let control = self.enqueue(id).await?;
         let task = self.require(id).await?;
+        // 任务级代理覆盖全局设置（CreateTask.proxy；None = 跟随全局）
+        if task.proxy.is_some() {
+            opts.proxy = task.proxy.clone();
+        }
         let engine = self.clone();
         let id = id.to_string();
         tokio::spawn(async move {
@@ -268,7 +292,9 @@ impl Engine {
                             ready: Arc::new(AtomicBool::new(true)),
                             priority: Arc::new(AtomicI32::new(task.priority)),
                             order: self.sequence.fetch_add(1, Ordering::Relaxed),
-                            external: task.kind == TaskKind::Ytdlp,
+                            external: Arc::new(std::sync::atomic::AtomicBool::new(
+                                task.kind == TaskKind::Ytdlp,
+                            )),
                         };
                         runs.insert(id.to_string(), c.clone());
                         Some(c)
@@ -342,10 +368,11 @@ impl Engine {
                     // a global cap it owns a transfer slot exclusively and gets
                     // that cap via --limit-rate.
                     let exclusive = opts.global_bps.filter(|v| *v > 0).is_some()
-                        && ((c.external && active > 0)
-                            || runs
-                                .values()
-                                .any(|r| r.external && r.active.load(Ordering::Relaxed)));
+                        && ((c.external.load(Ordering::Relaxed) && active > 0)
+                            || runs.values().any(|r| {
+                                r.external.load(Ordering::Relaxed)
+                                    && r.active.load(Ordering::Relaxed)
+                            }));
                     if first == Some(id) && (max == 0 || active < max) && !exclusive {
                         c.active.store(true, Ordering::Relaxed);
                         true
@@ -368,6 +395,18 @@ impl Engine {
             .await;
             c.active.store(false, Ordering::Relaxed);
             match result {
+                // 直播 HLS（无 #EXT-X-ENDLIST）HTTP 驱动不支持 → 自动转 yt-dlp
+                // 托管录制（yt-dlp 原生支持直播/回放）。一次性重路由，不计重试。
+                Err(ref e) if matches!(e.kind, ErrorKind::LiveUnsupported) => {
+                    let cur = self.require(id).await?;
+                    if cur.kind != dl_model::TaskKind::Hls {
+                        return result;
+                    }
+                    self.set_kind(id, dl_model::TaskKind::Ytdlp).await?;
+                    c.external.store(true, Ordering::Relaxed); // 托管子进程独占限速槽（全局并发判定用）
+                    c.ready.store(true, Ordering::Relaxed);
+                    continue;
+                }
                 Err(e) if e.kind.is_retryable() && attempt < retries && !c.token.is_cancelled() => {
                     attempt += 1;
                     c.ready.store(false, Ordering::Relaxed);
@@ -614,6 +653,7 @@ impl Engine {
                 .map(|(algo, hex)| format!("{algo}:{hex}")),
             mirrors_json,
             postprocess_json: Self::normalize_postprocess(&c.postprocess),
+            proxy: normalize_proxy(&c.proxy)?,
             error: None,
             created_at: now,
             updated_at: now,
@@ -748,6 +788,7 @@ impl Engine {
             error: None,
             created_at: now,
             updated_at: now,
+            proxy: None,
         };
         self.db.insert_task(task.clone()).await?;
         // GUI 列表靠事件刷新；内容任务无状态迁移，直接广播终态
@@ -964,6 +1005,13 @@ impl Engine {
 
     pub(crate) async fn record_variants(&self, id: &str, variants_json: &str) -> Res<()> {
         self.db.update_variants(id, variants_json).await
+    }
+
+    /// 任务类型重路由：直播 HLS（无 ENDLIST）→ yt-dlp 托管录制。
+    /// 幂等保护在调用侧（仅 Hls 任务转一次）。
+    async fn set_kind(&self, id: &str, kind: dl_model::TaskKind) -> Res<()> {
+        tracing::info!(task = %id, kind = kind.as_str(), "task kind rerouted");
+        self.db.update_kind(id, kind).await
     }
 
     /// 自动分类目录：按 URL 扩展名归类（设置 auto_categorize=on 时生效）。
@@ -1211,6 +1259,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_task_proxy_normalize_and_persist() {
+        let env = test_engine().await;
+        // 合法 scheme：入库保存
+        let t = env
+            .engine
+            .create_task(CreateTask {
+                url: "https://example.com/a.zip".into(),
+                proxy: Some("socks5h://127.0.0.1:1080".into()),
+                ..CreateTask::of("https://example.com/a.zip")
+            })
+            .await
+            .unwrap();
+        assert_eq!(t.proxy.as_deref(), Some("socks5h://127.0.0.1:1080"));
+        // 重读确认落库
+        let got = env.engine.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(got.proxy.as_deref(), Some("socks5h://127.0.0.1:1080"));
+        // 空串 → None（跟随全局）
+        let t2 = env
+            .engine
+            .create_task(CreateTask {
+                url: "https://example.com/b.zip".into(),
+                proxy: Some("  ".into()),
+                ..CreateTask::of("https://example.com/b.zip")
+            })
+            .await
+            .unwrap();
+        assert_eq!(t2.proxy, None);
+        // 非法 scheme → InvalidParams
+        let err = env
+            .engine
+            .create_task(CreateTask {
+                url: "https://example.com/c.zip".into(),
+                proxy: Some("ftp://127.0.0.1:21".into()),
+                ..CreateTask::of("https://example.com/c.zip")
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err.kind, dl_error::ErrorKind::InvalidParams));
+    }
+
+    #[tokio::test]
     async fn m3u8_url_autodetects_hls_kind() {
         let env = test_engine().await;
         let t = env
@@ -1219,6 +1308,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.kind, TaskKind::Hls);
+    }
+
+    #[tokio::test]
+    async fn set_kind_reroutes_hls_to_ytdlp() {
+        let env = test_engine().await;
+        let t = env
+            .engine
+            .create_task(CreateTask::of("https://example.com/live/index.m3u8"))
+            .await
+            .unwrap();
+        assert_eq!(t.kind, TaskKind::Hls);
+        env.engine.set_kind(&t.id, TaskKind::Ytdlp).await.unwrap();
+        let got = env.engine.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(got.kind, TaskKind::Ytdlp);
     }
 
     #[tokio::test]
@@ -1338,6 +1441,7 @@ mod tests {
                 checksum: None,
                 mirrors: None,
                 postprocess: None,
+                proxy: None,
             })
             .await
             .unwrap();

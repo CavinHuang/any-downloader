@@ -142,6 +142,19 @@ fn migrate(conn: &Connection) -> Result<(), DownloadError> {
         conn.execute("ALTER TABLE tasks ADD COLUMN file_size INTEGER", [])
             .map_err(sql_err)?;
     }
+    if conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='proxy'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(sql_err)?
+        == 0
+    {
+        // 任务级代理覆盖（0.8.7 同批；NULL = 跟随全局代理设置）
+        conn.execute("ALTER TABLE tasks ADD COLUMN proxy TEXT", [])
+            .map_err(sql_err)?;
+    }
     Ok(())
 }
 
@@ -153,7 +166,7 @@ pub struct TaskSnapshot {
     pub deleted: Vec<String>,
 }
 
-const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,error,created_at,updated_at,file_size";
+const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size";
 
 enum Op {
     Snapshot {
@@ -189,6 +202,11 @@ enum Op {
     UpdateVariants {
         id: String,
         variants_json: String,
+        tx: oneshot::Sender<Res<()>>,
+    },
+    UpdateKind {
+        id: String,
+        kind: String,
         tx: oneshot::Sender<Res<()>>,
     },
     FindActiveByUrl {
@@ -359,6 +377,22 @@ impl Db {
             .send(Op::UpdateVariants {
                 id: id.to_string(),
                 variants_json: variants_json.to_string(),
+                tx,
+            })
+            .map_err(|_| writer_gone())?;
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(writer_gone()),
+        }
+    }
+
+    /// 任务类型重路由（直播 HLS → yt-dlp 托管录制）。
+    pub async fn update_kind(&self, id: &str, kind: dl_model::TaskKind) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::UpdateKind {
+                id: id.to_string(),
+                kind: kind.as_str().to_string(),
                 tx,
             })
             .map_err(|_| writer_gone())?;
@@ -577,6 +611,16 @@ fn writer_loop(conn: Connection, rx: Receiver<Op>) {
                     .map_err(sql_err);
                 let _ = tx.send(res);
             }
+            Op::UpdateKind { id, kind, tx } => {
+                let res = conn
+                    .execute(
+                        "UPDATE tasks SET kind = ?1, updated_at = ?2 WHERE id = ?3",
+                        rusqlite::params![&kind, now_ms(), &id],
+                    )
+                    .map(|_| ())
+                    .map_err(sql_err);
+                let _ = tx.send(res);
+            }
             Op::UpdateDownloaded { id, bytes, tx } => {
                 let res = conn
                     .execute(
@@ -753,8 +797,8 @@ fn snapshot(conn: &Connection, since: Option<u64>) -> Res<TaskSnapshot> {
 fn insert(conn: &Connection, t: &Task) -> Res<()> {
     let error_json = t.error.as_ref().and_then(|e| serde_json::to_string(e).ok());
     conn.execute(
-        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,error,created_at,updated_at,file_size)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
         rusqlite::params![
             &t.id,
             &t.url,
@@ -775,6 +819,7 @@ fn insert(conn: &Connection, t: &Task) -> Res<()> {
             &t.checksum,
             &t.mirrors_json,
             &t.postprocess_json,
+            &t.proxy,
             error_json,
             t.created_at,
             t.updated_at,
@@ -848,6 +893,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         checksum: row.get("checksum")?,
         mirrors_json: row.get("mirrors_json")?,
         postprocess_json: row.get("postprocess_json")?,
+        proxy: row.get("proxy")?,
         error: error_json.and_then(|s| serde_json::from_str(&s).ok()),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -882,6 +928,7 @@ mod tests {
             checksum: None,
             mirrors_json: None,
             postprocess_json: None,
+            proxy: None,
             error: Some(ErrorKind::Http {
                 status: 429,
                 retry_after_secs: Some(3),
@@ -908,6 +955,13 @@ mod tests {
         let got = db.get_task("t1").await.unwrap().unwrap();
         assert_eq!(got.status, TaskStatus::Downloading);
         assert_eq!(got.error, None);
+
+        // 类型重路由（直播 HLS → yt-dlp 托管）
+        db.update_kind("t1", dl_model::TaskKind::Ytdlp)
+            .await
+            .unwrap();
+        let got = db.get_task("t1").await.unwrap().unwrap();
+        assert_eq!(got.kind, dl_model::TaskKind::Ytdlp);
 
         db.update_status("t1", TaskStatus::Failed, Some(ErrorKind::DiskFull))
             .await

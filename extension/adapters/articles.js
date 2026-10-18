@@ -24,6 +24,8 @@
         const jsContent = pickFirst(clone, ["#js_content"]);
         if (jsContent) jsContent.removeAttribute("style");
       },
+      author: ["#js_name"],
+      published: ["#publish_time"],
       // cleanup 懒加载落地后跑：导出 HTML 内的 mmbiz src 与 wechat-article
       // 适配器产出的图片 URL 同形（/0 化、剥 tp=webp）——跨适配器合集模式的
       // 相对引用重写依赖两边 URL 一致
@@ -53,6 +55,37 @@
       content: [".Post-RichTextContainer", ".RichText", "article"],
       // 知乎懒加载原图在 data-actualsrc；公式为 img.eequation（外链保留）
       lazyAttrs: ["data-actualsrc", "data-src"],
+      published: ['meta[itemprop="datePublished"]', 'meta[property="article:published_time"]'],
+    },
+    {
+      id: "zhihu-answer",
+      label: "知乎回答",
+      re: /^https?:\/\/(?:www\.)?zhihu\.com\/question\/\d+\/answer\/\d+/i,
+      title: ["h1.QuestionHeader-title", 'meta[property="og:title"]'],
+      root: [".AnswerItem", ".Card"],
+      content: [".RichContent-inner", ".RichText", ".AnswerBody"],
+      lazyAttrs: ["data-actualsrc", "data-src"],
+      author: [".AuthorInfo-name", 'meta[name="author"]'],
+      published: ['meta[itemprop="datePublished"]'],
+    },
+    {
+      id: "bilibili-read",
+      label: "B站专栏",
+      re: /^https?:\/\/www\.bilibili\.com\/read\/cv/i,
+      title: ["h1.title", "h1"],
+      root: [".article-container", "#app"],
+      content: [".article-content", "#article-content", ".article-container"],
+      author: [".up-name", ".article-up .name"],
+    },
+    {
+      id: "sspai",
+      label: "少数派",
+      re: /^https?:\/\/sspai\.com\/post\//i,
+      title: ["h1.title", "h1"],
+      root: ["div.article-body", ".article-body", "main"],
+      content: [".article-body .content", ".article-body", "div.content"],
+      author: [".author-name", 'meta[name="author"]'],
+      published: ['meta[property="article:published_time"]', "time"],
     },
     {
       id: "juejin",
@@ -77,6 +110,7 @@
       title: ["#cb_post_title_url", "h1.postTitle", "h1"],
       root: ["#post_detail"],
       content: ["#cnblogs_post_body", ".post"],
+      published: ["#post-date", "span#post-date"],
     },
     {
       id: "51cto",
@@ -177,6 +211,55 @@
     return ADL.cleanName(doc.title || "", 120) || "文章";
   }
 
+  // —— front matter 元数据：作者与发布时间。站点专属选择器优先（author/published），
+  //     通用 meta 兜底；日期归一为 YYYY-MM-DD，取不到就省略字段。
+  function metaValue(doc, sel) {
+    try {
+      const el = doc.querySelector(sel);
+      if (!el) return null;
+      const v =
+        String((el.nodeName || "").toUpperCase()) === "META"
+          ? attr(el, "content")
+          : el.textContent;
+      const t = String(v || "").trim();
+      return t || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function firstText(doc, sels) {
+    for (const sel of sels || []) {
+      if (!sel) continue;
+      const v = metaValue(doc, sel);
+      if (v) return v;
+    }
+    return null;
+  }
+
+  function normalizeDate(s) {
+    const m = /(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})/.exec(String(s || ""));
+    return m
+      ? `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3]).padStart(2, "0")}`
+      : null;
+  }
+
+  function pickAuthor(doc, site) {
+    const v = firstText(doc, site.author) || metaValue(doc, 'meta[name="author"]');
+    return v ? ADL.cleanName(v, 60) || null : null;
+  }
+
+  function pickPublished(doc, site) {
+    const raw =
+      firstText(doc, site.published) ||
+      firstText(doc, [
+        'meta[property="article:published_time"]',
+        'meta[name="pubdate"]',
+        'meta[itemprop="datePublished"]',
+      ]);
+    return normalizeDate(raw);
+  }
+
   // —— 通用清理（作用于克隆；code-box 各站 done in-site 的动作收敛于此）
   // 1) 不可离线化的元素删除（脚本/样式/表单控件/iframe 媒体卡片等）
   // 2) 懒加载图：data-src 族 → src；占位图（data:）无真实地址时删节点
@@ -185,7 +268,7 @@
   function cleanup(clone, doc, opts) {
     for (const sel of [
       "script", "style", "noscript", "template", "link", "meta",
-      "iframe", "object", "embed", "button", "input", "select",
+      "iframe", "object", "embed", "button", "select",
       "textarea", "audio", "video", "canvas", "form",
       ".hljs-button", ".pre-numbering", ".copy-btn",
     ]) {
@@ -194,6 +277,17 @@
           el.remove();
         } catch (_) {}
       }
+    }
+    // 表单控件：GFM 任务列表的 checkbox 保留（turndown 转 - [ ]/[x]），
+    // 其余 input（搜索框/登录态控件）删除。保留的加 disabled 防交互。
+    for (const el of clone.querySelectorAll("input")) {
+      if (isTaskCheckbox(el)) {
+        el.setAttribute("disabled", "");
+        continue;
+      }
+      try {
+        el.remove();
+      } catch (_) {}
     }
     const lazy = (opts && opts.lazyAttrs) || ["data-src", "data-original", "data-lazy-src"];
     const base = (opts && opts.baseUrl) || "";
@@ -243,6 +337,14 @@
     }
   }
 
+  const isTaskCheckbox = (el) => {
+    if ((attr(el, "type") || "").toLowerCase() !== "checkbox") return false;
+    for (let p = el.parentNode; p; p = p.parentNode) {
+      if (p.nodeType === 1 && String(p.nodeName || "").toUpperCase() === "LI") return true;
+    }
+    return false;
+  };
+
   // —— Markdown 导出：YAML front matter（Obsidian/Hugo/Hexo 等直接识别元数据）
   //     + H1 标题 + 正文。front matter 值统一双引号包裹，内部 " 与 \ 转义。
   function yamlStr(s) {
@@ -253,17 +355,21 @@
   ADL.buildMarkdown = (opts) => buildMarkdown(opts);
 
   function buildMarkdown(opts) {
-    const { title, siteLabel, pageUrl, contentEl, baseUrl } = opts;
+    const { title, siteLabel, pageUrl, contentEl, baseUrl, author, published } = opts;
     const body = ADL.turndown(contentEl, { baseUrl });
     const date = new Date().toISOString().slice(0, 10);
-    const head =
-      `---\n` +
-      `title: ${yamlStr(title)}\n` +
-      `source: ${yamlStr(pageUrl)}\n` +
-      `site: ${yamlStr(siteLabel)}\n` +
-      `exported: ${yamlStr(date)}\n` +
-      `---\n\n` +
-      `# ${title}\n\n`;
+    // author/published 取不到就省略字段（front matter 不放空值）
+    const metaLines = [
+      `title: ${yamlStr(title)}`,
+      author ? `author: ${yamlStr(author)}` : null,
+      `source: ${yamlStr(pageUrl)}`,
+      `site: ${yamlStr(siteLabel)}`,
+      published ? `published: ${yamlStr(published)}` : null,
+      `exported: ${yamlStr(date)}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const head = `---\n${metaLines}\n---\n\n` + `# ${title}\n\n`;
     return head + body;
   }
 
@@ -310,7 +416,15 @@
       postCleanup: site.postCleanup,
     });
     const content = pickFirst(clone, site.content) || clone;
-    return { site, title, baseName, content, root: clone, pageUrl: ctx.url };
+    return {
+      site,
+      title,
+      baseName,
+      content,
+      root: clone,
+      pageUrl: ctx.url,
+      meta: { author: pickAuthor(doc, site), published: pickPublished(doc, site) },
+    };
   };
 
   ADL.adapters["articles"] = {
@@ -320,7 +434,7 @@
     extract(ctx) {
       const p = ADL.articlePrepare(ctx);
       if (!p) return [];
-      const { site, title, baseName, content, root, pageUrl } = p;
+      const { site, title, baseName, content, root, pageUrl, meta } = p;
       const baseUrl = pageUrl;
 
       const out = [];
@@ -339,6 +453,8 @@
               pageUrl,
               contentEl: content,
               baseUrl,
+              author: meta && meta.author,
+              published: meta && meta.published,
             }),
           },
           extra: { site: site.id, format: "markdown" },

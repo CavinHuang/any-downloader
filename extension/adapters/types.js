@@ -80,7 +80,7 @@ ADL.parseLooseJson = (json) => {
 // articles 条目的 re 与 articles.js 的 ARTICLE_SITES 各站 re 的并集等价
 // （此处静态写死：background 只加载本文件+core；scripts/test_articles.js 有交叉断言防漂移）
 ADL.ARTICLES_RE =
-  /^https?:\/\/(?:mp\.weixin\.qq\.com\/s|(?:[^/]*\.)?blog\.csdn\.net\/|devpress\.csdn\.net\/|zhuanlan\.zhihu\.com\/|(?:www\.)?jianshu\.com\/(?:p|note)\/|juejin\.cn\/post\/|(?:[^/]*\.)?cnblogs\.com\/[^/]+\/p\/|blog\.51cto\.com\/|www\.jb51\.net\/(?:article|book)\/|www\.php\.cn\/|segmentfault\.com\/a\/|my\.oschina\.net\/|(?:[^/]*\.)?medium\.com\/)/i;
+  /^https?:\/\/(?:mp\.weixin\.qq\.com\/s|(?:[^/]*\.)?blog\.csdn\.net\/|devpress\.csdn\.net\/|zhuanlan\.zhihu\.com\/|(?:www\.)?zhihu\.com\/question\/\d+\/answer\/\d+|www\.bilibili\.com\/read\/|sspai\.com\/post\/|(?:www\.)?jianshu\.com\/(?:p|note)\/|juejin\.cn\/post\/|(?:[^/]*\.)?cnblogs\.com\/[^/]+\/p\/|blog\.51cto\.com\/|www\.jb51\.net\/(?:article|book)\/|www\.php\.cn\/|segmentfault\.com\/a\/|my\.oschina\.net\/|(?:[^/]*\.)?medium\.com\/)/i;
 ADL.SITE_ADAPTERS = [
   { id: "wechat-article", label: "微信文章图片", re: /^https?:\/\/mp\.weixin\.qq\.com\//i },
   { id: "xhs", label: "小红书", re: /^https?:\/\/(www\.)?xiaohongshu\.com\//i },

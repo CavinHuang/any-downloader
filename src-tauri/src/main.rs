@@ -146,9 +146,8 @@ thread: {:?}
                                     task_id,
                                 } = &ev
                                 {
-                                    if let Ok(Some(t)) =
-                                        handle.state::<AppState>().engine.get_task(task_id).await
-                                    {
+                                    let st = handle.state::<AppState>();
+                                    if let Ok(Some(t)) = st.engine.get_task(task_id).await {
                                         use tauri_plugin_notification::NotificationExt;
                                         let _ = handle
                                             .notification()
@@ -156,6 +155,35 @@ thread: {:?}
                                             .title("下载完成")
                                             .body(t.filename.as_deref().unwrap_or(task_id))
                                             .show();
+
+                                        // 完成后动作（设置 after_done；引擎只存设置，执行在应用层）
+                                        let action = st
+                                            .engine
+                                            .get_setting("after_done")
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_else(|| "none".into());
+                                        if action != "none" {
+                                            let dir = t.dir.clone().unwrap_or_else(
+                                                commands::default_download_dir_impl,
+                                            );
+                                            let file = std::path::Path::new(&dir)
+                                                .join(t.filename.as_deref().unwrap_or(""))
+                                                .display()
+                                                .to_string();
+                                            let run_cmd = st
+                                                .engine
+                                                .get_setting("run_command")
+                                                .await
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_default();
+                                            commands::run_after_done(
+                                                &st.engine, &action, &run_cmd, &file, &dir, task_id,
+                                            )
+                                            .await;
+                                        }
                                     }
                                 }
                             }

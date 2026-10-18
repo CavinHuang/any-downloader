@@ -538,12 +538,34 @@ async function fetchVariants(rec) {
 
 // ---------------------------------------------------------------- 推送
 
+// —— Cookie 透传兜底：嗅探/快照头没有 Cookie 时，从浏览器 cookie store 取该
+//    URL 命中的全部 cookie 拼 Cookie 头（<all_urls> host 权限下 httpOnly 也可读），
+//    登录态直链不再依赖「恰好被嗅探到」。Cookie 只进本机桌面端（本地优先，
+//    headers 导出本就排除敏感头）；8KB 上限防 NM 帧膨胀；失败静默降级。
+async function cookieHeaderFor(url) {
+  try {
+    if (!/^https?:/i.test(url) || !chrome.cookies || !chrome.cookies.getAll) return null;
+    const jars = await chrome.cookies.getAll({ url });
+    if (!jars || !jars.length) return null;
+    const head = jars.map((c) => `${c.name}=${c.value}`).join("; ");
+    return head ? head.slice(0, 8192) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function pushTask(url, headers, filename, postprocess, dir) {
+  // Cookie 兜底：显式头（嗅探/适配器）没有 Cookie 时从浏览器 cookie store 补
+  let head = headers && Object.keys(headers).length ? { ...headers } : null;
+  if (!head || !head.Cookie) {
+    const ck = await cookieHeaderFor(url);
+    if (ck) head = { ...(head || {}), Cookie: ck };
+  }
   const add = await nmCall(
     "task.add",
     {
       url,
-      headers: headers && Object.keys(headers).length ? headers : undefined,
+      headers: head && Object.keys(head).length ? head : undefined,
       filename: filename || undefined,
       postprocess: postprocess && postprocess.length ? postprocess : undefined,
       dir: dir || undefined,

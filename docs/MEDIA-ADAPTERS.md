@@ -22,6 +22,17 @@
 >   **粘贴 X 链接（ext 0.8.3）**：popup 粘贴口令支持 x.com/twitter.com/fxtwitter 等
 >   形态——syndication 端点匿名解析（token 为 id 确定性算式，yt-dlp 同款），详见 §3.1；
 >   `test_adapters.js` 78 断言（含 token 黄金值）。
+>   **文章采集增强（ext 0.8.6，§11）**：+3 站点（知乎回答/B站专栏/少数派，共 15 站）；
+>   GFM 任务列表；iframe/video/audio 嵌入转链接（原先整段丢失）；details/summary 原生
+>   保留；`<mark>` → `==…==`；front matter 新增 author/published（站点选择器 + 通用
+>   meta 兜底，日期归一 YYYY-MM-DD）。`test_articles.js` 158 断言。
+>   **P0 能力补全（ext 0.8.6 / app 0.4.6 同批）**：扩展推送 Cookie 兜底（嗅探头
+>   无 Cookie 时经 chrome.cookies 取该 URL 全部 Cookie 透传，8KB 上限）；单任务
+>   代理（CreateTask.proxy 覆盖全局，http(s)/socks5(h)）；after_done 真执行
+>   （原先只有设置无消费方）+ 运行自定义命令（{file}/{dir} 占位符）；yt-dlp
+>   选项（字幕 srt / 缩略图+元数据嵌入 / cookies.txt，设置驱动）；**直播 HLS
+>   自动转 yt-dlp 托管录制**（HTTP 驱动遇 LiveUnsupported 一次性重路由，
+>   托管子进程独占限速槽）。cargo 109 + 扩展 506 断言全绿。
 > - P2（Rust）：**视频号**——channels 适配器（decode_key 配对）+ 引擎 postprocess
 >   （`dl-engine::postprocess`，Isaac64-XOR 解密前 128KB；算法已用官方样本逐位对拍锁定：
 >   seed→randrsl[0]、u64 大端拼接、整体 reverse）+ `Decrypting` 任务状态 +
@@ -302,6 +313,9 @@ docs/MEDIA-ADAPTERS.md            # 本文档
 | 微信公众号 | `#img-content` / `#js_content` | `data-src` 懒加载落地；剥 `visibility:hidden` 初始样式；**图片由 wechat-article 适配器专管**（mmbiz 原图规则），articles 只出文档 |
 | CSDN | `.blog-content-box` / `#content_views` | 剥 `.hljs-button` 复制按钮 |
 | 知乎专栏 | `article.Post-Main` / `.Post-RichTextContainer` | `data-actualsrc` 原图优先于缩放 src |
+| 知乎回答（ext 0.8.6） | `.AnswerItem` / `.RichContent-inner` | 问题标题作标题、回答者作 author；视频页/无回答 id 不误命中 |
+| B站专栏（ext 0.8.6） | `.article-container` / `.article-content` | `up-name` 作 author |
+| 少数派（ext 0.8.6） | `.article-body` / `.article-body .content` | `time`/meta 作发布时间 |
 | 掘金 | `article.article` / `.article-content` | hljs 语言探测（fenced code lang） |
 | 简书 | `article` | 随机 hash class，直接取 article 容器 |
 | 博客园 | `#post_detail` / `#cnblogs_post_body` | — |
@@ -356,6 +370,22 @@ exported: "2026-10-10"
 加粗斜体删除线/行内代码（反引号定界升级）/链接图片（相对 → 绝对，`blob:`/非 image
 `data:` 丢弃）/行首结构符转义。DOM 遍历只用 `nodeType/childNodes/textContent/getAttribute`，
 单测用迷你 DOM 桩完整复现（`scripts/test_articles.js`）。
+
+**ext 0.8.6 转换与元数据增强**：
+
+- **GFM 任务列表**：li 直属 checkbox 保留（cleanup 加 disabled，其余 input 仍删），
+  `checked` 属性 → `- [x]` / `- [ ]`；
+- **嵌入媒体不再丢失**：iframe（B 站/YouTube 播放器）/`<video>`/`<audio>` →
+  `[▶ 视频](src)` / `[♪ 音频](src)` 链接（src 懒加载 data-src、video 取 source 子元素；
+  原先在 DROP 集合被整段丢弃）；
+- **`<details>/<summary>`** → 原生 HTML details 块（GFM 允许内嵌 HTML，内部正文仍走
+  Markdown；原先折叠内容会被拍平）；
+- **`<mark>` → `==高亮==`**（Obsidian/Typora 事实标准）；
+- **front matter 新增 `author` / `published`**：站点专属选择器（微信 `#js_name`/
+  `#publish_time`、博客园 `#post-date`、知乎回答 `.AuthorInfo-name` 等）→ 通用 meta
+  兜底（`meta[name=author]`、`article:published_time`/`pubdate`/`itemprop=datePublished`）；
+  日期归一 `YYYY-MM-DD`（支持 `2026年3月5日` / `2026/03/15` 形态），取不到省略字段。
+  `ARTICLES_RE`（types.js 静态并集）与 manifest content_scripts matches 同步扩了三个新站。
 
 ### 11.4 内容任务通道（Rust）
 

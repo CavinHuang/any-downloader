@@ -142,6 +142,9 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "conflict",
         "ffmpeg_path",
         "yt_dlp_path",
+        "yt_dlp_subs",
+        "yt_dlp_meta",
+        "yt_dlp_cookies",
         "max_concurrent",
         "max_auto_retry",
         "auto_categorize",
@@ -153,6 +156,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "schedule_outside",
         "schedule_outside_bps",
         "update_auto",
+        "run_command",
     ] {
         let v = engine.get_setting(key).await.map_err(str_err)?;
         out.insert(
@@ -406,6 +410,113 @@ pub async fn set_autostart(app: tauri::AppHandle, enable: bool) -> Result<(), St
         al.enable().map_err(|e| e.to_string())
     } else {
         al.disable().map_err(|e| e.to_string())
+    }
+}
+
+/// 完成后动作执行（设置 after_done；引擎只存键，执行在应用层——需要
+/// opener/shell 与「其余任务是否仍在跑」的判断）。
+/// shutdown/sleep 有全局效果：仅在列表里没有其他未完成任务时才触发
+/// （首个任务完成就关机不是任何人的预期）；Windows 关机给 60s 宽限。
+pub async fn run_after_done(
+    engine: &dl_engine::Engine,
+    action: &str,
+    run_cmd: &str,
+    file: &str,
+    dir: &str,
+    done_id: &str,
+) {
+    use dl_model::TaskStatus;
+    if matches!(action, "shutdown" | "sleep") {
+        let pending = [
+            TaskStatus::Queued,
+            TaskStatus::Probing,
+            TaskStatus::Downloading,
+            TaskStatus::Paused,
+            TaskStatus::WaitingRetry,
+            TaskStatus::Merging,
+            TaskStatus::Verifying,
+            TaskStatus::Decrypting,
+        ];
+        let mut busy = false;
+        for st in pending {
+            if let Ok(list) = engine.list_tasks(Some(st)).await {
+                if list.iter().any(|t| t.id != done_id) {
+                    busy = true;
+                    break;
+                }
+            }
+        }
+        if busy {
+            return;
+        }
+    }
+    match action {
+        "open_file" => {
+            let p = std::path::Path::new(file);
+            let target = if p.exists() { file } else { dir };
+            let _ = tauri_plugin_opener::open_path(target, None::<&str>);
+        }
+        "open_folder" => {
+            let _ = tauri_plugin_opener::open_path(dir, None::<&str>);
+        }
+        "run_command" => {
+            // {file}/{dir} 占位符；本机用户自配的命令，与 IDM「完成后运行」同级信任
+            let cmd = run_cmd.replace("{file}", file).replace("{dir}", dir);
+            if cmd.trim().is_empty() {
+                return;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", &cmd])
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW：GUI 进程不闪黑框
+                    .spawn();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = std::process::Command::new("sh").args(["-c", &cmd]).spawn();
+            }
+        }
+        "shutdown" => {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("shutdown")
+                    .args(["/s", "/t", "60"])
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell app \"System Events\" to shut down"])
+                    .spawn();
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("shutdown")
+                    .args(["-h", "+1"])
+                    .spawn();
+            }
+        }
+        "sleep" => {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("rundll32.exe")
+                    .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("pmset").arg("sleepnow").spawn();
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("systemctl")
+                    .arg("suspend")
+                    .spawn();
+            }
+        }
+        _ => {}
     }
 }
 

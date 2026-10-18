@@ -962,6 +962,8 @@ ${env.contentEl.outerHTML}
           pageUrl: p.pageUrl,
           contentEl: p.content,
           baseUrl: p.pageUrl,
+          author: p.meta && p.meta.author,
+          published: p.meta && p.meta.published,
         })
       : "";
     return {

@@ -34,6 +34,10 @@ const SAVE_KEYS = [
   "schedule_outside",
   "schedule_outside_bps",
   "update_auto",
+  "run_command",
+  "yt_dlp_subs",
+  "yt_dlp_meta",
+  "yt_dlp_cookies",
 ] as const;
 
 // 数值输入允许范围（§3.2/A21）：blur 与保存时 clamp，不依赖 HTML min/max 兜底
@@ -307,6 +311,31 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           />
           {t("ytdlpAutoUpdate")}
         </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={field("yt_dlp_subs") === "on"}
+            onChange={(e) => set("yt_dlp_subs", e.target.checked ? "on" : "off")}
+          />
+          {t("ytdlpSubs")}
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={field("yt_dlp_meta") === "on"}
+            onChange={(e) => set("yt_dlp_meta", e.target.checked ? "on" : "off")}
+          />
+          {t("ytdlpMeta")}
+        </label>
+        <label htmlFor="ytdlp-cookies">{t("ytdlpCookiesLabel")}</label>
+        <input
+          id="ytdlp-cookies"
+          value={field("yt_dlp_cookies")}
+          placeholder={t("ytdlpCookiesPlaceholder")}
+          onChange={(e) => set("yt_dlp_cookies", e.target.value)}
+        />
         <div className="form-section-title">04 / {t("behaviorPreferences")}</div>
         <label>{t("afterDone")}</label>
         <select

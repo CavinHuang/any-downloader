@@ -23,6 +23,7 @@ export function AddDialog({
   const [filename, setFilename] = useState("");
   const [checksum, setChecksum] = useState("");
   const [mirrorText, setMirrorText] = useState("");
+  const [proxy, setProxy] = useState("");
   const [probe, setProbe] = useState<ProbeInfo | null>(null);
   const [probing, setProbing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +36,7 @@ export function AddDialog({
     filename !== "" ||
     checksum !== "" ||
     mirrorText !== "" ||
+    proxy !== "" ||
     dir !== baselineDir;
 
   // §3.6：表单浮层 Esc / 遮罩在有未提交修改时先确认
@@ -89,6 +91,7 @@ export function AddDialog({
           filename: single ? filename || undefined : undefined,
           checksum: single && checksum.trim() ? checksum.trim() : undefined,
           mirrors: single && mirrors.length > 0 ? mirrors : undefined,
+          proxy: single && proxy.trim() ? proxy.trim() : undefined,
         });
         await api.startDownload(task.id);
       })

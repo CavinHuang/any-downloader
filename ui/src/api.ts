@@ -81,6 +81,10 @@ export interface Settings {
   schedule_outside: string | null;
   schedule_outside_bps: string | null;
   update_auto: string | null;
+  run_command: string | null;
+  yt_dlp_subs: string | null;
+  yt_dlp_meta: string | null;
+  yt_dlp_cookies: string | null;
 }
 
 export interface RemoteStatus {
@@ -113,6 +117,7 @@ export const api = {
     headers?: Record<string, string>;
     checksum?: string;
     mirrors?: string[];
+    proxy?: string;
   }) => invoke<Task>("add_task", params),
   setPriority: (id: string, priority: number) =>
     invoke<Task>("set_priority", { id, priority }),
