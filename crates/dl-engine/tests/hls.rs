@@ -176,7 +176,10 @@ async fn live_playlist_reroutes_to_ytdlp() {
         .await
         .unwrap();
     let r = engine.download(&t.id, hls_opts(&out)).await;
-    assert!(r.is_err(), "HTTP 驱动不支持直播：自动重路由后由 yt-dlp 失败（测试环境无可执行文件）");
+    assert!(
+        r.is_err(),
+        "HTTP 驱动不支持直播：自动重路由后由 yt-dlp 失败（测试环境无可执行文件）"
+    );
     // 直播已重路由为 yt-dlp 托管（错误来自 yt-dlp 缺失，不再是 live_unsupported）
     let t2 = engine.get_task(&t.id).await.unwrap().unwrap();
     assert_eq!(t2.kind, dl_model::TaskKind::Ytdlp, "kind 已重路由");
