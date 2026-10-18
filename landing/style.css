@@ -167,3 +167,35 @@ kbd { font: 12px Consolas, monospace; border: 1px solid var(--border); border-bo
   .shot img { aspect-ratio: auto; }
   .section-title { font-size: 27px; }
 }
+
+/* ---- 教程页 ---- */
+.tut-hero { padding: 62px 0 34px; }
+.tut-lead-hero { color: var(--muted); font-size: 15.5px; margin: 12px 0 0; }
+.tut-grid { display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 56px; align-items: start; padding-bottom: 90px; }
+.tut-toc { position: sticky; top: 84px; display: grid; gap: 3px; }
+.tut-toc a { font-size: 13.5px; color: var(--muted); text-decoration: none; padding: 7px 10px; border-radius: 7px; border-left: 2px solid transparent; transition: color .15s, background .15s; }
+.tut-toc a:hover { color: var(--text); background: var(--accent-soft); }
+.tut-section { padding: 46px 0 6px; border-top: 1px solid var(--border-soft); scroll-margin-top: 76px; }
+.tut-section:first-of-type { border-top: 0; padding-top: 4px; }
+.tut-no { display: inline-block; font: 600 12px var(--font-editorial); letter-spacing: .14em; color: var(--accent-strong); background: var(--lime); padding: 3px 10px; border-radius: 6px; }
+.tut-section h2 { font: 600 27px var(--font-editorial); margin: 14px 0 6px; }
+.tut-lead { color: var(--muted); margin: 0 0 28px; font-size: 14.5px; }
+.tut-step { margin: 0 0 42px; }
+.tut-step h3 { font-size: 15.5px; font-weight: 600; margin: 0 0 6px; display: flex; align-items: center; gap: 9px; }
+.tut-step h3 .n { width: 21px; height: 21px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); font-size: 11.5px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.tut-step p { color: var(--muted); font-size: 14px; line-height: 1.75; margin: 0; }
+.tut-step p a { color: var(--accent-strong); }
+.tut-step code { font: 12.5px/1.5 Consolas, monospace; background: var(--accent-soft); color: var(--accent-strong); padding: 1px 6px; border-radius: 5px; }
+.tut-step kbd { font: 12px/1.5 Consolas, monospace; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; background: var(--panel); color: var(--text); }
+.tut-shot { margin: 14px 0 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
+.tut-shot img { display: block; width: 100%; height: auto; }
+.tut-shot figcaption { font-size: 12.5px; color: var(--muted); padding: 9px 14px; border-top: 1px solid var(--border-soft); }
+.tut-shot.portrait { max-width: 330px; }
+.tut-more { margin-top: 14px; }
+.tut-final { color: var(--muted); font-size: 14.5px; margin: 30px 0 10px; }
+@media (max-width: 960px) {
+  .tut-grid { grid-template-columns: 1fr; gap: 26px; }
+  .tut-toc { position: static; grid-auto-flow: column; overflow-x: auto; padding-bottom: 6px; }
+  .tut-toc a { white-space: nowrap; }
+  .tut-shots-2col { grid-template-columns: 1fr; }
+}

@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>上手教程 — Anything Downloader</title>
+<meta name="description" content="Anything Downloader 图文教程：安装、新建下载、收藏管理、个性化设置、手机远程添加、浏览器扩展安装与自动更新，每一步都有真实界面截图。">
+<meta property="og:title" content="Anything Downloader 上手教程">
+<meta property="og:description" content="七个小节，从一条链接到一位老朋友——每一步都有真实界面截图。">
+<meta property="og:type" content="article">
+<link rel="icon" type="image/png" href="assets/icon-128.png">
+<link rel="stylesheet" href="style.css?v=6">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="index.html" aria-label="回到首页">
+      <img src="assets/icon-128.png" alt="" width="30" height="30">
+      <span>anything<span class="brand-period">.</span></span>
+    </a>
+    <nav class="nav-links" aria-label="页内导航">
+      <a href="index.html#features">特性</a>
+      <a href="index.html#gallery">界面</a>
+      <a href="tutorial.html" aria-current="page">教程</a>
+      <a href="index.html#extension">扩展</a>
+      <a href="index.html#download" class="nav-cta">下载</a>
+      <a href="https://github.com/CavinHuang/any-downloader" class="nav-gh" aria-label="GitHub 仓库">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+<section class="tut-hero">
+  <div class="wrap">
+    <p class="eyebrow">STEP BY STEP, WELL KEPT.</p>
+    <h1 class="section-title">上手教程<span class="heading-period">。</span></h1>
+    <p class="tut-lead-hero">七个小节，从一条链接到一位老朋友。所有截图都来自真实界面，跟着做即可。</p>
+  </div>
+</section>
+
+<div class="wrap tut-grid">
+
+  <nav class="tut-toc" aria-label="教程目录">
+    <a href="#s1">一、安装与首次启动</a>
+    <a href="#s2">二、收下第一个链接</a>
+    <a href="#s3">三、管理你的收藏</a>
+    <a href="#s4">四、按习惯调校</a>
+    <a href="#s5">五、手机远程添加</a>
+    <a href="#s6">六、安装浏览器扩展</a>
+    <a href="#s7">七、保持最新</a>
+  </nav>
+
+  <div class="tut-main">
+
+    <section class="tut-section" id="s1">
+      <span class="tut-no">01</span>
+      <h2>安装与首次启动</h2>
+      <p class="tut-lead">约一分钟，装完即用。全程本地运行：无账号、无捆绑。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>下载并安装桌面端</h3>
+        <p>回到<a class="text-link" href="index.html#download">首页下载</a>或 <a class="text-link" href="https://github.com/CavinHuang/any-downloader/releases/latest" rel="noopener">GitHub Releases</a>，拿 <code>x64-setup.exe</code> 双击安装（中英双语，随附 yt-dlp，YouTube 开箱即用）。macOS 未签名，首次启动需右键 → 打开。</p>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">2</span>认识你的收藏室</h3>
+        <p>首次打开是一张空的收藏桌：上方粘贴链接即可收藏；右侧「传输现场」实时汇总速度与类型索引。新版本以后会自动送达，无需手动升级。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/01-first-launch.webp" width="1280" height="853" alt="首次启动：空的收藏桌与右侧传输现场" loading="lazy">
+          <figcaption>首次启动 —— 一切从一张空桌开始</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="tut-section" id="s2">
+      <span class="tut-no">02</span>
+      <h2>收下第一个链接</h2>
+      <p class="tut-lead">直链、批量链接都从输入框进；识别先行，心里有底。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>粘贴链接，先「识别」</h3>
+        <p>把链接粘进首页输入框按 <kbd>→</kbd>，或点「收下新发现」打开新建任务（也可按 <kbd>Ctrl</kbd>+<kbd>N</kbd>，一次可贴多行）。点「识别」先看文件名、大小与类型；「更多选项」里可加校验值与镜像。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/02-add-dialog.webp" width="1280" height="853" alt="新建下载任务：多行链接与识别结果" loading="lazy">
+          <figcaption>新建任务 —— 识别结果：48.0 MB · video/mp4</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">2</span>添加并开始</h3>
+        <p>点「添加并开始」任务立即入列：进度、速度逐行实时刷新，右侧传输现场汇总总速度与 40 秒曲线。一次贴多行就是批量收藏。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/03-library-downloading.webp" width="1280" height="853" alt="收藏列表：两个任务正在下载，传输现场显示总速度" loading="lazy">
+          <figcaption>下载中 —— 行内进度 + 传输现场总速度曲线</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="tut-section" id="s3">
+      <span class="tut-no">03</span>
+      <h2>管理你的收藏</h2>
+      <p class="tut-lead">状态筛选、搜索、排序都在列表上方；行内即操作，双击看详情。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>双击看详情</h3>
+        <p>双击任意一行打开详情抽屉：状态、重命名、优先级、链接与目录一目了然，失败原因也在这里分类展示。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/03b-task-detail.webp" width="1280" height="853" alt="任务详情抽屉：重命名、优先级、链接与目录" loading="lazy">
+          <figcaption>详情抽屉 —— 重命名、优先级、链接与目录</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">2</span>批量接管</h3>
+        <p>勾选多行（支持 <kbd>Shift</kbd> 范围选择）即出批量操作栏：开始、暂停、重试、取消、删除一次到位。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/03c-batch-bar.webp" width="1280" height="853" alt="勾选两行后出现批量操作栏" loading="lazy">
+          <figcaption>批量操作 —— 选中即出操作栏</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">3</span>完成的收藏，妥善留存</h3>
+        <p>「已完成」页签按类型归档全部收藏，行内可打开文件或所在文件夹，也可以清空记录。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/03d-done.webp" width="1280" height="853" alt="已完成筛选：按类型归档，行内打开" loading="lazy">
+          <figcaption>已完成 —— 9.0 MB 妥善留存，随时翻阅</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="tut-section" id="s4">
+      <span class="tut-no">04</span>
+      <h2>按习惯调校</h2>
+      <p class="tut-lead">右上角齿轮打开设置，改完即存。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>存放与传输偏好</h3>
+        <p>「01 / 存放与命名」：默认保存目录、单任务分段数（1-32）、文件冲突策略；「02 / 传输偏好」：单任务与全局限速（字节/秒）、最大并发任务数、失败自动重试次数。卡顿或抢带宽，都在这里调。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/04-settings-storage.webp" width="1280" height="853" alt="设置：存放与命名、传输偏好" loading="lazy">
+          <figcaption>设置 —— 目录、分段、冲突策略、限速与并发</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="tut-section" id="s5">
+      <span class="tut-no">05</span>
+      <h2>手机远程添加</h2>
+      <p class="tut-lead">躺在床上刷到好东西，扫码推给桌面收。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>开启「远程添加」，手机扫码</h3>
+        <p>设置 → 勾选「远程添加（手机扫码推链接）」即出现二维码。手机浏览器扫码（或输入地址）打开推送页，把链接发过来，桌面端立即建任务。配对令牌仅限局域网使用。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/05-remote-qr.webp" width="1280" height="853" alt="设置中的远程添加：二维码与局域网地址" loading="lazy">
+          <figcaption>远程添加 —— 扫码即推，仅限局域网</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="tut-section" id="s6">
+      <span class="tut-no">06</span>
+      <h2>安装浏览器扩展</h2>
+      <p class="tut-lead">浏览时顺手收下好东西——Chrome / Edge 均可，全程约 2 分钟。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>在桌面端打开安装指引</h3>
+        <p>设置 → 「浏览器扩展通道」一行点「安装浏览器扩展」：扩展文件已随桌面端装进软件目录，弹窗给出四步指引与文件夹实际位置，可一键「打开文件夹」「复制路径」。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/06-extension-dialog.webp" width="1280" height="853" alt="应用内安装浏览器扩展弹窗：步骤与扩展文件夹路径" loading="lazy">
+          <figcaption>应用内安装指引 —— 步骤、路径与快捷按钮</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">2</span>浏览器里加载扩展</h3>
+        <p>地址栏打开 <code>chrome://extensions</code>（Edge 为 <code>edge://extensions</code>）→ 打开「开发人员模式」开关 → 点「加载已解压的扩展程序」→ 选中弹窗给出的扩展文件夹（含 manifest.json 的那层）。加载后列表出现 Anything Downloader。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/08-extensions-devmode.webp" width="1280" height="774" alt="Edge 扩展页：已加载的 Anything Downloader 与开发人员模式开关" loading="lazy">
+          <figcaption>edge://extensions —— 加载后出现在「已安装的扩展」</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">3</span>验证：popup 显示「已连接」</h3>
+        <p>点工具栏 Anything 图标：右上角亮起「已连接」即扩展已与桌面端握手。「本页发现」列出当前页面嗅探到的媒体与直链，点推送即收藏。</p>
+        <figure class="tut-shot portrait">
+          <img src="assets/shots/tutorial/09-popup.webp" width="760" height="1200" alt="扩展 popup：已连接状态与页面发现" loading="lazy">
+          <figcaption>popup —— 已连接，本页发现 00 条</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">4</span>传输现场随身看</h3>
+        <p>popup 切到「传输现场」：桌面端任务实时进度、完成即可「打开」；网页里右键图片 / 链接 / 视频也能一键推送，还可开启「自动接住浏览器下载」。</p>
+        <figure class="tut-shot portrait">
+          <img src="assets/shots/tutorial/09b-popup-tasks.webp" width="760" height="1200" alt="扩展 popup 传输现场：桌面任务实时列表" loading="lazy">
+          <figcaption>popup 传输现场 —— 桌面任务实时掌握</figcaption>
+        </figure>
+        <p class="tut-more">权限说明、常见问题与卸载方法见 <a class="text-link" href="https://github.com/CavinHuang/any-downloader/blob/main/docs/EXTENSION-INSTALL.md" rel="noopener">扩展安装完整文档 →</a></p>
+      </div>
+    </section>
+
+    <section class="tut-section" id="s7">
+      <span class="tut-no">07</span>
+      <h2>保持最新</h2>
+      <p class="tut-lead">更新包经 minisign 验签、后台静默安装，重启即升级。</p>
+
+      <div class="tut-step">
+        <h3><span class="n">1</span>自动更新（默认开启）</h3>
+        <p>运行中每 6 小时静默检查一次，发现新版本自动后台下载：右上角设置图标出现小圆点，悬停可见进度；下载完成后打开设置 → 「05 / 关于与更新」点「立即重启」生效——重启时机永远由你决定。</p>
+        <figure class="tut-shot">
+          <img src="assets/shots/tutorial/07-settings-about.webp" width="1280" height="853" alt="设置 05 关于与更新：自动更新开关与检查更新" loading="lazy">
+          <figcaption>关于与更新 —— 自动更新开关、手动检查、当前版本</figcaption>
+        </figure>
+      </div>
+
+      <div class="tut-step">
+        <h3><span class="n">2</span>手动检查</h3>
+        <p>同一区块点「检查更新」即可随时手动查；想关掉自动下载，取消勾选「自动检查并后台下载更新」即可（仍可手动检查与下载）。</p>
+      </div>
+
+      <p class="tut-final">收好每一个发现。<a class="text-link" href="index.html#download">还没安装？回到下载页 →</a></p>
+    </section>
+
+  </div>
+</div>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <span class="footer-brand">ANYTHING, WELL KEPT.</span>
+    <span>© 2026 <a class="text-link" href="https://github.com/CavinHuang/any-downloader" rel="noopener">CavinHuang/any-downloader</a></span>
+    <span>让每一次发现，都有处安放。</span>
+  </div>
+</footer>
+
+</body>
+</html>

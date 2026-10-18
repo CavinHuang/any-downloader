@@ -1,6 +1,6 @@
 # Anything Downloader
 
-高性能网页资源下载管理器。产品主页：[cavinhuang.github.io/any-downloader](https://cavinhuang.github.io/any-downloader/)（源码 [landing/](landing/),推送自动部署到 GitHub Pages）。设计文档见 [docs/DESIGN.md](docs/DESIGN.md)。
+高性能网页资源下载管理器。产品主页：[cavinhuang.github.io/any-downloader](https://cavinhuang.github.io/any-downloader/)（源码 [landing/](landing/),推送自动部署到 GitHub Pages），图文教程：[上手教程](https://cavinhuang.github.io/any-downloader/tutorial.html)（[landing/tutorial.html](landing/tutorial.html)）。设计文档见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 **浏览器扩展**：随安装器装进软件目录，应用内「设置 → 安装浏览器扩展」弹窗指引加载；也提供独立安装包 `anything-downloader-extension.zip`（[Releases](https://github.com/CavinHuang/any-downloader/releases/latest)）。用户教程见 [docs/EXTENSION-INSTALL.md](docs/EXTENSION-INSTALL.md)（桌面端 v0.4.3 起启动时自动注册扩展通道，装完扩展即可用）。
 
