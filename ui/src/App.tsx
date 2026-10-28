@@ -23,11 +23,19 @@ import { SniffPanel } from "./components/SniffPanel";
 import { TaskRow } from "./components/TaskRow";
 import { store } from "./store";
 import { CATEGORIES, categoryOf, Category } from "./fileTypes";
-import { Icon } from "./components/Icon";
-import { EmptyCollection } from "./components/EmptyCollection";
+import { Icon, type IconName } from "./components/Icon";
 import { TransferPanel } from "./components/TransferPanel";
 
-type Filter = "all" | "active" | "done" | "failed" | "other";
+type Filter = "all" | "active" | "queued" | "paused" | "done" | "failed" | "canceled";
+const TASK_VIEWS: { key: Filter; icon: IconName }[] = [
+  { key: "all", icon: "grid" },
+  { key: "active", icon: "download" },
+  { key: "queued", icon: "clock" },
+  { key: "paused", icon: "pause" },
+  { key: "done", icon: "check" },
+  { key: "failed", icon: "alert" },
+  { key: "canceled", icon: "close" },
+];
 const OVERSCAN = 8;
 
 export function App() {
@@ -55,14 +63,38 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [draftUrl, setDraftUrl] = useState("");
+  const [quickBusy, setQuickBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
   // A12：只存 id，详情任务渲染时从 store 快照按 id 取（打开期间实时更新）
   const [detailId, setDetailId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // 全文搜索：文章任务正文命中（设置 → 05 之外的采集能力；docs/MEDIA-ADAPTERS.md）
+  const [contentHits, setContentHits] = useState<Set<string>>(new Set());
   const [inTauri] = useState(() => "__TAURI_INTERNALS__" in window);
   const [totalBps, setTotalBps] = useState(0);
 
+  // 正文命中（防抖 250ms）：文章任务的 Markdown 全文搜索（命中任务的 id 集合）
+  useEffect(() => {
+    const q = search.trim();
+    if (!inTauri || q.length < 2) {
+      setContentHits(new Set());
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      api
+        .searchContent(q)
+        .then((hits) => {
+          if (alive) setContentHits(new Set(hits.map((h) => h.id)));
+        })
+        .catch(() => {});
+    }, 250);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [search, inTauri]);
   // 桌面嗅探：入口角标计数 + 抽屉开关（条目列表在 SniffPanel 内自持）
   const [sniffOpen, setSniffOpen] = useState(false);
   const [sniffCount, setSniffCount] = useState(0);
@@ -179,8 +211,11 @@ export function App() {
           return s === "done";
         case "failed":
           return s === "failed";
-        case "other":
-          return s === "queued" || s === "paused" || s === "waiting_retry" || s === "canceled";
+        case "queued":
+          return s === "queued" || s === "waiting_retry";
+        case "paused":
+        case "canceled":
+          return s === filter;
         default:
           return true;
       }
@@ -229,11 +264,11 @@ export function App() {
   }, [selected.size, showAdd, showSettings, detailId]);
 
   const toggleSelect = (task: Task, index: number, shift: boolean) => {
+    const anchor = lastIndexRef.current;
     setSelected((prev) => {
       const next = new Set(prev);
-      if (shift && lastIndexRef.current !== null) {
+      if (shift && anchor !== null) {
         // 范围语义跟随锚点行：锚点→当前行整体 选/清（以当前行为准）
-        const anchor = lastIndexRef.current;
         const [a, b] = [Math.min(anchor, index), Math.max(anchor, index)];
         const add = !prev.has(task.id);
         for (let i = a; i <= b; i += 1) {
@@ -287,12 +322,14 @@ export function App() {
   }, [filter, catFilter, search, sortKey, sortDir]);
 
   const counts = useMemo(() => {
-    const c = { all: tasks.length, active: 0, done: 0, failed: 0, other: 0 };
+    const c: Record<Filter, number> = { all: tasks.length, active: 0, queued: 0, paused: 0, done: 0, failed: 0, canceled: 0 };
     for (const x of tasks) {
       if (isActive(x.status)) c.active += 1;
       else if (x.status === "done") c.done += 1;
       else if (x.status === "failed") c.failed += 1;
-      else c.other += 1;
+      else if (x.status === "queued" || x.status === "waiting_retry") c.queued += 1;
+      else if (x.status === "paused") c.paused += 1;
+      else if (x.status === "canceled") c.canceled += 1;
     }
     return c;
   }, [tasks]);
@@ -445,6 +482,35 @@ export function App() {
     showToast(t("desktopRequired"), "warn");
     return false;
   };
+  const quickDownload = async () => {
+    if (quickBusy || !requireDesktop()) return;
+    const urls = draftUrl.trim().split(/\s+/).filter(Boolean);
+    if (urls.length === 0) return;
+    if (urls.some(url => { try { return !["http:", "https:"].includes(new URL(url).protocol); } catch { return true; } })) {
+      showToast(t("invalidDownloadUrl"), "warn");
+      return;
+    }
+    setQuickBusy(true);
+    try {
+      const results = await Promise.allSettled(urls.map(async url => {
+        const task = await api.addTask({ url });
+        await api.startDownload(task.id);
+      }));
+      const failedUrls = urls.filter((_, index) => results[index].status === "rejected");
+      const ok = results.length - failedUrls.length;
+      setDraftUrl(failedUrls.join(" "));
+      if (ok > 0) { setFilter("all"); setCatFilter("all"); setSearch(""); }
+      const duplicate = results.filter(result => result.status === "rejected" && String(result.reason).includes("task_exists")).length;
+      showToast(t("addSummary").replace("{ok}", String(ok)).replace("{dup}", String(duplicate)).replace("{fail}", String(failedUrls.length - duplicate)), failedUrls.length ? "warn" : "success");
+      const error = results.find(result => result.status === "rejected" && !String(result.reason).includes("task_exists"));
+      if (error?.status === "rejected") showToast(String(error.reason), "error");
+      await store.refresh();
+    } catch (error) {
+      showToast(String(error), "error");
+    } finally {
+      setQuickBusy(false);
+    }
+  };
   const exportTasks = async () => {
     if (!requireDesktop()) return;
     try {
@@ -466,96 +532,82 @@ export function App() {
   };
 
   return (
-    <div className={`app${tasks.length > 0 ? " has-collection" : ""}`}>
-      <header className="masthead">
+    <div className="app">
+      <aside className="sidebar">
         <button className="brand" aria-label={t("home")} onClick={() => { setFilter("all"); setCatFilter("all"); setSearch(""); }}>
-          <img className="brand-mark" src="/brand-mark.png" alt="" aria-hidden="true" />
-          <span>anything<span className="brand-period">.</span></span>
+          <span className="brand-icon"><Icon name="download" size={23} /></span>
+          <span className="brand-name">Anything<span>Downloader</span></span>
         </button>
-        <span className="masthead-divider" />
-        <span className="workspace-label">{t("personalSpace")}</span>
-        <div className="spacer" />
-        <span className="edition-label">A LITTLE LESS LOST.</span>
-        <div className="header-actions">
-          <button className="icon-button" title={t("importTasks")} aria-label={t("importTasks")} onClick={importTasks}><Icon name="import" /></button>
-          <button className="icon-button" title={t("exportTasks")} aria-label={t("exportTasks")} onClick={exportTasks}><Icon name="export" /></button>
-          <span className="action-divider" />
-          <button
-            className="icon-button"
-            title={t("sniffPanel")}
-            aria-label={t("sniffPanel")}
-            onClick={() => {
-              if (requireDesktop()) {
-                setSniffCount(0);
-                setSniffOpen(true);
-              }
-            }}
-          >
-            <Icon name="radar" />
-            {sniffCount > 0 && <span className="update-dot" aria-hidden="true" />}
+        <button className="primary new-task" onClick={openAdd} aria-label={t("newTask")} title={`${t("newTask")} (Ctrl+N)`}><Icon name="plus" size={18} /><span>{t("newTask")}</span><kbd>Ctrl N</kbd></button>
+        <div className="nav-label">{t("downloadTasks")}</div>
+        <nav className="task-nav" aria-label={t("sideStatus")}>
+          {TASK_VIEWS.map(({key, icon}) => (
+            <button key={key} className={`nav-item${filter === key ? " active" : ""}`} onClick={() => setFilter(key)} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={filter === key ? "page" : undefined}>
+              <Icon name={icon} size={18} /><span>{t(`view_${key}`)}</span><span className={`nav-count${key === "failed" && counts.failed > 0 ? " has-errors" : ""}`}>{counts[key]}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-tools">
+          <div className="nav-label">{t("tools")}</div>
+          <button className="nav-item" aria-label={t("sniffPanel")} title={t("sniffPanel")} onClick={() => { if (requireDesktop()) { setSniffCount(0); setSniffOpen(true); } }}>
+            <Icon name="radar" size={18} /><span>{t("sniffPanel")}</span>{sniffCount > 0 && <span className="nav-count">{sniffCount}</span>}
           </button>
-          <button
-            className="icon-button"
-            title={updateTooltip}
-            aria-label={t("settings")}
-            onClick={() => requireDesktop() && setShowSettings(true)}
-          >
-            <Icon name="settings" />
-            {updateNudge && <span className="update-dot" aria-hidden="true" />}
+          <button className="nav-item settings-entry" aria-label={t("settings")} title={updateTooltip} onClick={() => requireDesktop() && setShowSettings(true)}>
+            <Icon name="settings" size={18} /><span>{t("settings")}</span>{updateNudge && <span className="update-dot" aria-hidden="true" />}
           </button>
         </div>
-      </header>
+        <div className="sidebar-bottom"><span className={`connection-dot${inTauri ? " connected" : ""}`} /><span>{t(inTauri ? "desktopMode" : "previewMode")}</span></div>
+      </aside>
 
-      <div className="studio">
+      <div className="workspace">
+        <header className="workspace-header">
+          <div className="page-heading"><h1>{t(`view_${filter}`)}</h1><span className="task-total">{t("taskCount").replace("{n}", String(counts[filter]))}</span></div>
+          <label className="search-box"><Icon name="search" size={16} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchTasks")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>Ctrl K</kbd></label>
+        </header>
+
         <main className="main">
-          <section className="intro">
-            <div>
-              <div className="eyebrow"><span className="tiny-cross">✳</span> {t("collectionEyebrow")}</div>
-              <h1>{t("collectionHeading")}<span className="heading-period">{t("headingPunctuation")}</span></h1>
-              <p className="intro-description">{t("collectionDescription")}</p>
-            </div>
-            <button className="new-collection" onClick={openAdd} title="Ctrl+N" aria-label={t("newCollection")}>
-              <Icon name="plus" size={23} /><span>{t("newCollection")}</span><span className="new-shortcut">↗</span>
-            </button>
+          <section className="download-entry" aria-label={t("quickDownload")}>
+            <form className="link-entry" onSubmit={e => { e.preventDefault(); void quickDownload(); }}>
+              <Icon name="link" size={19} />
+              <input aria-label={t("quickLinkLabel")} value={draftUrl} disabled={quickBusy} onChange={e => setDraftUrl(e.target.value)} onPaste={e => {
+                const pasted = e.clipboardData.getData("text");
+                if (/[\r\n]/.test(pasted)) {
+                  e.preventDefault();
+                  const input = e.currentTarget;
+                  setDraftUrl(draftUrl.slice(0, input.selectionStart ?? 0) + pasted.replace(/\s+/g, " ").trim() + draftUrl.slice(input.selectionEnd ?? draftUrl.length));
+                }
+              }} placeholder={t("quickLinkPlaceholder")} />
+              <button className="primary" type="submit" disabled={quickBusy || !draftUrl.trim()}><Icon name="download" size={16} />{t(quickBusy ? "addingTasks" : "downloadNow")}</button>
+            </form>
+            <div className="entry-caption"><span>{t("quickLinkHint")}</span><button className="text-button" onClick={openAdd}>{t("downloadOptions")}<Icon name="arrow" size={13} /></button></div>
           </section>
 
-          <form className="link-entry" onSubmit={e => { e.preventDefault(); openAdd(); }}>
-            <span className="link-entry-icon"><Icon name="link" size={19} /></span>
-            <input aria-label={t("quickLinkLabel")} value={draftUrl} onChange={e => setDraftUrl(e.target.value)} placeholder={t("quickLinkPlaceholder")} />
-            <span className="link-entry-hint">{t("quickLinkHint")}</span>
-            <button className="link-submit" type="submit" aria-label={t("newCollection")} title={t("newCollection")}><Icon name="arrow" size={20} /></button>
-          </form>
-
-          <div className="collection-section">
-            <div className="collection-topline">
-              <div className="collection-title"><h2>{t("myCollection")}</h2><span>{String(tasks.length).padStart(2, "0")}</span></div>
-              <label className="search-box"><Icon name="search" size={16} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchCollection")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>⌃ K</kbd></label>
-            </div>
-
-            <nav className="status-tabs" aria-label={t("sideStatus")}>
-              {(["all", "active", "done", "other", "failed"] as Filter[]).map(key => (
-                <button key={key} className={filter === key ? "status-tab active" : "status-tab"} onClick={() => setFilter(key)} aria-pressed={filter === key}>
-                  {key === "active" && <span className="tab-live-dot" />}{t(key)}<span>{counts[key]}</span>
-                </button>
-              ))}
-            </nav>
-
-            <div className="collection-tools">
-              <div className="category-filters" role="group" aria-label={t("sideCategory")}>
-                {CATEGORIES.map(({key, label}) => <button key={key} className={catFilter === key ? "category-chip active" : "category-chip"} aria-pressed={catFilter === key} onClick={() => setCatFilter(key)}>{t(label)}</button>)}
+          <section className="task-panel" aria-label={t("downloadTasks")}>
+            <div className="task-toolbar" role="toolbar" aria-label={t("taskActions")}>
+              <div className="toolbar-actions">
+                <button onClick={pauseAll} disabled={busyOp !== null || counts.active === 0}><Icon name="pause" size={15} />{t("pauseAll")}</button>
+                <button onClick={resumeAll} disabled={busyOp !== null || pausedCount === 0}><Icon name="play" size={15} />{t("resumeAll")}</button>
+                {filter === "failed" && counts.failed > 0 && <button onClick={retryAllFailed} disabled={busyOp !== null}><Icon name="retry" size={15} />{t("retryAllFailed")}</button>}
+                {filter === "done" && counts.done > 0 && <button onClick={clearDone} disabled={busyOp !== null}>{t("clearDone")}</button>}
               </div>
-              <label className="sort-control"><span className="sr-only">{t("sortCollection")}</span><select value={sortKey ? sortKey + ":" + sortDir : "default"} onChange={e => {
-                const [key, direction] = e.target.value.split(":");
-                setSortKey(key === "default" ? null : key as "name" | "size" | "speed");
-                setSortDir(direction === "-1" ? -1 : 1);
-              }}>
-                <option value="default">{t("sortDefault")}</option>
-                <option value="name:1">{t("sortNameAsc")}</option>
-                <option value="name:-1">{t("sortNameDesc")}</option>
-                <option value="size:-1">{t("sortSizeDesc")}</option>
-                <option value="size:1">{t("sortSizeAsc")}</option>
-                <option value="speed:-1">{t("sortSpeedDesc")}</option>
-              </select></label>
+              <div className="toolbar-secondary">
+                <button className="icon-button" title={t("importTasks")} aria-label={t("importTasks")} onClick={importTasks}><Icon name="import" size={17} /></button>
+                <button className="icon-button" title={t("exportTasks")} aria-label={t("exportTasks")} onClick={exportTasks}><Icon name="export" size={17} /></button>
+                <span className="toolbar-divider" />
+                <label className="type-control"><span className="sr-only">{t("sideCategory")}</span><select value={catFilter} onChange={e => setCatFilter(e.target.value as Category)}>{CATEGORIES.map(({key, label}) => <option key={key} value={key}>{t(label)}</option>)}</select></label>
+                <label className="sort-control"><span className="sr-only">{t("sortTasks")}</span><select value={sortKey ? sortKey + ":" + sortDir : "default"} onChange={e => {
+                  const [key, direction] = e.target.value.split(":");
+                  setSortKey(key === "default" ? null : key as "name" | "size" | "speed");
+                  setSortDir(direction === "-1" ? -1 : 1);
+                }}>
+                  <option value="default">{t("sortDefault")}</option>
+                  <option value="name:1">{t("sortNameAsc")}</option>
+                  <option value="name:-1">{t("sortNameDesc")}</option>
+                  <option value="size:-1">{t("sortSizeDesc")}</option>
+                  <option value="size:1">{t("sortSizeAsc")}</option>
+                  <option value="speed:-1">{t("sortSpeedDesc")}</option>
+                </select></label>
+              </div>
             </div>
 
             {clipUrl && <div className="banner clip" role="status">
@@ -563,7 +615,7 @@ export function App() {
               <button onClick={addFromClip} disabled={clipBusy}>{t("download")}{clipBusy ? "…" : ""}</button><button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
             </div>}
 
-            {selected.size > 0 ? (
+            {selected.size > 0 && (
               <div className="batchbar" role="toolbar" aria-label={t("selectedN").replace("{n}", String(selected.size))}>
                 <span className="sel-count">{t("selectedN").replace("{n}", String(selected.size))}</span>
                 <button onClick={selStart} disabled={busyOp !== null}>{t("start")}</button>
@@ -573,24 +625,21 @@ export function App() {
                 <button className="danger" onClick={selRemove} disabled={busyOp !== null}>{t("remove")}</button>
                 <div className="spacer" /><button className="icon-button" aria-label={t("clearSel")} title={t("clearSel")} onClick={() => setSelected(new Set())} disabled={busyOp !== null}><Icon name="close" size={15} /></button>
               </div>
-            ) : (
-              <div className="list-caption">
-                <label className="selection-label"><input ref={headerCbRef} type="checkbox" className="sel-cb" checked={allSelected} onChange={toggleAll} aria-label={t("selectAll")} /><span>{t("collectionList")}</span></label>
-                <div className="spacer" />
-                {filter === "failed" && counts.failed > 0 && <button className="text-button" onClick={retryAllFailed} disabled={busyOp !== null}>{t("retryAllFailed")}</button>}
-                {filter === "done" && counts.done > 0 && <button className="text-button" onClick={clearDone} disabled={busyOp !== null}>{t("clearDone")}</button>}
-                <span>{filtered.length} {t("itemsUnit")}</span>
-              </div>
             )}
+            <div className="table-heading">
+              <input ref={headerCbRef} type="checkbox" className="sel-cb" checked={allSelected} onChange={toggleAll} aria-label={t("selectAll")} disabled={filtered.length === 0} />
+              <span className="heading-file">{t("colFile")}</span><span>{t("colProgress")}</span><span className="heading-speed">{t("colSpeed")}</span><span className="heading-eta">{t("colRemaining")}</span><span className="heading-actions">{t("colActions")}</span>
+            </div>
 
             <div className="rows" ref={rowsRef} onScroll={e => setScrollTop(e.currentTarget.scrollTop)}>
               {showSkeleton ? (
                 <div aria-hidden="true">{[56, 38, 46].map((w, i) => <div className="skel-row" key={i}><span className="skel-file" /><div className="skel" style={{width: w + "%"}} /></div>)}</div>
               ) : inTauri && firstLoad ? null : filtered.length === 0 ? (
                 <div className="empty">
-                  {search.trim() ? <><Icon name="search" size={35} /><h3>{t("emptySearch")}</h3><button onClick={() => setSearch("")}>{t("clearSearch")}</button></>
-                  : tasks.length === 0 ? <><EmptyCollection /><span className="empty-number">YOUR COLLECTION STARTS HERE</span><h3>{t("emptyCollectionTitle")}</h3><p>{t("emptyCollectionDescription")}</p><button className="text-button empty-action" onClick={openAdd}>{t("addFirstCollection")}<Icon name="arrow" size={16} /></button></>
-                  : <><Icon name="folder" size={35} /><h3>{t("emptyFiltered")}</h3><button onClick={() => { setFilter("all"); setCatFilter("all"); }}>{t("clearFilter")}</button></>}
+                  <span className="empty-icon"><Icon name={search.trim() ? "search" : tasks.length === 0 ? "download" : "folder"} size={30} /></span>
+                  {search.trim() ? <><h3>{t("emptySearch")}</h3><p>{t("emptySearchHint")}</p><button onClick={() => setSearch("")}>{t("clearSearch")}</button></>
+                  : tasks.length === 0 ? <><h3>{t("emptyTasksTitle")}</h3><p>{t("emptyTasksDescription")}</p><button className="primary" onClick={openAdd}><Icon name="plus" size={16} />{t("newTask")}</button><span className="empty-shortcut">Ctrl + N</span></>
+                  : <><h3>{t("emptyFiltered")}</h3><button onClick={() => { setFilter("all"); setCatFilter("all"); }}>{t("clearFilter")}</button></>}
                 </div>
               ) : (
                 <div style={{height: filtered.length * ROW_H, position: "relative"}}>
@@ -600,12 +649,11 @@ export function App() {
                 </div>
               )}
             </div>
-          </div>
+            <div className="list-footer"><span>{t("visibleTasks").replace("{n}", String(filtered.length))}</span><span>{t("taskDetailHint")}</span></div>
+          </section>
         </main>
-        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} paused={pausedCount} inTauri={inTauri} busy={busyOp !== null} onPause={pauseAll} onResume={resumeAll} category={catFilter} onCategory={setCatFilter} />
+        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} />
       </div>
-
-      <footer className="app-footer"><span className="footer-brand">ANYTHING, WELL KEPT.</span><span>{t("footerNote")}</span><span className="footer-mode">{!inTauri && <span className="preview-indicator" />}{t(inTauri ? "desktopMode" : "previewMode")}</span></footer>
 
       <div className="toast-stack">{toasts.map(x => <div key={x.id} className={`banner toast ${x.kind}`} role={x.kind === "error" ? "alert" : "status"}><span className="banner-text">{x.text}</span><button className="banner-close" aria-label={t("close")} onClick={() => dismissToast(x.id)}>×</button></div>)}</div>
       {showAdd && <AddDialog initialUrls={draftUrl} desktopAvailable={inTauri} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); setDraftUrl(""); store.refresh(); }} />}

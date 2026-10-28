@@ -59,6 +59,8 @@ export function TaskRow({
   const indet = !total && active; // A11：总大小未知且进行中 → indeterminate（multi 不渲染，一律单条）
   const category = categoryOf(task);
   const extension = name.match(/\.([a-z0-9]{1,6})$/i)?.[1]?.toUpperCase() ?? "FILE";
+  const remaining = active && task.kind !== "hls" && total != null && bps > 0
+    ? Math.max(0, (total - (downloaded || 0)) / bps) : null;
 
   const openFile = guard(async () => {
     if (task.status === "done" && isExe && !window.confirm(t("exeWarn"))) return;
@@ -67,7 +69,7 @@ export function TaskRow({
 
   return (
     <div
-      className={`row${flash ? " err-flash" : ""}${selected ? " selected" : ""}`}
+      className={`row task-${task.status}${flash ? " err-flash" : ""}${selected ? " selected" : ""}`}
       style={{ height: ROW_H }}
       title={t("doubleClickHint")}
       onDoubleClick={onDetail}
@@ -109,7 +111,7 @@ export function TaskRow({
         </div>
       </div>
       <div className={`c-progress ${task.status}`}>
-        <div className="progress-summary"><span>{task.status === "done" ? fmtBytes(total ?? task.downloaded_bytes) : active && bps > 0 ? fmtSpeed(bps) : t(`status_${task.status}`)}</span><span>{task.status === "done" ? <Icon name="check" size={14} /> : total ? `${pct}%` : ""}</span></div>
+        <div className="progress-summary"><span>{task.status === "done" ? t("status_done") : total ? `${pct}%` : t(`status_${task.status}`)}</span>{task.status === "done" && <Icon name="check" size={14} />}</div>
         {segs && segs.length > 1 && total ? (
           <div
             className="bar multi"
@@ -166,11 +168,13 @@ export function TaskRow({
             : total
               ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}`
               : task.status === "done"
-                ? "✓"
+                ? fmtBytes(task.downloaded_bytes)
                 : // A11：「—」时说明总大小未知，避免误读为卡死
                   <span title={t("sizeUnknown")}>—</span>}
         </span>
       </div>
+      <div className="c-speed">{active && bps > 0 ? fmtSpeed(bps) : "—"}</div>
+      <div className="c-eta">{remaining == null ? "—" : fmtRemaining(remaining)}</div>
       <fieldset className="c-actions" disabled={busy} aria-busy={busy} onClick={(e) => e.stopPropagation()}>
         {active ? (
           <>
@@ -247,4 +251,11 @@ function displayName(url: string): string {
 
 function errorCode(err: Record<string, unknown>): string {
   return String(err.code ?? JSON.stringify(err));
+}
+
+function fmtRemaining(seconds: number): string {
+  const minutes = Math.max(1, Math.ceil(seconds / 60));
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))} ${t("secondsShort")}`;
+  if (minutes < 60) return `${minutes} ${t("minutesShort")}`;
+  return `${Math.floor(minutes / 60)} ${t("hoursShort")} ${minutes % 60} ${t("minutesShort")}`;
 }

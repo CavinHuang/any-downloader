@@ -41,7 +41,13 @@
 >   （原先只有设置无消费方）+ 运行自定义命令（{file}/{dir} 占位符）；yt-dlp
 >   选项（字幕 srt / 缩略图+元数据嵌入 / cookies.txt，设置驱动）；**直播 HLS
 >   自动转 yt-dlp 托管录制**（HTTP 驱动遇 LiveUnsupported 一次性重路由，
->   托管子进程独占限速槽）。cargo 109 + 扩展 506 断言全绿。> - P2（Rust）：**视频号**——channels 适配器（decode_key 配对）+ 引擎 postprocess
+>   托管子进程独占限速槽）。cargo 109 + 扩展 506 断言全绿。
+>   **收藏体验 P1（ext 0.8.6 / app 0.4.6 同批，对标剪藏品类）**：划词标注
+>   （highlights.js 页内「✚ 标注」→ storage 按 URL 分组 → 推送/编辑时经
+>   `ADL.appendHighlights` 追加「## 划线摘录」引用块）；收藏室全文搜索
+>   （content_index 表 + `search_content` IPC/Tauri 命令，content 任务
+>   建索引、删任务同删）。cargo 110 + 扩展 513 断言全绿。
+> - P2（Rust）：**视频号**——channels 适配器（decode_key 配对）+ 引擎 postprocess
 >   （`dl-engine::postprocess`，Isaac64-XOR 解密前 128KB；算法已用官方样本逐位对拍锁定：
 >   seed→randrsl[0]、u64 大端拼接、整体 reverse）+ `Decrypting` 任务状态 +
 >   `tasks.postprocess_json` 列 + `CreateTask.postprocess`（IPC/CLI `--isaac64-seed` 透传）。

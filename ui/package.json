@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "export:preview": "node ../scripts/export-ui-preview.mjs",
-    "test:store": "node ../scripts/test_ui_store.cjs"
+    "test:store": "node ../scripts/test_ui_store.cjs",
+    "test:ui": "node ../scripts/test_ui_downloads.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.0",

@@ -223,7 +223,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="settings-heading">
-        <div className="dialog-header"><div><div className="eyebrow">MAKE YOURSELF AT HOME</div><h3>{t("settingsTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={saving} aria-label={t("close")}><Icon name="close" /></button></div>
+        <div className="dialog-header"><div><h3>{t("settingsTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={saving} aria-label={t("close")}><Icon name="close" /></button></div>
         <p className="dialog-description">{t("settingsDescription")}</p>
         </div>
         <div className="settings-content">

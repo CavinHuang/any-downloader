@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { api, ProbeInfo } from "../api";
 import { fmtBytes } from "../App";
 import { t } from "../i18n";
@@ -146,37 +147,56 @@ export function AddDialog({
         onKeyDown={onKeyDown}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="dialog-header"><div><div className="eyebrow">KEEP SOMETHING GOOD</div><h3>{t("addTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={busy} aria-label={t("close")}><Icon name="close" /></button></div>
+        <div className="dialog-header"><div><h3>{t("addTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={busy} aria-label={t("close")}><Icon name="close" /></button></div>
         <p className="dialog-description">{t("addDescription")}</p>
         {!desktopAvailable && <div className="probe">{t("desktopRequired")}</div>}
         <fieldset className="add-fields" disabled={busy}>
-        <label htmlFor="collection-urls">{t("urlLabel")}</label>
+        <label htmlFor="download-urls">{t("urlLabel")}</label>
         <textarea
           rows={4}
-          id="collection-urls"
+          id="download-urls"
           value={urls}
           onChange={(e) => setUrls(e.target.value)}
           placeholder="https://…"
           autoFocus
         />
+
+        <div className="grid2">
+          <div>
+            <label htmlFor="download-dir">{t("dirLabel")}</label>
+            <div className="directory-input">
+              <input id="download-dir" value={dir} onChange={(e) => setDir(e.target.value)} />
+              <button type="button" aria-label={t("browse")} title={t("browse")} disabled={!desktopAvailable} onClick={async () => {
+                try {
+                  const selected = await pickFolder({ directory: true, defaultPath: dir || undefined });
+                  if (typeof selected === "string") setDir(selected);
+                } catch (error) { setError(String(error)); }
+              }}><Icon name="folder" size={17} /></button>
+            </div>
+          </div>
+          <div>
+            <label htmlFor="download-filename">{t("filenameLabel")}{multi ? ` · ${t("singleOnly")}` : ""}</label>
+            <input id="download-filename" value={filename} disabled={multi} onChange={(e) => setFilename(e.target.value)} />
+          </div>
+        </div>
         <details className="advanced-options"><summary>{t("advancedOptions")}</summary>
-        <label htmlFor="collection-checksum">
+        <label htmlFor="download-checksum">
           {t("checksumLabel")}
           {multi ? `（${t("singleOnly")}）` : ""}
         </label>
         <input
-          id="collection-checksum"
+          id="download-checksum"
           value={checksum}
           disabled={multi}
           placeholder={t("checksumPlaceholder")}
           onChange={(e) => setChecksum(e.target.value)}
         />
-        <label htmlFor="collection-mirrors">
+        <label htmlFor="download-mirrors">
           {t("mirrorLabel")}
           {multi ? `（${t("singleOnly")}）` : ""}
         </label>
         <textarea
-          id="collection-mirrors"
+          id="download-mirrors"
           rows={2}
           value={mirrorText}
           disabled={multi}
@@ -184,16 +204,6 @@ export function AddDialog({
           onChange={(e) => setMirrorText(e.target.value)}
         />
         </details>
-        <div className="grid2">
-          <div>
-            <label htmlFor="collection-dir">{t("dirLabel")}</label>
-            <input id="collection-dir" value={dir} onChange={(e) => setDir(e.target.value)} />
-          </div>
-          <div>
-            <label htmlFor="collection-filename">{t("filenameLabel")}</label>
-            <input id="collection-filename" value={filename} onChange={(e) => setFilename(e.target.value)} />
-          </div>
-        </div>
         </fieldset>
         {probe && (
           <div className="probe">
@@ -210,7 +220,7 @@ export function AddDialog({
           <div className="spacer" />
           <button onClick={requestClose} disabled={busy}>{t("cancelBtn")}</button>
           <button className="primary" onClick={doAdd} disabled={!desktopAvailable || busy || !firstUrl}>
-            {busy ? t("addingCollection") : t("addAndStart")}
+            {busy ? t("addingTasks") : t("addAndStart")}
           </button>
         </div>
       </div>

@@ -1,9 +1,11 @@
 import type { CSSProperties } from "react";
 
-export type IconName = "plus" | "arrow" | "download" | "search" | "settings" | "import" | "export" | "grid" | "video" | "audio" | "archive" | "doc" | "software" | "image" | "other" | "pause" | "play" | "check" | "retry" | "close" | "folder" | "more" | "link" | "radar";
+export type IconName = "plus" | "arrow" | "download" | "search" | "settings" | "import" | "export" | "grid" | "video" | "audio" | "archive" | "doc" | "software" | "image" | "other" | "pause" | "play" | "check" | "retry" | "close" | "folder" | "more" | "link" | "radar" | "clock" | "alert";
 
 const paths: Record<IconName, React.ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7v6m0 4h.01" /></>,
   arrow: <path d="M5 12h14m-6-6 6 6-6 6" />,
   download: <><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" /></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></>,
