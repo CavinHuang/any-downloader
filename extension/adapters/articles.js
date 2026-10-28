@@ -386,6 +386,17 @@
     });
   };
 
+  // —— 划线摘录追加（标注随文章入库）：每条标注一行引用块；空列表原样返回。
+  ADL.appendHighlights = (content, highlights) => {
+    if (!highlights || !highlights.length) return content;
+    const quotes = highlights
+      .map((h) => String(h && h.text || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .map((t) => "> " + t);
+    if (!quotes.length) return content;
+    return String(content).replace(/\s*$/, "") + "\n\n## 划线摘录\n\n" + quotes.join("\n\n") + "\n";
+  };
+
   // —— 适配器注册（bridge 按 id 调用 extract(ctx)）
   ADL.ARTICLE_SITES = SITES;
   ADL.articleSite = (url) => SITES.find((s) => s.re.test(String(url || ""))) || null;

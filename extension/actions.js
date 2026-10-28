@@ -966,11 +966,14 @@ ${env.contentEl.outerHTML}
           published: p.meta && p.meta.published,
         })
       : "";
+    // 划线标注（highlights.js 内存镜像）随编辑/解析的 MD 一并输出
+    const hl = typeof ADL.pageHighlights === "function" ? ADL.pageHighlights() : null;
+    const mdFinal = typeof ADL.appendHighlights === "function" ? ADL.appendHighlights(md, hl) : md;
     return {
       ...p,
       summary: String(summary || "").trim(),
       coverUrl: metaContent('meta[property="og:image"]'),
-      md,
+      md: mdFinal,
     };
   };
 })();

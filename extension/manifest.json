@@ -86,6 +86,7 @@
         "adapters/articles.js",
         "lib/qr.js",
         "actions.js",
+        "highlights.js",
         "adapters/wechat-article.js",
         "adapters/xhs.js",
         "adapters/douyin.js",

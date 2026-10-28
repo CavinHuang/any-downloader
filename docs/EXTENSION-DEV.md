@@ -14,6 +14,7 @@ Chrome/Edge 的 MV3 扩展负责「眼睛和手」：嗅探资源、推送任务
 | `dl-server nm-shim` | 同一二进制的 NM 模式 | Chrome 拉起的 stdio ↔ 管道薄桥 |
 | `dl-server serve` | 常驻进程 | 持有引擎，执行下载 |
 | `scripts/register-nm-host.ps1` | 注册脚本 | 取消注册 / 显式刷新（dl-app 启动已自动注册） |
+| `extension/highlights.js` | 划词标注（content script） | 文章页划选 → 「✚ 标注」→ storage 按 URL 分组；推送/编辑时追加「## 划线摘录」 |
 | `extension/video-overlays.js` | 视频悬浮下载按钮（content script，`<all_urls>`） | 任意站点 `<video>` 右上角 ⬇ 浮标（hover 显现，含全屏/开放 Shadow DOM 穿透）；单击发 `video-download`，background 经 `ADL.pickVideoSource` 决策：适配器资源 > http 直链 > 本页嗅探 > yt-dlp 页面托管（YouTube/B站等 MSE 站），推送即建即下。开关 `sniffCfg.videoOverlay`（popup 设置 04） |
 
 扩展除独立 zip（Release 资产 `anything-downloader-extension.zip`）外，还随桌面端安装器一起分发：`tauri.conf.json` 的 `bundle.resources` 把仓库 `extension/` 目录直接映射到安装后的 `extension/`（`../extension` 路径始终存在，`cargo check` 无需预处理；仓库内测试 fixtures 会一并进入安装目录，均为惰性样本文件，体积 ~50KB 可忽略）。桌面端设置页「安装浏览器扩展」按钮弹窗（`ExtensionDialog`）读取 `extension_bundle` 命令给出的实际路径指引用户加载。

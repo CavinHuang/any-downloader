@@ -554,6 +554,20 @@ async function fetchVariants(rec) {
 
 // ---------------------------------------------------------------- 推送
 
+// —— 划线标注（highlights.js 采集）：读同页标注列表，推送文档前由
+//    ADL.appendHighlights 追加「## 划线摘录」区块。读不到（无标注）返回 null。
+async function highlightsFor(pageUrl) {
+  try {
+    const key = String(pageUrl || "").split("#")[0];
+    if (!/^https?:/i.test(key)) return null;
+    const all = await chrome.storage.local.get("adl_highlights");
+    const list = (all && all.adl_highlights && all.adl_highlights[key]) || null;
+    return list && list.length ? list : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // —— Cookie 透传兜底：嗅探/快照头没有 Cookie 时，从浏览器 cookie store 取该
 //    URL 命中的全部 cookie 拼 Cookie 头（<all_urls> host 权限下 httpOnly 也可读），
 //    登录态直链不再依赖「恰好被嗅探到」。Cookie 只进本机桌面端（本地优先，
@@ -753,6 +767,15 @@ async function adapterPush(tabId, urls) {
     for (const r of imgs) relMap[r.url.split("#")[0].split("?")[0]] = r.filename;
     for (const d of docs) {
       d.meta.document.content = ADL.rewriteDocRefs(d.meta.document.content, relMap);
+    }
+  }
+  // 划线标注随文章入库（品类核心体验）：追加「## 划线摘录」到所有文档产物
+  if (docs.length) {
+    const hl = await highlightsFor(entry.sourceUrl);
+    if (hl) {
+      for (const d of docs) {
+        d.meta.document.content = ADL.appendHighlights(d.meta.document.content, hl);
+      }
     }
   }
 

@@ -903,6 +903,22 @@ console.log("articles: B站专栏 / 少数派 URL 命中");
   ok(!ADL.ARTICLES_RE.test("https://www.zhihu.com/question/123"), "问题页（无回答 id）不命中");
 }
 
+console.log("articles: ADL.appendHighlights 划线摘录追加");
+{
+  const md = "---\ntitle: \"x\"\n---\n\n# x\n\n正文段落。";
+  const out = ADL.appendHighlights(md, [
+    { text: "第一条标注" },
+    { text: "  第二条\n带换行 " },
+    { text: "   " }, // 纯空白：跳过
+  ]);
+  ok(out.startsWith(md), "原文保持在前", out);
+  ok(out.includes("## 划线摘录"), "摘录区块标题", out);
+  ok(out.includes("> 第一条标注"), "引用块格式", out);
+  ok(out.includes("> 第二条 带换行"), "换行折叠为空格", out);
+  ok(!/第三条/.test(out), "纯空白条目跳过", out);
+  eq(ADL.appendHighlights(md, []), md, "空标注 → 原文不变");
+  eq(ADL.appendHighlights(md, null), md, "null → 原文不变");
+}
 // ---------------------------------------------------------------- 汇总
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
