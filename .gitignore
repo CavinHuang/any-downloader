@@ -14,3 +14,6 @@ anything-downloader-extension.zip
 
 # Windows redirect artifact
 nul
+
+# ZCode 本地会话目录
+.zcode/
