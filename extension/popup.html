@@ -3,55 +3,56 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>网页收集室 · Anything</title>
+  <title>Anything Downloader · 浏览器下载</title>
   <link rel="stylesheet" href="studio.css" />
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
   <header class="popup-header">
-    <div class="brand"><img class="brand-mark" src="icons/128.png" alt="" aria-hidden="true"><span>anything<span class="brand-period">.</span></span></div>
+    <div class="brand"><span class="brand-icon" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg></span><span class="brand-name">Anything<span>Downloader</span></span></div>
     <span class="header-spacer"></span>
     <button id="status" class="pill" aria-controls="offline-guide" aria-expanded="false">连接中</button>
     <button id="btn-sync" class="icon-btn" title="文章工作台" aria-label="打开文章工作台"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h5"/></svg></button>
-    <button id="btn-settings" class="icon-btn" title="收集偏好" aria-label="收集偏好" aria-controls="settings" aria-expanded="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></button>
+    <button id="btn-settings" class="icon-btn" title="扩展设置" aria-label="扩展设置" aria-controls="settings" aria-expanded="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></button>
   </header>
 
   <div id="offline-guide" class="offline-guide hidden" role="region" aria-label="连接指引">
-    <b>让桌面收集室与浏览器相遇。</b>
+    <b>连接桌面应用后即可开始下载。</b>
     <ol><li>启动 Anything Downloader 桌面应用。</li><li>首次使用，请在桌面端完成浏览器连接授权。</li><li>授权后会自动重新连接；仍未连上时，可重启桌面应用。</li></ol>
   </div>
 
   <main id="popup-main">
-    <section class="popup-intro"><div class="eyebrow">A LITTLE FIND, WELL KEPT.</div><h1>把这一页，收好<span>。</span></h1><span id="page-source" title="当前页面">你的网页收集室</span></section>
-    <div class="pastebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="m10 7 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2m2 5 6-6"/></svg><input id="paste-input" type="text" placeholder="粘贴链接或分享口令…" aria-label="链接或分享口令" autofocus /><button id="paste-go" class="lime">收下链接 <span aria-hidden="true">↗</span></button></div>
+
+    <div class="pastebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="m10 7 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2m2 5 6-6"/></svg><input id="paste-input" type="text" placeholder="粘贴链接或分享口令…" aria-label="链接或分享口令" autofocus /><button id="paste-go" class="primary">下载</button></div>
     <div id="paste-result" role="status" aria-live="polite"></div>
 
-    <nav class="tabs2" aria-label="查看内容"><button id="tab-res" class="tab2 active" aria-pressed="true">本页发现 <span id="resource-count" class="tab-count">00</span></button><button id="tab-tasks" class="tab2" aria-pressed="false">传输现场 <span class="tab-arrow" aria-hidden="true">↗</span></button></nav>
+    <nav class="tabs2" aria-label="查看内容"><button id="tab-res" class="tab2 active" aria-pressed="true">网页资源 <span id="resource-count" class="tab-count">0</span></button><button id="tab-tasks" class="tab2" aria-pressed="false">下载任务 <span id="task-count" class="tab-count">0</span></button></nav>
 
     <section id="res-wrap" aria-label="本页资源">
+      <div class="page-context"><span>当前页面</span><span id="page-source" title="当前页面">正在读取…</span></div>
       <div class="filters" id="filters" role="group" aria-label="资源类型"></div>
-      <div class="resource-toolbar"><div id="tools"><button id="btn-scan" class="text-button">重新发现 <span aria-hidden="true">↻</span></button></div><div id="resource-tools"></div></div>
+      <div class="resource-toolbar"><div id="tools"><button id="btn-scan" class="text-button">重新扫描</button></div><div id="resource-tools"></div></div>
       <div id="scan-result" role="status" aria-live="polite"></div>
-      <div id="site-card" class="site-card hidden"><div class="site-row"><span class="site-marker" aria-hidden="true">✳</span><div class="site-info"><span id="site-name"></span><span id="site-counts"></span></div><button id="site-push">收好这一页 <span aria-hidden="true">↗</span></button></div></div>
-      <div id="batchbar" class="filters hidden" role="toolbar" aria-label="批量收集"><span class="batch-label">已选 <b id="sel-n">0</b> 项</span><button id="sel-cancel" class="chip-f">取消选择</button><button id="sel-push" class="chip-f push-all">收下选中</button></div>
-      <div id="collection-result" role="status" aria-live="polite"></div>
-      <div id="list"><div class="empty">正在寻找本页的好东西…</div></div>
+      <div id="site-card" class="site-card hidden"><div class="site-row"><span class="site-marker" aria-hidden="true">↓</span><div class="site-info"><span id="site-name"></span><span id="site-counts"></span></div><button id="site-push">下载页面资源</button></div></div>
+      <div id="batchbar" class="filters hidden" role="toolbar" aria-label="批量下载"><span class="batch-label">已选 <b id="sel-n">0</b> 项</span><button id="sel-cancel" class="chip-f">取消选择</button><button id="sel-push" class="chip-f push-all">下载选中</button></div>
+      <div id="download-result" role="status" aria-live="polite"></div>
+      <div id="list"><div class="empty">正在读取可下载资源…</div></div>
     </section>
-    <section id="tasks" class="hidden" aria-label="主程序任务"><div id="tasks-stats"></div><div id="task-list"><div class="empty">正在读取传输记录…</div></div></section>
+    <section id="tasks" class="hidden" aria-label="桌面下载任务"><div class="task-toolbar"><span>任务状态</span><select id="task-filter" aria-label="筛选下载任务"><option value="all">全部下载</option><option value="active">正在下载</option><option value="queued">排队与重试</option><option value="paused">已暂停</option><option value="done">已完成</option><option value="failed">下载失败</option><option value="canceled">已取消</option></select></div><div id="tasks-stats" role="status"></div><div id="task-result" role="status" aria-live="polite"></div><div id="task-list"><div class="empty">正在读取下载任务…</div></div></section>
   </main>
 
   <section id="settings" class="settings hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <div class="settings-header"><div><div class="eyebrow">MAKE ROOM FOR THE GOOD.</div><h2 id="settings-title">收集偏好</h2><p>少一点杂讯，多一点喜欢。</p></div><button id="btn-settings-close" class="icon-btn" aria-label="关闭收集偏好"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+    <div class="settings-header"><div><h2 id="settings-title">扩展设置</h2><p>设置资源检测、站点支持和网页下载按钮。</p></div><button id="btn-settings-close" class="icon-btn" aria-label="关闭扩展设置"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
     <div class="settings-scroll">
-      <div class="set-title"><span>01</span> 想留下什么</div><div class="settings-grid"><label><input type="checkbox" data-type="video" /> 视频与流媒体</label><label><input type="checkbox" data-type="audio" /> 音乐与声音</label><label><input type="checkbox" data-type="archive" /> 压缩文件</label><label><input type="checkbox" data-type="doc" /> 文档与阅读</label><label><input type="checkbox" data-type="binary" /> 软件与应用</label><label><input type="checkbox" data-type="image" /> 图片与照片</label></div>
-      <div class="set-title"><span>02</span> 在这些地方发现</div><div class="settings-grid"><label><input type="checkbox" data-adapter="douyin" /> 抖音</label><label><input type="checkbox" data-adapter="xhs" /> 小红书</label><label><input type="checkbox" data-adapter="x" /> X / Twitter</label><label><input type="checkbox" data-adapter="wechat-article" /> 微信文章图片</label><label><input type="checkbox" data-adapter="channels" /> 微信视频号</label><label><input type="checkbox" data-adapter="articles" /> 文章站点</label></div>
-      <div class="set-title"><span>03</span> 筛掉小小的干扰</div><div class="minimum-size"><label for="set-minsize">最小文件大小<span>不限制流媒体资源</span></label><input type="number" id="set-minsize" min="0" step="0.1" /><span>MB</span></div>
-      <div class="set-title"><span>04</span> 视频上的小浮标</div><div class="settings-grid"><label><input type="checkbox" id="set-video-overlay" /> 播放视频时显示下载按钮<span style="display:block;font-size:10px;opacity:.72">鼠标移入视频，右上角一键下载</span></label></div>
+      <div class="set-title">检测的资源类型</div><div class="settings-grid"><label><input type="checkbox" data-type="video" /> 视频与流媒体</label><label><input type="checkbox" data-type="audio" /> 音频</label><label><input type="checkbox" data-type="archive" /> 压缩文件</label><label><input type="checkbox" data-type="doc" /> 文档</label><label><input type="checkbox" data-type="binary" /> 软件</label><label><input type="checkbox" data-type="image" /> 图片</label></div>
+      <div class="set-title">站点适配器</div><div class="settings-grid"><label><input type="checkbox" data-adapter="douyin" /> 抖音</label><label><input type="checkbox" data-adapter="xhs" /> 小红书</label><label><input type="checkbox" data-adapter="x" /> X / Twitter</label><label><input type="checkbox" data-adapter="wechat-article" /> 微信文章图片</label><label><input type="checkbox" data-adapter="channels" /> 微信视频号</label><label><input type="checkbox" data-adapter="articles" /> 文章站点</label></div>
+      <div class="set-title">文件大小过滤</div><div class="minimum-size"><label for="set-minsize">最小文件大小<span>不限制流媒体资源</span></label><input type="number" id="set-minsize" min="0" step="0.1" /><span>MB</span></div>
+      <div class="set-title">视频下载按钮</div><div class="settings-grid full-width"><label><input type="checkbox" id="set-video-overlay" /><span>在视频上显示下载按钮<small>鼠标移入视频后，在右上角点击下载</small></span></label></div>
     </div>
-    <div class="settings-footer"><span class="connection-dot" aria-hidden="true"></span>修改即时保存，只影响扩展的资源发现。</div>
+    <div class="settings-footer"><span id="settings-feedback" role="status" aria-live="polite">修改自动保存，桌面端的下载设置不受影响。</span></div>
   </section>
 
-  <div id="popup-bottom"><div class="takeover"><label class="takeover-label"><span>自动接住浏览器下载<small>媒体、文档与压缩文件 ≥ 1MB</small></span><input type="checkbox" id="takeover" role="switch" aria-label="接管浏览器下载" /></label><div id="takeover-info"></div></div><footer><span>ANYTHING, WELL KEPT.</span><span>右键也能收下喜欢的。</span></footer></div>
+  <div id="popup-bottom"><div class="takeover"><label class="takeover-label"><span>接管浏览器下载<small>媒体、文档与压缩文件 ≥ 1MB</small></span><input type="checkbox" id="takeover" role="switch" aria-label="接管浏览器下载" /></label><div id="takeover-info"></div></div><footer><span>下载由桌面应用执行</span><span>支持右键链接下载</span></footer></div>
   <script src="popup.js"></script>
 </body>
 </html>

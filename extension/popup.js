@@ -3,6 +3,9 @@ const ERROR_TEXT = {
   app_not_running: "主程序未运行——请先启动桌面端",
   timeout: "主程序响应超时",
   invalid_params: "参数被拒绝",
+  unsupported_site: "暂不支持此分享链接，请尝试资源直链",
+  no_item: "未找到可下载内容",
+  no_link: "请输入 HTTP 或 HTTPS 链接或支持的分享口令",
   app_not_registered: "浏览器连接未授权——请打开桌面端完成连接授权后重试",
 };
 
@@ -50,7 +53,7 @@ function taskType(task) {
 }
 
 function emptyMarkup(title, note = "") {
-  return `<div class="empty"><svg width="86" height="54" viewBox="0 0 120 76" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="m17 42 12-24h62l12 24v24H17z"/><path d="M17 42h28l6 8h18l6-8h28"/><path d="M41 33V7h35v26"/><path d="M48 15h21M48 21h16"/><path d="M51 59h18"/></svg><strong>${escapeHtml(title)}</strong>${note ? `<p>${escapeHtml(note)}</p>` : ""}</div>`;
+  return `<div class="empty"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg><strong>${escapeHtml(title)}</strong>${note ? `<p>${escapeHtml(note)}</p>` : ""}</div>`;
 }
 
 function send(msg, timeoutMs = 5000) {
@@ -134,6 +137,8 @@ function resTypeGroup(type) {
 
 let resItems = [];
 let resFilter = "all";
+const downloadedResources = new Map();
+let batchBusy = false;
 const selected = new Set(); // 选中资源 url 集合
 
 // 嗅探配置（与 background 共享 storage.local.sniffCfg）
@@ -200,7 +205,7 @@ function renderFilters() {
   el.innerHTML = "";
   const tools = document.getElementById("resource-tools");
   tools.textContent = "";
-  document.getElementById("resource-count").textContent = String(resItems.length).padStart(2, "0");
+  document.getElementById("resource-count").textContent = String(resItems.length);
   const counts = { all: resItems.length };
   for (const item of resItems) {
     const g = resTypeGroup(item.type);
@@ -244,21 +249,9 @@ function renderFilters() {
     tools.append(sel);
     const pa = document.createElement("button");
     pa.className = "chip-f push-all";
-    pa.textContent = `全部收下 · ${pushable.length}`;
-    pa.addEventListener("click", async () => {
-      pa.disabled = true;
-      pa.textContent = "推送中…";
-      let ok = 0;
-      for (const item of pushable) {
-        const r = await pushTask(item.url, item.headers);
-        if (r.ok || r.error === "task_exists") ok += 1;
-      }
-      pa.textContent = `已推送 ${ok}/${pushable.length}`;
-      setTimeout(() => {
-        pa.disabled = false;
-        renderFilters();
-      }, 2000);
-    });
+    pa.textContent = `全部下载 · ${pushable.length}`;
+    pa.disabled = batchBusy;
+    pa.addEventListener("click", () => downloadResources(pushable));
     tools.append(pa);
   }
   updateBatchBar();
@@ -269,13 +262,13 @@ function renderResList() {
   if (!Array.isArray(resItems)) resItems = [];
   list.innerHTML = "";
   if (!resItems.length) {
-    list.innerHTML = emptyMarkup("好东西，值得等一等。", "试试播放媒体，再点「重新发现」。");
+    list.innerHTML = emptyMarkup("没有检测到可下载资源", "播放视频或音频后，点击「重新扫描」。");
     updateBatchBar();
     return;
   }
   const items = filteredRes().sort((a, b) => (b.bytes || 0) - (a.bytes || 0));
   if (!items.length) {
-    list.innerHTML = emptyMarkup("这里暂时还没有发现。", "换一种类型，看看还有什么。");
+    list.innerHTML = emptyMarkup("此类型下没有资源", "切换到「全部」查看其他资源。");
     updateBatchBar();
     return;
   }
@@ -329,17 +322,21 @@ function renderResItem(item) {
   const actions = document.createElement("div");
   actions.className = "actions";
   const btn = document.createElement("button");
-  btn.className = "collect-button";
+  btn.className = "download-button";
   if (item.type === "dash") {
     btn.disabled = true;
     btn.title = "DASH 暂不支持";
     btn.textContent = "–";
   } else {
-    btn.textContent = "收下 ↗";
+    const previous = downloadedResources.get(item.url);
+    btn.textContent = previous ? previous.error === "task_exists" ? "已存在" : previous.started ? "已开始" : "已添加" : "下载";
+    btn.disabled = !!previous;
+    if (previous) btn.className = "pushed";
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       btn.textContent = "…";
       const resp = await pushTask(item.url, item.headers);
+      if (resp?.ok || resp?.error === "task_exists") downloadedResources.set(item.url, resp);
       applyPushResult(div, btn, resp);
     });
   }
@@ -351,7 +348,11 @@ function renderResItem(item) {
       await navigator.clipboard.writeText(item.url);
       copy.textContent = "✓";
       setTimeout(() => (copy.textContent = "复制"), 1200);
-    } catch (_) {}
+    } catch (_) {
+      const feedback = document.getElementById("download-result");
+      feedback.textContent = "复制链接失败，请重试。";
+      feedback.className = "result-error";
+    }
   });
   actions.append(btn, copy);
   div.append(mid, actions);
@@ -368,8 +369,15 @@ function renderResItem(item) {
       vb.addEventListener("click", async () => {
         vb.disabled = true;
         const resp = await pushTask(v.url, item.headers);
-        vb.textContent = resp.ok ? "✓" : "×";
-        if (resp.ok) vb.classList.add("pushed");
+        const success = resp?.ok || resp?.error === "task_exists";
+        vb.textContent = success ? "已添加" : "重试";
+        vb.disabled = !!success;
+        if (success) vb.classList.add("pushed");
+        else {
+          const feedback = document.getElementById("download-result");
+          feedback.className = "result-error";
+          feedback.textContent = "下载失败：" + (ERROR_TEXT[resp?.error] || resp?.error || "未知错误");
+        }
       });
       vrow.append(vb);
     }
@@ -380,6 +388,13 @@ function renderResItem(item) {
 }
 
 function applyPushResult(div, btn, resp) {
+  div.querySelectorAll(".resource-error").forEach(error => error.remove());
+  if (resp?.error === "task_exists") {
+    btn.textContent = "已存在";
+    btn.className = "pushed";
+    btn.disabled = true;
+    return true;
+  }
   if (resp && resp.ok) {
     btn.textContent = resp.started ? "已开始" : "已创建";
     btn.className = "pushed";
@@ -392,8 +407,9 @@ function applyPushResult(div, btn, resp) {
     err.className = "warn-text";
     err.textContent = "该链接已有进行中的任务";
   } else {
-    err.textContent = "失败: " + (ERROR_TEXT[code] || code || "未知");
+    err.textContent = "下载失败：" + (ERROR_TEXT[code] || code || "未知");
   }
+  err.classList.add("resource-error");
   (div.querySelector(".mid") || div).append(err);
   btn.disabled = false;
   btn.textContent = "重试";
@@ -402,52 +418,52 @@ function applyPushResult(div, btn, resp) {
 
 // ---------------------------------------------------------------- 批量推送
 
-async function pushTask(url, headers) {
+async function pushTask(url, headers, filename) {
   try {
     return await send({
       type: "push",
-      rec: { url, headers: headers && Object.keys(headers).length ? headers : null },
+      rec: { url, filename, headers: headers && Object.keys(headers).length ? headers : null },
     });
   } catch (e) {
     return { ok: false, error: String(e && e.message) || "unknown" };
   }
 }
 
-async function pushSelected() {
-  const items = resItems.filter((x) => selected.has(x.url) && x.type !== "dash");
-  const btn = document.getElementById("sel-push");
-  btn.disabled = true;
-  btn.textContent = "推送中…";
-  let ok = 0;
-  let dup = 0;
-  let fail = 0;
-  for (const item of items) {
-    const r = await pushTask(item.url, item.headers);
-    if (r.ok) {
-      ok += 1;
-    } else if (r.error === "task_exists") {
-      dup += 1;
-      ok += 1;
-    } else {
-      fail += 1;
+async function downloadResources(items) {
+  if (batchBusy || items.length === 0) return;
+  batchBusy = true;
+  document.getElementById("sel-push").disabled = true;
+  document.getElementById("sel-push").textContent = "正在添加…";
+  renderFilters();
+  let ok = 0, duplicate = 0;
+  const failures = [];
+  try {
+    for (const item of items) {
+      const result = await pushTask(item.url, item.headers);
+      if (result?.ok || result?.error === "task_exists") {
+        if (result.error === "task_exists") duplicate += 1;
+        else ok += 1;
+        downloadedResources.set(item.url, result);
+        selected.delete(item.url);
+      } else {
+        failures.push(result?.error || "未知错误");
+      }
     }
+    const feedback = document.getElementById("download-result");
+    feedback.className = failures.length || duplicate ? "result-skip" : "result-ok";
+    feedback.textContent = `已添加 ${ok} 项 · 已存在 ${duplicate} 项 · 失败 ${failures.length} 项`;
+    if (failures.length) feedback.textContent += `：${ERROR_TEXT[failures[0]] || failures[0]}`;
+  } finally {
+    batchBusy = false;
+    document.getElementById("sel-push").disabled = false;
+    document.getElementById("sel-push").textContent = "下载选中";
+    renderFilters();
+    renderResList();
   }
-  selected.clear();
-  btn.disabled = false;
-  btn.textContent = "收下选中";
-  updateBatchBar();
-  renderResList();
-  const feedback = document.getElementById("collection-result");
-  const note = document.createElement("span");
-  note.className = fail > 0 ? "result-skip" : "result-ok";
-  note.style.fontSize = "11px";
-  // E4：ok 已含重复（dup），直接报 ok 并注明，不再做 ok-fail+dup 的重复计数
-  note.textContent =
-    fail > 0
-      ? `成功 ${ok}（含重复 ${dup}）· 失败 ${fail}`
-      : `已推送 ${ok} 项`;
-  feedback.replaceChildren(note);
-  setTimeout(() => note.remove(), 3000);
+}
+
+function pushSelected() {
+  return downloadResources(resItems.filter(x => selected.has(x.url) && x.type !== "dash"));
 }
 
 // ---------------------------------------------------------------- 主程序任务
@@ -464,7 +480,7 @@ const prevBytes = new Map();
 // E7/E2：状态 pill 随每轮轮询更新（不再只开窗检测一次）
 function setStatusPill(ok) {
   const el = document.getElementById("status");
-  el.textContent = ok ? "已连接" : "未运行";
+  el.textContent = ok ? "已连接" : "未连接";
   el.classList.toggle("ok", ok);
   el.classList.toggle("err", !ok);
   el.title = ok ? "主程序连接正常" : "主程序未连接，点击查看指引";
@@ -490,88 +506,109 @@ function computeSpeed(t) {
   return bps;
 }
 
+let taskFilter = "all";
+const pendingTaskOps = new Set();
+function matchesTaskFilter(task) {
+  if (taskFilter === "all") return true;
+  if (taskFilter === "active") return ACTIVE.includes(task.status);
+  if (taskFilter === "queued") return task.status === "queued" || task.status === "waiting_retry";
+  return task.status === taskFilter;
+}
+
+async function taskCommand(method, id) {
+  const result = await send({ type: "nm", method, params: { id } });
+  if (!result?.ok) throw new Error(ERROR_TEXT[result?.error] || result?.error?.message || result?.error?.code || result?.error || "操作失败，请重试");
+  return result;
+}
+
 function renderTask(t, bps) {
   const div = document.createElement("div");
   div.className = "item task-item";
+  div.dataset.taskId = t.id;
   const mid = document.createElement("div");
   mid.className = "mid";
   div.append(resourceIcon(taskType(t)), mid);
   const active = ACTIVE.includes(t.status);
-  const name = document.createElement("div");
-  name.className = "task-head";
-  name.innerHTML = `${statusTag(t.status)} <span class="name">${escapeHtml(displayName(t))}</span>`;
-  name.title = displayName(t);
-  mid.append(name);
+  const hasTotal = t.total_bytes != null && t.total_bytes > 0;
+  const pct = hasTotal ? t.status === "done" ? 100 : Math.min(100, Math.round(((t.downloaded_bytes || 0) / t.total_bytes) * 100)) : null;
+  const head = document.createElement("div");
+  head.className = "task-head";
+  head.innerHTML = `<span class="name">${escapeHtml(displayName(t))}</span><span class="task-status">${statusTag(t.status)}<span class="task-percent">${pct == null ? "" : pct + "%"}</span></span>`;
+  head.title = displayName(t);
+  mid.append(head);
 
-  if (t.total_bytes != null && t.total_bytes > 0) {
-    const pct =
-      t.status === "done"
-        ? 100
-        : Math.min(
-            100,
-            Math.round(((t.downloaded_bytes || 0) / t.total_bytes) * 100)
-          );
+  if (hasTotal || active) {
     const bar = document.createElement("div");
-    bar.className = "bar";
-    bar.innerHTML = `<div class="fill ${t.status === "done" ? "done" : t.status === "failed" ? "failed" : ""}" style="width:${pct}%"></div>`;
+    bar.className = "bar" + (!hasTotal ? " indet" : "");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", displayName(t) + " 下载进度");
+    if (hasTotal) {
+      bar.setAttribute("aria-valuenow", String(pct));
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+      bar.innerHTML = `<div class="fill ${t.status === "done" ? "done" : t.status === "failed" ? "failed" : t.status === "paused" ? "paused" : ""}" style="width:${pct}%"></div>`;
+    }
     mid.append(bar);
-    const row = document.createElement("div");
-    row.className = "task-meta";
-    const size = document.createElement("span");
-    size.className = "size";
-    size.textContent =
-      t.kind === "hls"
-        ? `${t.downloaded_bytes || 0}/${t.total_bytes} 分片`
-        : `${fmtBytes(t.downloaded_bytes || 0)} / ${fmtBytes(t.total_bytes)}`;
-    const speed = document.createElement("span");
-    speed.className = "speed";
-    speed.style.marginLeft = "auto";
-    speed.textContent = active && bps > 0 ? fmtSpeed(bps) : "";
-    row.append(size, speed);
-    mid.append(row);
   }
+  const row = document.createElement("div");
+  row.className = "task-meta";
+  const size = document.createElement("span");
+  size.className = "size";
+  const downloaded = t.status === "done" && hasTotal ? t.total_bytes : t.downloaded_bytes || 0;
+  size.textContent = t.kind === "hls"
+    ? `${downloaded}${hasTotal ? "/" + t.total_bytes : ""} 分片`
+    : `${fmtBytes(downloaded)}${hasTotal ? " / " + fmtBytes(t.total_bytes) : active ? " / 大小未知" : ""}`;
+  const speed = document.createElement("span");
+  speed.className = "speed";
+  speed.style.marginLeft = "auto";
+  speed.textContent = active && bps > 0 && t.kind !== "hls" ? fmtSpeed(bps) : "";
+  row.append(size, speed);
+  mid.append(row);
   if (t.status === "failed" && t.error) {
-    const err = document.createElement("div");
-    err.className = "error";
-    err.textContent = "错误: " + String(t.error.code ?? "");
-    mid.append(err);
+    const error = document.createElement("div");
+    error.className = "error";
+    error.textContent = "错误：" + String(t.error.message || t.error.code || "下载失败");
+    mid.append(error);
   }
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  const mk = (label, fn, primary) => {
-    const b = document.createElement("button");
-    if (primary) b.className = "primary";
-    b.textContent = label;
-    b.addEventListener("click", async () => {
+  const mk = (label, action, primary) => {
+    const button = document.createElement("button");
+    if (primary) button.className = "primary";
+    button.textContent = label;
+    button.dataset.action = label;
+    button.disabled = pendingTaskOps.has(t.id);
+    button.addEventListener("click", async () => {
+      if (pendingTaskOps.has(t.id)) return;
+      if (label === "打开" && /\.(exe|msi|apk|dmg)$/i.test(displayName(t)) && !window.confirm("即将打开可执行文件，请确认文件来源可信。")) return;
+      pendingTaskOps.add(t.id);
+      actions.querySelectorAll("button").forEach(control => control.disabled = true);
+      const feedback = document.getElementById("task-result");
       try {
-        await fn();
-      } catch (e) {
-        const err = document.createElement("div");
-        err.className = "error";
-        err.textContent = String(e);
-        div.append(err);
+        await action();
+        feedback.className = "";
+        feedback.textContent = `${label}：${displayName(t)}`;
+      } catch (error) {
+        feedback.className = "error";
+        feedback.textContent = `${label}失败：${String(error.message || error)}`;
+      } finally {
+        pendingTaskOps.delete(t.id);
+        await renderTasks();
       }
-      renderTasks();
     });
-    actions.append(b);
+    actions.append(button);
   };
   if (active) {
-    mk("暂停", () => send({ type: "nm", method: "task.pause", params: { id: t.id } }));
-    mk("取消", () => send({ type: "nm", method: "task.cancel", params: { id: t.id } }));
+    mk("暂停", () => taskCommand("task.pause", t.id));
+    mk("取消", () => taskCommand("task.cancel", t.id));
   } else if (t.status !== "done") {
-    mk(
-      t.status === "failed" || t.status === "canceled" ? "重试" : "开始",
-      async () => {
-        if (t.status === "failed" || t.status === "canceled") {
-          await send({ type: "nm", method: "task.retry", params: { id: t.id } });
-        }
-        await send({ type: "nm", method: "task.start", params: { id: t.id } });
-      },
-      true
-    );
+    mk(t.status === "failed" || t.status === "canceled" ? "重试" : "开始", async () => {
+      if (t.status === "failed" || t.status === "canceled") await taskCommand("task.retry", t.id);
+      await taskCommand("task.start", t.id);
+    }, true);
   } else {
-    mk("打开", () => send({ type: "nm", method: "task.open", params: { id: t.id } }));
+    mk("打开", () => taskCommand("task.open", t.id));
   }
   div.append(actions);
   return div;
@@ -606,9 +643,10 @@ async function renderTasks() {
   if (offlineMode) exitOffline();
   setStatusPill(true);
 
-  const tasks = resp.result || [];
+  const tasks = Array.isArray(resp.result) ? resp.result : [];
+  document.getElementById("task-count").textContent = String(tasks.length);
   const rank = (t) => (ACTIVE.includes(t.status) ? 0 : 1);
-  const sorted = tasks.sort(
+  const sorted = tasks.filter(matchesTaskFilter).sort(
     (a, b) => rank(a) - rank(b) || b.updated_at - a.updated_at
   );
   const shown = sorted.slice(0, 30);
@@ -617,10 +655,10 @@ async function renderTasks() {
   // E3：每任务每轮只算一次速度存入 Map，总速求和与卡片渲染共读一份
   //（原先 renderTask 内二次调用时 prev 刚更新、dt≈0，速度恒为 0）
   const speedMap = new Map();
-  const activeTasks = shown.filter((x) => ACTIVE.includes(x.status));
+  const activeTasks = tasks.filter((x) => ACTIVE.includes(x.status));
   let totalBps = 0;
   for (const t of activeTasks) {
-    const bps = computeSpeed(t);
+    const bps = t.kind === "hls" ? 0 : computeSpeed(t);
     speedMap.set(t.id, bps);
     totalBps += bps;
   }
@@ -629,14 +667,20 @@ async function renderTasks() {
       ? `${activeTasks.length} 个任务进行中 · 总速度 ${fmtSpeed(totalBps)}`
       : "无进行中的任务";
   if (truncated) stats.textContent += ` · 共 ${tasks.length} 条`;
+  stats.textContent += ` · 当前 ${sorted.length} 项`;
   stats.style.color = activeTasks.length ? "var(--accent-ink)" : "var(--muted)";
 
+  const focused = el.contains(document.activeElement) ? { id: document.activeElement.closest(".task-item")?.dataset.taskId, action: document.activeElement.dataset.action } : null;
   el.innerHTML = "";
   if (shown.length === 0) {
-    el.innerHTML = emptyMarkup("暂时安静，随时出发。", "收下一份新发现，它会在这里抵达。");
+    el.innerHTML = taskFilter === "all" ? emptyMarkup("还没有下载任务", "下载网页资源或粘贴链接后，在这里查看进度。") : emptyMarkup("此状态下没有任务", "切换到「全部下载」查看其他任务。");
     return;
   }
   for (const t of shown) el.append(renderTask(t, speedMap.get(t.id) || 0));
+  if (focused) {
+    const task = [...el.querySelectorAll(".task-item")].find(row => row.dataset.taskId === focused.id);
+    [...task?.querySelectorAll("button") || []].find(button => button.dataset.action === focused.action && !button.disabled)?.focus({ preventScroll: true });
+  }
   // E10：30 条截断出口（不新建打开主程序的通道，克制）
   if (truncated) {
     const trunc = document.createElement("div");
@@ -654,7 +698,7 @@ function renderOfflineState(stats, el) {
   // 导致零任务时掉线永远换不上离线提示
   if (el.querySelector("[data-offline]")) return;
   el.innerHTML =
-    '<div class="empty" data-offline="1">主程序未运行——启动后将自动恢复连接<br>' +
+    '<div class="empty" data-offline="1">桌面应用未连接，启动并授权后将自动重连<br>' +
     '<button id="btn-guide" class="chip-f" style="margin-top:8px">查看连接指引</button></div>';
   document
     .getElementById("btn-guide")
@@ -793,6 +837,23 @@ function setSettingsOpen(open) {
   (open ? document.getElementById("btn-settings-close") : trigger).focus();
 }
 
+async function savePreference(control, persist, rollback) {
+  const feedback = document.getElementById("settings-feedback");
+  control.disabled = true;
+  feedback.className = "";
+  feedback.textContent = "正在保存…";
+  try {
+    await persist();
+    feedback.textContent = "设置已保存。";
+  } catch (_) {
+    rollback();
+    feedback.className = "error";
+    feedback.textContent = "保存失败，已恢复原设置，请重试。";
+  } finally {
+    control.disabled = false;
+  }
+}
+
 function init() {
   // —— 静态控件接线（同步，最先执行；此后数据加载错误不影响按钮可用）
   const settingsEl = document.getElementById("settings");
@@ -801,9 +862,10 @@ function init() {
   takeover.addEventListener("change", async () => {
     takeover.disabled = true;
     try { await chrome.storage.local.set({ takeover: takeover.checked ? "on" : "off" }); }
-    catch { takeover.checked = !takeover.checked; document.getElementById("paste-result").textContent = "偏好未能保存，请重试。"; }
+    catch { takeover.checked = !takeover.checked; document.getElementById("paste-result").textContent = "设置保存失败，请重试。"; }
     finally { takeover.disabled = false; }
   });
+  document.getElementById("task-filter").addEventListener("change", event => { taskFilter = event.target.value; renderTasks(); });
   document.getElementById("tab-res").addEventListener("click", switchToRes);
   document.getElementById("tab-tasks").addEventListener("click", switchToTasks);
   document.getElementById("btn-sync").addEventListener("click", async () => {
@@ -826,7 +888,7 @@ function init() {
     try {
       const r = await send({ type: "scan-page", tabId: tab.id });
       btn.disabled = false;
-      btn.textContent = "重新发现 ↻";
+      btn.textContent = "重新扫描";
       if (r && r.ok) {
         note.textContent = `新增 ${r.added} 项（共 ${r.total}）`;
         if (r.blobVideos > 0) {
@@ -842,7 +904,7 @@ function init() {
       }
     } catch (e) {
       btn.disabled = false;
-      btn.textContent = "重新发现 ↻";
+      btn.textContent = "重新扫描";
       note.textContent = "扫描失败: " + e;
     }
     setTimeout(() => (note.textContent = ""), 4000);
@@ -873,15 +935,18 @@ function init() {
       const g = box.dataset.type;
       box.checked = CFG.types[g] !== false;
       box.addEventListener("change", async () => {
+        const previous = !box.checked;
         CFG.types[g] = box.checked;
-        await chrome.storage.local.set({ sniffCfg: CFG });
+        await savePreference(box, () => chrome.storage.local.set({ sniffCfg: CFG }), () => { CFG.types[g] = previous; box.checked = previous; });
       });
     }
     const minEl = document.getElementById("set-minsize");
     minEl.value = CFG.minSizeMB;
     minEl.addEventListener("change", async () => {
+      const previous = CFG.minSizeMB;
       CFG.minSizeMB = Math.max(0, Number(minEl.value) || 0);
-      await chrome.storage.local.set({ sniffCfg: CFG });
+      minEl.value = CFG.minSizeMB;
+      await savePreference(minEl, () => chrome.storage.local.set({ sniffCfg: CFG }), () => { CFG.minSizeMB = previous; minEl.value = previous; });
     });
 
     // —— 视频悬浮下载按钮开关（video-overlays.js 读同一配置即时生效）
@@ -889,8 +954,9 @@ function init() {
     if (voEl) {
       voEl.checked = CFG.videoOverlay;
       voEl.addEventListener("change", async () => {
+        const previous = CFG.videoOverlay;
         CFG.videoOverlay = voEl.checked;
-        await chrome.storage.local.set({ sniffCfg: CFG });
+        await savePreference(voEl, () => chrome.storage.local.set({ sniffCfg: CFG }), () => { CFG.videoOverlay = previous; voEl.checked = previous; });
       });
     }
 
@@ -901,10 +967,12 @@ function init() {
         const id = box.dataset.adapter;
         box.checked = !(adaptersCfg && adaptersCfg[id] === false);
         box.addEventListener("change", async () => {
-          const cur =
-            (await chrome.storage.local.get("adaptersCfg")).adaptersCfg || {};
-          cur[id] = box.checked;
-          await chrome.storage.local.set({ adaptersCfg: cur });
+          const previous = !box.checked;
+          await savePreference(box, async () => {
+            const current = (await chrome.storage.local.get("adaptersCfg")).adaptersCfg || {};
+            current[id] = box.checked;
+            await chrome.storage.local.set({ adaptersCfg: current });
+          }, () => { box.checked = previous; });
         });
       }
     } catch (_) {}
@@ -915,41 +983,53 @@ function init() {
   const pasteInput = document.getElementById("paste-input");
   const pasteNote = document.getElementById("paste-result");
   if (pasteGo && pasteInput) {
+    let busy = false;
+    pasteGo.disabled = !pasteInput.value.trim();
+    pasteInput.addEventListener("input", () => { pasteGo.disabled = busy || !pasteInput.value.trim(); });
     pasteGo.addEventListener("click", async () => {
       const text = pasteInput.value.trim();
-      if (!text) return;
+      if (!text || busy) return;
+      busy = true;
       pasteGo.disabled = true;
-      pasteNote.textContent = "解析中…";
+      pasteGo.textContent = "添加中…";
+      pasteNote.className = "";
+      pasteNote.textContent = "正在解析下载链接…";
       try {
-        const r = await send({ type: "adapter-resolve", link: text }, 15000);
-        if (!r || !r.ok || !r.resources || !r.resources.length) {
-          pasteNote.textContent =
-            "解析失败：" + ((r && r.error) || "未识别到可下载内容");
-        } else {
-          // 与 background adapterPush 同契约（core.js 转换器注释）：一键推送只推
-          // 非 optional —— 否则抖音分享解析会把同视频的多档画质副本重复推送
-          const list = r.resources.filter((x) => !x.optional);
-          let ok = 0;
-          for (const res of list) {
-            const pr = await send({
-              type: "push",
-              rec: { url: res.url, headers: res.headers, filename: res.filename },
-            });
-            if (pr && pr.ok) ok += 1;
-          }
-          pasteNote.textContent = `已推送 ${ok}/${list.length} 项到主程序`;
-          pasteInput.value = "";
+        let resolved = await send({ type: "adapter-resolve", link: text }, 15000);
+        // The share resolver handles supported sites. Plain HTTP(S) URLs go straight to the downloader.
+        if (resolved?.error === "unsupported_site") {
+          try {
+            const direct = new URL(text);
+            if (/^https?:$/.test(direct.protocol) && !/\s/.test(text)) resolved = { ok: true, resources: [{ url: direct.href }] };
+          } catch (_) {}
         }
-      } catch (e) {
-        pasteNote.textContent = "解析失败：" + e;
+        const resources = resolved?.ok && Array.isArray(resolved.resources) ? resolved.resources.filter(resource => !resource.optional) : [];
+        if (resources.length === 0) throw new Error(ERROR_TEXT[resolved?.error] || resolved?.error || "未识别到可下载内容");
+        let ok = 0, duplicate = 0;
+        const failures = [];
+        for (const resource of resources) {
+          const result = await pushTask(resource.url, resource.headers, resource.filename);
+          if (result?.ok) ok += 1;
+          else if (result?.error === "task_exists") duplicate += 1;
+          else failures.push(result?.error || "未知错误");
+        }
+        pasteNote.className = failures.length ? "warn" : "";
+        pasteNote.textContent = `已添加 ${ok} 项 · 已存在 ${duplicate} 项 · 失败 ${failures.length} 项`;
+        if (failures.length) pasteNote.textContent += `：${ERROR_TEXT[failures[0]] || failures[0]}`;
+        else pasteInput.value = "";
+        if (ok > 0) renderTasks();
+      } catch (error) {
+        pasteNote.className = "error";
+        pasteNote.textContent = "下载失败：" + String(error.message || error);
+      } finally {
+        busy = false;
+        pasteGo.disabled = !pasteInput.value.trim();
+        pasteGo.textContent = "下载";
       }
-      pasteGo.disabled = false;
-      setTimeout(() => (pasteNote.textContent = ""), 6000);
     });
-    pasteInput.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") pasteGo.click();
+    pasteInput.addEventListener("keydown", event => {
+      if (event.key === "Enter") { event.preventDefault(); pasteGo.click(); }
     });
-    // E6：popup 打开即聚焦头牌操作——粘贴框，省一步点击
     pasteInput.focus();
   }
 }
@@ -1063,17 +1143,23 @@ async function renderSiteCard(tabId) {
   push.replaceWith(fresh);
   fresh.addEventListener("click", async () => {
     fresh.disabled = true;
-    fresh.textContent = "推送中…";
+    fresh.textContent = "正在添加…";
+    const feedback = document.getElementById("download-result");
     try {
-      const pr = await send({ type: "adapter-push", tabId });
-      fresh.textContent = pr && pr.ok ? `已保存 ${pr.pushed} 项${pr.dir ? ` → ${pr.dir}/` : ""}` : "失败（主程序未运行？）";
-    } catch (e) {
-      fresh.textContent = "失败";
-    }
-    setTimeout(() => {
+      const result = await send({ type: "adapter-push", tabId });
+      if (!result?.ok) throw new Error(ERROR_TEXT[result?.error] || result?.error || "未能添加下载任务");
+      const partial = result.total && result.pushed < result.total;
+      fresh.textContent = partial ? "重试未完成资源" : "已添加下载任务";
+      feedback.className = partial ? "result-skip" : "result-ok";
+      feedback.textContent = `已添加 ${result.pushed}${result.total ? "/" + result.total : ""} 项${result.dir ? " · 保存目录：" + result.dir : ""}`;
+      fresh.disabled = !partial;
+      renderTasks();
+    } catch (error) {
       fresh.disabled = false;
-      fresh.textContent = "收好这一页 ↗";
-    }, 2500);
+      fresh.textContent = "重试下载";
+      feedback.className = "result-error";
+      feedback.textContent = "下载失败：" + String(error.message || error);
+    }
   });
   card.classList.remove("hidden");
 }
