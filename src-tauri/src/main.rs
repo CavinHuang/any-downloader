@@ -292,6 +292,7 @@ thread: {:?}
             commands::set_autostart,
             commands::open_logs_dir,
             commands::extension_bundle,
+            commands::search_content,
             commands::open_extension_dir,
             commands::open_extension_doc,
             commands::nm_registered,

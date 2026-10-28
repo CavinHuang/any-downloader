@@ -662,6 +662,15 @@ impl Engine {
         Ok(task)
     }
 
+    /// 收藏室全文搜索：文章任务正文（content_index 表），返回 (task_id, filename)。
+    pub async fn search_content(&self, query: &str) -> Res<Vec<dl_persist::ContentHit>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.search_content(q).await
+    }
+
     /// 内容任务上限（与 dl-ipc 请求帧上限一致；防御直连 IPC 的超大载荷）。
     pub const MAX_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 
@@ -791,6 +800,12 @@ impl Engine {
             proxy: None,
         };
         self.db.insert_task(task.clone()).await?;
+        // 正文全文索引（收藏室全文搜索；删除任务时随 tasks 行同删）
+        let title = task.filename.as_deref().unwrap_or("");
+        // 索引尽力而为：失败不影响已落盘的文章任务（搜索是辅助能力）
+        if let Err(e) = self.db.index_content(&task.id, title, &c.content).await {
+            tracing::warn!(task = %task.id, error = %e, "content index failed (search unavailable for this task)");
+        }
         // GUI 列表靠事件刷新；内容任务无状态迁移，直接广播终态
         self.emit(EngineEvent::StateChanged {
             task_id: task.id.clone(),
@@ -1308,6 +1323,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.kind, TaskKind::Hls);
+    }
+
+    #[tokio::test]
+    async fn content_task_indexes_full_text_for_search() {
+        let env = test_engine().await;
+        let out = tempfile::tempdir().unwrap();
+        let t = env
+            .engine
+            .create_content_task(CreateContentTask {
+                filename: "doc.md".into(),
+                mime: None,
+                content: "正文里藏着关键词青苹果，用于全文检索。".into(),
+                source_url: Some("https://example.com/a".into()),
+                dir: Some(out.path().display().to_string()),
+            })
+            .await
+            .unwrap();
+        let hits = env.engine.search_content("青苹果").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, t.id);
+        assert_eq!(hits[0].1.as_deref(), Some("doc.md"));
+        assert!(env
+            .engine
+            .search_content("不存在的词")
+            .await
+            .unwrap()
+            .is_empty());
+        // 删除任务 → 索引随删
+        env.engine.remove(&t.id).await.unwrap();
+        assert!(env
+            .engine
+            .search_content("青苹果")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

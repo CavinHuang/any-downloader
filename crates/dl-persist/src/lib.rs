@@ -155,6 +155,12 @@ fn migrate(conn: &Connection) -> Result<(), DownloadError> {
         conn.execute("ALTER TABLE tasks ADD COLUMN proxy TEXT", [])
             .map_err(sql_err)?;
     }
+    // 文章正文全文索引（收藏室全文搜索；kind=content 任务建索引，删任务同删）
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS content_index (task_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '')",
+        [],
+    )
+    .map_err(sql_err)?;
     Ok(())
 }
 
@@ -167,6 +173,9 @@ pub struct TaskSnapshot {
 }
 
 const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size";
+
+/// 全文检索命中：(task_id, filename)。
+pub type ContentHit = (String, Option<String>);
 
 enum Op {
     Snapshot {
@@ -208,6 +217,16 @@ enum Op {
         id: String,
         kind: String,
         tx: oneshot::Sender<Res<()>>,
+    },
+    IndexContent {
+        task_id: String,
+        title: String,
+        text: String,
+        tx: oneshot::Sender<Res<()>>,
+    },
+    SearchContent {
+        query: String,
+        tx: oneshot::Sender<Res<Vec<ContentHit>>>,
     },
     FindActiveByUrl {
         url: String,
@@ -393,6 +412,38 @@ impl Db {
             .send(Op::UpdateKind {
                 id: id.to_string(),
                 kind: kind.as_str().to_string(),
+                tx,
+            })
+            .map_err(|_| writer_gone())?;
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(writer_gone()),
+        }
+    }
+
+    /// 文章正文全文索引（收藏室全文搜索）。
+    pub async fn index_content(&self, task_id: &str, title: &str, text: &str) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::IndexContent {
+                task_id: task_id.to_string(),
+                title: title.to_string(),
+                text: text.to_string(),
+                tx,
+            })
+            .map_err(|_| writer_gone())?;
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(writer_gone()),
+        }
+    }
+
+    /// 全文检索：返回 (task_id, filename) 命中列表（≤50 条）。
+    pub async fn search_content(&self, query: &str) -> Res<Vec<ContentHit>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::SearchContent {
+                query: query.to_string(),
                 tx,
             })
             .map_err(|_| writer_gone())?;
@@ -621,6 +672,36 @@ fn writer_loop(conn: Connection, rx: Receiver<Op>) {
                     .map_err(sql_err);
                 let _ = tx.send(res);
             }
+            Op::IndexContent {
+                task_id,
+                title,
+                text,
+                tx,
+            } => {
+                let res = conn
+                    .execute(
+                        "INSERT OR REPLACE INTO content_index (task_id, title, text) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![&task_id, &title, &text],
+                    )
+                    .map(|_| ())
+                    .map_err(sql_err);
+                let _ = tx.send(res);
+            }
+            Op::SearchContent { query, tx } => {
+                let pattern = format!("%{}%", query.replace(['%', '_'], ""));
+                let res = conn
+                    .prepare(
+                        "SELECT ci.task_id, t.filename FROM content_index ci LEFT JOIN tasks t ON t.id = ci.task_id WHERE ci.text LIKE ?1 OR ci.title LIKE ?1 LIMIT 50",
+                    )
+                    .and_then(|mut stmt| {
+                        stmt.query_map([&pattern], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                        })
+                        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                    })
+                    .map_err(sql_err);
+                let _ = tx.send(res);
+            }
             Op::UpdateDownloaded { id, bytes, tx } => {
                 let res = conn
                     .execute(
@@ -741,6 +822,9 @@ fn writer_loop(conn: Connection, rx: Receiver<Op>) {
                     .execute("DELETE FROM tasks WHERE id = ?1", [&id])
                     .map(|n| n > 0)
                     .map_err(sql_err);
+                if *res.as_ref().unwrap_or(&false) {
+                    let _ = conn.execute("DELETE FROM content_index WHERE task_id = ?1", [&id]);
+                }
                 let _ = tx.send(res);
             }
         }

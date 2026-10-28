@@ -166,6 +166,8 @@ export const api = {
   exportTasks: (path: string) => invoke<number>("export_tasks", { path }),
   importTasks: (path: string) => invoke<number>("import_tasks", { path }),
   probeUrl: (url: string) => invoke<ProbeInfo>("probe_url", { url }),
+  searchContent: (query: string) =>
+    invoke<{ id: string; filename: string | null }[]>("search_content", { query }),
   sniffStatus: () => invoke<SniffStatus>("sniff_status"),
   sniffSetEnabled: (on: boolean) =>
     invoke<{ ok: boolean; enabled: boolean }>("sniff_set_enabled", { on }),

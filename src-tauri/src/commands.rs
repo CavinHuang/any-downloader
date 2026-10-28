@@ -80,6 +80,23 @@ pub async fn set_priority(
         .map_err(str_err)
 }
 
+/// 收藏室全文搜索：文章任务正文命中（返回 id + 文件名，≤50 条）。
+#[tauri::command]
+pub async fn search_content(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let hits = state
+        .engine
+        .search_content(query.trim())
+        .await
+        .map_err(str_err)?;
+    Ok(hits
+        .into_iter()
+        .map(|(id, filename)| serde_json::json!({ "id": id, "filename": filename }))
+        .collect())
+}
+
 /// 删除任务（运行中任务需先取消/暂停）。
 #[tauri::command]
 pub async fn remove_task(state: State<'_, AppState>, id: String) -> Result<bool, String> {

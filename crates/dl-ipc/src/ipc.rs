@@ -192,6 +192,25 @@ pub(crate) async fn dispatch(engine: &Engine, req: Request) -> Response {
             Ok(c) => task_response(req.id, engine.create_content_task(c).await),
             Err(e) => bad_params(req.id, e),
         },
+        // 收藏室全文搜索（扩展/CLI 共用）：{ query } → { hits: [{id, filename}] }
+        "search_content" => {
+            let q = req
+                .params
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            match engine.search_content(&q).await {
+                Ok(hits) => {
+                    let items: Vec<serde_json::Value> = hits
+                        .into_iter()
+                        .map(|(id, filename)| serde_json::json!({ "id": id, "filename": filename }))
+                        .collect();
+                    Response::ok(req.id, serde_json::json!({ "hits": items }))
+                }
+                Err(e) => Response::err(req.id, &e),
+            }
+        }
         "settings.get" => {
             // 白名单暴露：扩展只需要下载根目录与归类开关（文章合集目录拼接用），
             // 其余设置（代理/限速/密钥类）不经 NM 通道外泄
