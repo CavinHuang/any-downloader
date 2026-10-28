@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 
-export type IconName = "plus" | "arrow" | "download" | "search" | "settings" | "import" | "export" | "grid" | "video" | "audio" | "archive" | "doc" | "software" | "image" | "other" | "pause" | "play" | "check" | "retry" | "close" | "folder" | "more" | "link";
+export type IconName = "plus" | "arrow" | "download" | "search" | "settings" | "import" | "export" | "grid" | "video" | "audio" | "archive" | "doc" | "software" | "image" | "other" | "pause" | "play" | "check" | "retry" | "close" | "folder" | "more" | "link" | "radar";
 
 const paths: Record<IconName, React.ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
@@ -26,6 +26,7 @@ const paths: Record<IconName, React.ReactNode> = {
   folder: <path d="M3 7V4h7l2 3h9v13H3zM3 10h18" />,
   more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
   link: <><path d="m10 7 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2m2 5 6-6" /></>,
+  radar: <><circle cx="12" cy="12" r="2.2" /><path d="M12 6.5a5.5 5.5 0 0 1 5.5 5.5M12 2.5a9.5 9.5 0 0 1 9.5 9.5" /><path d="M12 6.5A5.5 5.5 0 0 0 6.5 12M12 2.5A9.5 9.5 0 0 0 2.5 12" /></>,
 };
 
 export function Icon({ name, size = 18, style }: { name: IconName; size?: number; style?: CSSProperties }) {

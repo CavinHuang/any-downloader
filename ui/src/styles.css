@@ -415,3 +415,15 @@ code { font: 11px/1.6 Consolas, monospace; }
   word-break: break-all;
 }
 .ext-path-missing { font-size: var(--fs-sm); color: var(--err-ink); }
+
+/* 桌面嗅探抽屉（SniffPanel） */
+.sniff-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin: 10px 0 4px; line-height: 1.7; }
+.sniff-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ok-ink, #3f7d46); }
+.sniff-dot.off { background: var(--muted); }
+.sniff-empty { color: var(--muted); font-size: 13px; line-height: 1.9; padding: 26px 4px; }
+.sniff-item { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--border-soft, var(--border)); }
+.sniff-item .t1 { display: flex; gap: 8px; align-items: center; font-size: 13px; min-width: 0; }
+.sniff-item .t1 svg { flex: none; color: var(--muted); }
+.sniff-item .meta { font-size: 11px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.sniff-item .ops { display: flex; gap: 8px; align-items: center; }
+.sniff-tag { font-size: 10px; color: var(--accent, #47644d); border: 1px solid var(--border-soft, var(--border)); border-radius: 4px; padding: 1px 5px; }

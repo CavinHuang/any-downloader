@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { api, isActive, listenEngineEvents, Task, TaskStatus } from "./api";
+import { api, isActive, listenEngineEvents, listenSniffEvents, Task, TaskStatus } from "./api";
 
 // 剪贴板事件监听（复用 tauri event 通道）
 function listenEngineEventsClip(cb: (url: string) => void) {
@@ -19,6 +19,7 @@ import {
 import { AddDialog } from "./components/AddDialog";
 import { DetailDrawer } from "./components/DetailDrawer";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { SniffPanel } from "./components/SniffPanel";
 import { TaskRow } from "./components/TaskRow";
 import { store } from "./store";
 import { CATEGORIES, categoryOf, Category } from "./fileTypes";
@@ -61,6 +62,10 @@ export function App() {
   const [search, setSearch] = useState("");
   const [inTauri] = useState(() => "__TAURI_INTERNALS__" in window);
   const [totalBps, setTotalBps] = useState(0);
+
+  // 桌面嗅探：入口角标计数 + 抽屉开关（条目列表在 SniffPanel 内自持）
+  const [sniffOpen, setSniffOpen] = useState(false);
+  const [sniffCount, setSniffCount] = useState(0);
   const [clipUrl, setClipUrl] = useState<string | null>(null);
   const [clipBusy, setClipBusy] = useState(false);
   const seenClips = useRef(new Set<string>());
@@ -94,6 +99,19 @@ export function App() {
     const timer = window.setTimeout(() => setSkeletonOn(true), 300); // 防毫秒级 IPC 闪烁
     return () => window.clearTimeout(timer);
   }, [firstLoad]);
+
+  // 桌面嗅探新条目：masthead 角标 + 轻提示（列表本体在 SniffPanel 里维护）
+  useEffect(() => {
+    if (!inTauri) return;
+    const un = listenSniffEvents((ev) => {
+      if (ev.type !== "item") return;
+      setSniffCount((n) => n + 1);
+      showToast(t("sniffNewToast").replace("{t}", (ev.item.title || ev.item.url).slice(0, 60)), "info");
+    }).catch(() => () => {});
+    return () => {
+      un.then((f) => f());
+    };
+  }, [inTauri]);
 
   useEffect(() => {
     if (!inTauri) return;
@@ -174,7 +192,8 @@ export function App() {
         (catFilter === "all" || categoryOf(x) === catFilter) &&
         (q === "" ||
           x.url.toLowerCase().includes(q) ||
-          (x.filename ?? "").toLowerCase().includes(q))
+          (x.filename ?? "").toLowerCase().includes(q) ||
+          contentHits.has(x.id))
     );
     if (!sortKey) return out;
     const nameOf = (x: Task) => x.filename ?? x.url;
@@ -185,7 +204,7 @@ export function App() {
       else r = (store.liveOf(a.id)?.bps ?? 0) - (store.liveOf(b.id)?.bps ?? 0);
       return r * sortDir;
     });
-  }, [tasks, filter, catFilter, search, sortKey, sortDir, speedRevision]);
+  }, [tasks, filter, catFilter, search, contentHits, sortKey, sortDir, speedRevision]);
 
   // —— 批量选择：筛选/搜索/数据变化后剪除已不在当前列表的选中项
   //（删除任务后随之自动清空，无需专门处理）——
@@ -463,6 +482,20 @@ export function App() {
           <span className="action-divider" />
           <button
             className="icon-button"
+            title={t("sniffPanel")}
+            aria-label={t("sniffPanel")}
+            onClick={() => {
+              if (requireDesktop()) {
+                setSniffCount(0);
+                setSniffOpen(true);
+              }
+            }}
+          >
+            <Icon name="radar" />
+            {sniffCount > 0 && <span className="update-dot" aria-hidden="true" />}
+          </button>
+          <button
+            className="icon-button"
             title={updateTooltip}
             aria-label={t("settings")}
             onClick={() => requireDesktop() && setShowSettings(true)}
@@ -577,6 +610,7 @@ export function App() {
       <div className="toast-stack">{toasts.map(x => <div key={x.id} className={`banner toast ${x.kind}`} role={x.kind === "error" ? "alert" : "status"}><span className="banner-text">{x.text}</span><button className="banner-close" aria-label={t("close")} onClick={() => dismissToast(x.id)}>×</button></div>)}</div>
       {showAdd && <AddDialog initialUrls={draftUrl} desktopAvailable={inTauri} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); setDraftUrl(""); store.refresh(); }} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {sniffOpen && <SniffPanel onClose={() => setSniffOpen(false)} />}
       {detailId && detailTask && <DetailDrawer key={detailTask.id} task={detailTask} onClose={() => setDetailId(null)} onChanged={nt => store.upsert(nt)} onRemoved={() => { setDetailId(null); store.refresh(); }} />}
     </div>
   );

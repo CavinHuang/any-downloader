@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
-import { api, RemoteStatus, Settings } from "../api";
+import { api, RemoteStatus, Settings, SniffStatus } from "../api";
 import { t } from "../i18n";
 import {
   checkForUpdate,
@@ -64,6 +64,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [nmOk, setNmOk] = useState<boolean | null>(null);
   const [remote, setRemote] = useState<RemoteStatus | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
+  // 桌面嗅探（独立生命周期，不走 SAVE_KEYS 保存流——开关即生效）
+  const [sniff, setSniff] = useState<SniffStatus | null>(null);
+  const [sniffBusy, setSniffBusy] = useState(false);
+  const [sniffErr, setSniffErr] = useState<string | null>(null);
   const [invalid, setInvalid] = useState<Record<string, boolean>>({});
   const [extOpen, setExtOpen] = useState(false);
   // dirty 基线（§3.6）：载入值；保存成功后基线重置为已保存值
@@ -81,7 +85,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       getVersion().catch(() => ""),
       api.nmRegistered().catch(() => null as boolean | null),
       api.remoteStatus().catch(() => null),
-    ]).then(([v, auto, ver, nm, rm]) => {
+      api.sniffStatus().catch(() => null),
+    ]).then(([v, auto, ver, nm, rm, sn]) => {
       const clip = v.clipboard_monitor !== "off";
       const done = v.after_done || "none";
       setS(v);
@@ -92,6 +97,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       setVersion(ver);
       setNmOk(nm);
       setRemote(rm);
+      setSniff(sn);
       setBaseline(snapshotOf(v, clip, done, auto));
     }).catch(e => setSaveError(String(e)));
   }, []);
@@ -472,7 +478,79 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {t("extInstallBtn")}
           </button>
         </div>
-        <div className="form-section-title">05 / {t("updateSection")}</div>
+        <div className="form-section-title">05 / {t("sniffSection")}</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={!!sniff?.enabled}
+            disabled={sniffBusy}
+            onChange={async (e) => {
+              setSniffBusy(true);
+              setSniffErr(null);
+              try {
+                await api.sniffSetEnabled(e.target.checked);
+                setSniff(await api.sniffStatus());
+              } catch (err) {
+                setSniffErr(String(err).includes("cert_missing") ? t("sniffNeedCert") : String(err));
+              } finally {
+                setSniffBusy(false);
+              }
+            }}
+          />
+          {t("sniffToggle")}
+        </label>
+        <p style={{ fontSize: 12, color: "var(--muted)", margin: "2px 0 10px", lineHeight: 1.7 }}>{t("sniffHint")}</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12 }}>
+            {sniff?.certInstalled ? (
+              <span style={{ color: "var(--ok-ink)" }}>{t("sniffCertOk")}</span>
+            ) : (
+              <span style={{ color: "var(--err-ink)" }}>{t("sniffCertMissing")}</span>
+            )}
+          </span>
+          {!sniff?.certInstalled && (
+            <button
+              className="text-button"
+              disabled={sniffBusy}
+              onClick={async () => {
+                setSniffBusy(true);
+                setSniffErr(null);
+                try {
+                  await api.sniffCertInstall();
+                  setSniff(await api.sniffStatus());
+                } catch (err) {
+                  setSniffErr(String(err));
+                } finally {
+                  setSniffBusy(false);
+                }
+              }}
+            >
+              {sniffBusy ? t("sniffCertBusy") : t("sniffCertInstall")}
+            </button>
+          )}
+          {sniff?.certInstalled && (
+            <button
+              className="text-button"
+              disabled={sniffBusy}
+              onClick={async () => {
+                setSniffBusy(true);
+                try {
+                  await api.sniffCertUninstall();
+                  setSniff(await api.sniffStatus());
+                } catch (err) {
+                  setSniffErr(String(err));
+                } finally {
+                  setSniffBusy(false);
+                }
+              }}
+            >
+              {t("sniffCertUninstall")}
+            </button>
+          )}
+        </div>
+        {sniffErr && <div className="error">{sniffErr}</div>}
+        <div className="form-section-title">06 / {t("updateSection")}</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <input
             type="checkbox"

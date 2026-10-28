@@ -87,6 +87,26 @@ export interface Settings {
   yt_dlp_cookies: string | null;
 }
 
+export interface SniffedItem {
+  id: string;
+  url: string;
+  app: string;
+  headers: Record<string, string> | null;
+  bytes: number | null;
+  seed: string | null;
+  title: string | null;
+  at: number;
+}
+
+export interface SniffStatus {
+  enabled: boolean;
+  certInstalled: boolean;
+  port: number | null;
+  items: SniffedItem[];
+}
+
+export type SniffEvent = { type: "item"; item: SniffedItem };
+
 export interface RemoteStatus {
   enabled: boolean;
   port: number;
@@ -146,6 +166,17 @@ export const api = {
   exportTasks: (path: string) => invoke<number>("export_tasks", { path }),
   importTasks: (path: string) => invoke<number>("import_tasks", { path }),
   probeUrl: (url: string) => invoke<ProbeInfo>("probe_url", { url }),
+  sniffStatus: () => invoke<SniffStatus>("sniff_status"),
+  sniffSetEnabled: (on: boolean) =>
+    invoke<{ ok: boolean; enabled: boolean }>("sniff_set_enabled", { on }),
+  sniffCertInstall: () => invoke<{ ok: boolean }>("sniff_cert_install"),
+  sniffCertUninstall: () => invoke<{ ok: boolean }>("sniff_cert_uninstall"),
+  sniffList: () => invoke<SniffedItem[]>("sniff_list"),
+  sniffClear: () => invoke<{ ok: boolean }>("sniff_clear"),
+  sniffDownload: (id: string) =>
+    invoke<{ ok: boolean; taskId: string }>("sniff_download", { id }),
+  sniffOverlayDownload: () =>
+    invoke<{ ok: boolean; taskId: string; url: string }>("sniff_overlay_download"),
   remoteStatus: () => invoke<RemoteStatus>("remote_status"),
   setRemoteEnabled: (on: boolean) => invoke<RemoteStatus>("set_remote_enabled", { on }),
 };
@@ -154,4 +185,10 @@ export function listenEngineEvents(
   cb: (ev: EngineEvent) => void
 ): Promise<() => void> {
   return listen<EngineEvent>("engine-event", (e) => cb(e.payload));
+}
+
+export function listenSniffEvents(
+  cb: (ev: SniffEvent) => void
+): Promise<() => void> {
+  return listen<SniffEvent>("sniff-event", (e) => cb(e.payload));
 }
