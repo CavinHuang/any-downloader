@@ -100,7 +100,10 @@ fn client_with(proxy_port: u16, extra_roots: &[String]) -> reqwest::Client {
 
 #[tokio::test]
 async fn mitm_captures_media_and_pairs_key() {
-    let _ = tracing_subscriber::fmt().with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG).with_target(false).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
+        .with_target(false)
+        .try_init();
     let tmp = tempfile::tempdir().unwrap();
     let (origin, _origin_pem) = spawn_origin("finder.video.qq.com").await;
 
@@ -137,12 +140,20 @@ async fn mitm_captures_media_and_pairs_key() {
     assert_eq!(&bytes[..11], b"FAKEMP4BODY");
 
     let items = capture.items();
-    assert_eq!(items.len(), 1, "同 URL 去重后 1 条: {:?}", items.iter().map(|i| &i.url).collect::<Vec<_>>());
+    assert_eq!(
+        items.len(),
+        1,
+        "同 URL 去重后 1 条: {:?}",
+        items.iter().map(|i| &i.url).collect::<Vec<_>>()
+    );
     let it = &items[0];
     assert_eq!(it.url, "https://finder.video.qq.com/media/v.mp4?sig=1");
     assert_eq!(it.seed.as_deref(), Some("2136343393"), "decode_key 配对");
     assert_eq!(it.bytes, Some(22));
-    assert_eq!(it.headers.get("referer").map(|s| s.as_str()), Some("https://finder.video.qq.com/"));
+    assert_eq!(
+        it.headers.get("referer").map(|s| s.as_str()),
+        Some("https://finder.video.qq.com/")
+    );
     assert_eq!(it.app, "wechat");
     svc.stop();
 }
@@ -162,7 +173,11 @@ async fn passthrough_does_not_capture() {
 
     // 透传：客户端直信源站证书（若被解密会因不信任 MITM CA 而失败）
     let client = client_with(svc.port, &[origin_pem, ca_pem]);
-    let resp = client.get("https://example.org/media/v.mp4").send().await.unwrap();
+    let resp = client
+        .get("https://example.org/media/v.mp4")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.bytes().await.unwrap().len(), 22);
     assert!(capture.items().is_empty(), "非白名单域不产生条目");
@@ -176,7 +191,10 @@ async fn ca_persists_across_restart() {
     // ECDSA 自签随机化 → PEM 字节可不同；关键保证是「重启后签的叶子仍能被
     // 已安装的原 CA 证书校验」（Subject/公钥/SKI 一致）。以 rustls 握手验证。
     let b = dl_sniff::ca::SniffCa::load_or_create(&tmp.path().join("sniff")).unwrap();
-    assert!(handshake_ok(&a, &b).await, "A 签的叶子须通过 B(=已装信任) 的校验");
+    assert!(
+        handshake_ok(&a, &b).await,
+        "A 签的叶子须通过 B(=已装信任) 的校验"
+    );
     assert!(handshake_ok(&b, &a).await, "对称方向同样成立");
 }
 
@@ -199,8 +217,8 @@ async fn handshake_ok(server: &dl_sniff::ca::SniffCa, root_of: &dl_sniff::ca::Sn
         .with_root_certificates(roots)
         .with_no_client_auth();
     let conn = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let dns = tokio_rustls::rustls::pki_types::ServerName::try_from("probe.example".to_string())
-        .unwrap();
+    let dns =
+        tokio_rustls::rustls::pki_types::ServerName::try_from("probe.example".to_string()).unwrap();
     let ok = tokio_rustls::TlsConnector::from(Arc::new(client_cfg))
         .connect(dns, conn)
         .await

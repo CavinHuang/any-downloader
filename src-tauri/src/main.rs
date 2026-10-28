@@ -5,9 +5,14 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod cert;
 mod commands;
 mod nm;
 mod schedule;
+mod sniff;
+#[cfg(windows)]
+mod sysproxy;
 mod ytdlp_update;
 
 use dl_engine::Engine;
@@ -205,6 +210,16 @@ thread: {:?}
 
             app.manage(AppState { engine });
 
+            // 桌面嗅探（视频号）：崩溃恢复 PAC + 按设置自启 + 条目事件泵
+            {
+                let sniff_state = std::sync::Arc::new(sniff::SniffState::new());
+                app.manage(sniff_state.clone());
+                let app_state = AppState {
+                    engine: app.state::<AppState>().engine.clone(),
+                };
+                sniff::bootstrap(&handle, sniff_state, app_state);
+            }
+
             // 托盘：左键/菜单恢复窗口，菜单退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -221,6 +236,8 @@ thread: {:?}
                         if n > 0 {
                             std::thread::sleep(std::time::Duration::from_millis(800));
                         }
+                        // 桌面嗅探退出清理（还原系统 PAC）
+                        sniff::shutdown_cleanup(&app.state::<sniff::SniffState>());
                         app.exit(0);
                     }
                     _ => {}
@@ -277,6 +294,14 @@ thread: {:?}
             commands::rename_task,
             commands::remote_status,
             commands::set_remote_enabled,
+            sniff::sniff_status,
+            sniff::sniff_set_enabled,
+            sniff::sniff_cert_install,
+            sniff::sniff_cert_uninstall,
+            sniff::sniff_list,
+            sniff::sniff_clear,
+            sniff::sniff_download,
+            sniff::sniff_overlay_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

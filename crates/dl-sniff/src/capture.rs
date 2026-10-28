@@ -72,7 +72,12 @@ pub struct Capture {
 impl Capture {
     pub fn new(cap: usize) -> Self {
         let (tx, _) = broadcast::channel(64);
-        Self { items: Mutex::new(VecDeque::new()), keys: Mutex::new(Keys::default()), tx, cap: cap.max(4) }
+        Self {
+            items: Mutex::new(VecDeque::new()),
+            keys: Mutex::new(Keys::default()),
+            tx,
+            cap: cap.max(4),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SniffedItem> {
@@ -163,7 +168,13 @@ impl Capture {
 /// 媒体直链形态：finder CDN 的 .mp4（扩展名判断与浏览器嗅探 EXT_TYPE 一致；
 /// query 参数不影响）。
 pub fn is_media_url(url: &str) -> bool {
-    let path = url.split('#').next().unwrap_or("").split('?').next().unwrap_or("");
+    let path = url
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("");
     path.ends_with(".mp4") || path.ends_with(".m3u8")
 }
 
@@ -176,7 +187,11 @@ pub struct ApiScan {
 /// 在 finder API JSON 里深挖 decode_key / 媒体 URL / 标题。
 /// 递归遍历对象与数组；字符串值若像媒体 URL 也认（fields 名不定：url/media_url/file_url/...）。
 pub fn scan_api_json(body: &str) -> ApiScan {
-    let mut out = ApiScan { key: None, media_url: None, title: None };
+    let mut out = ApiScan {
+        key: None,
+        media_url: None,
+        title: None,
+    };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
         return out;
     };
@@ -241,7 +256,10 @@ mod tests {
         let j = r#"{"data":{"object_desc":"我的猫","media":{"url":"https://finder.video.qq.com/302/a/b.mp4?tk=1"},"decode_key":"2136343393"}}"#;
         let s = scan_api_json(j);
         assert_eq!(s.key.as_deref(), Some("2136343393"));
-        assert_eq!(s.media_url.as_deref(), Some("https://finder.video.qq.com/302/a/b.mp4?tk=1"));
+        assert_eq!(
+            s.media_url.as_deref(),
+            Some("https://finder.video.qq.com/302/a/b.mp4?tk=1")
+        );
         assert_eq!(s.title.as_deref(), Some("我的猫"));
     }
 
@@ -249,15 +267,30 @@ mod tests {
     fn capture_pairs_key_with_later_media() {
         let c = Capture::new(10);
         c.note_key("123456".into(), 1_000);
-        assert!(c.media("https://finder.video.qq.com/a.mp4", Default::default(), Some(9), 2_000));
+        assert!(c.media(
+            "https://finder.video.qq.com/a.mp4",
+            Default::default(),
+            Some(9),
+            2_000
+        ));
         let it = c.latest().unwrap();
         assert_eq!(it.seed.as_deref(), Some("123456"));
         // 无 key 时照常成条（未加密视频）
-        assert!(c.media("https://finder.video.qq.com/b.mp4", Default::default(), None, 3_000));
+        assert!(c.media(
+            "https://finder.video.qq.com/b.mp4",
+            Default::default(),
+            None,
+            3_000
+        ));
         assert!(c.latest().unwrap().seed.is_none());
         // 同 URL 更新保最新种子
         c.note_key("999".into(), 3_500);
-        assert!(c.media("https://finder.video.qq.com/b.mp4", Default::default(), None, 4_000));
+        assert!(c.media(
+            "https://finder.video.qq.com/b.mp4",
+            Default::default(),
+            None,
+            4_000
+        ));
         assert_eq!(c.latest().unwrap().seed.as_deref(), Some("999"));
         assert_eq!(c.items().len(), 2, "同 URL 去重");
     }
@@ -266,7 +299,12 @@ mod tests {
     fn key_ttl() {
         let c = Capture::new(10);
         c.note_key("111".into(), 0);
-        assert!(c.media("https://finder.video.qq.com/c.mp4", Default::default(), None, KEY_TTL_MS + 1));
+        assert!(c.media(
+            "https://finder.video.qq.com/c.mp4",
+            Default::default(),
+            None,
+            KEY_TTL_MS + 1
+        ));
         assert!(c.latest().unwrap().seed.is_none(), "过期 key 不配对");
     }
 }

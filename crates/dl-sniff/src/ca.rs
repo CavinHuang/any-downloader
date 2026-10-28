@@ -15,6 +15,13 @@ use tokio_rustls::rustls::ServerConfig;
 
 pub const CA_CN: &str = "Anything Downloader Sniff CA";
 
+/// PEM → 首个证书 DER（宿主安装/查询证书用）。
+pub fn pem_cert_der(pem: &[u8]) -> Option<Vec<u8>> {
+    let mut m = pem;
+    let first = rustls_pemfile::certs(&mut m).next()?;
+    first.ok().map(|c| c.to_vec())
+}
+
 pub struct SniffCa {
     cert: Certificate,
     key: KeyPair,
@@ -40,13 +47,20 @@ impl SniffCa {
             let cert = params
                 .self_signed(&key)
                 .map_err(|e| anyhow!("CA 重建失败: {e}"))?;
-            return Ok(Self { cert, key, leaf_cache: Mutex::new(HashMap::new()) });
+            return Ok(Self {
+                cert,
+                key,
+                leaf_cache: Mutex::new(HashMap::new()),
+            });
         }
 
         let key = KeyPair::generate().context("generate CA key")?;
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
         let mut dn = rcgen::DistinguishedName::new();
         dn.push(rcgen::DnType::CommonName, CA_CN);
         dn.push(rcgen::DnType::OrganizationName, "Anything Downloader");
@@ -57,7 +71,11 @@ impl SniffCa {
         std::fs::write(&cert_path, cert.pem())?;
         std::fs::write(&key_path, key.serialize_pem())?;
         tracing::info!(?cert_path, "sniff CA 生成");
-        Ok(Self { cert, key, leaf_cache: Mutex::new(HashMap::new()) })
+        Ok(Self {
+            cert,
+            key,
+            leaf_cache: Mutex::new(HashMap::new()),
+        })
     }
 
     /// CA 证书 PEM（安装到系统信任用）
@@ -84,7 +102,10 @@ impl SniffCa {
             .with_single_cert(vec![CertificateDer::from(cert.der().to_vec())], key)
             .map_err(|e| anyhow!("leaf ServerConfig: {e}"))?;
         let cfg = Arc::new(cfg);
-        self.leaf_cache.lock().unwrap().insert(sni.to_string(), cfg.clone());
+        self.leaf_cache
+            .lock()
+            .unwrap()
+            .insert(sni.to_string(), cfg.clone());
         Ok(cfg)
     }
 }

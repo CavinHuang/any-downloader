@@ -66,8 +66,11 @@ impl SniffConfig {
     }
 
     pub fn should_decrypt(&self, sni: &str) -> bool {
-        self.decrypt_exact.iter().any(|h| h.eq_ignore_ascii_case(sni))
-            || self.decrypt_suffix
+        self.decrypt_exact
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(sni))
+            || self
+                .decrypt_suffix
                 .iter()
                 .any(|s| sni.len() > s.len() && sni.to_ascii_lowercase().ends_with(s))
     }
@@ -104,7 +107,12 @@ pub async fn start(cfg: SniffConfig, capture: Arc<Capture>) -> Result<SniffServi
         cb = cb.danger_accept_invalid_certs(true);
     }
     let client = cb.build()?;
-    let shared = Arc::new(proxy::ProxyShared { cfg: cfg.clone(), ca, capture, client });
+    let shared = Arc::new(proxy::ProxyShared {
+        cfg: cfg.clone(),
+        ca,
+        capture,
+        client,
+    });
 
     let listener = TcpListener::bind(("127.0.0.1", cfg.port)).await?;
     let port = listener.local_addr()?.port();
@@ -127,5 +135,9 @@ pub async fn start(cfg: SniffConfig, capture: Arc<Capture>) -> Result<SniffServi
             }
         }
     });
-    Ok(SniffService { port, shutdown: tx, join })
+    Ok(SniffService {
+        port,
+        shutdown: tx,
+        join,
+    })
 }

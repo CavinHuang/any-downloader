@@ -80,6 +80,7 @@ pub async fn set_priority(
         .map_err(str_err)
 }
 
+/// 删除任务（运行中任务需先取消/暂停）。
 #[tauri::command]
 pub async fn remove_task(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     state.engine.remove(&id).await.map_err(str_err)
@@ -157,6 +158,9 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "schedule_outside_bps",
         "update_auto",
         "run_command",
+        "sniff_desktop",
+        "sniff_port",
+        "sniff_overlay",
     ] {
         let v = engine.get_setting(key).await.map_err(str_err)?;
         out.insert(

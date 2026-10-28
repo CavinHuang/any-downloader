@@ -118,7 +118,11 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
     let (head, _rest) = read_head(&mut stream).await?;
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
-    if req.parse(&head).map_err(|e| anyhow!("bad request: {e}"))?.is_partial() {
+    if req
+        .parse(&head)
+        .map_err(|e| anyhow!("bad request: {e}"))?
+        .is_partial()
+    {
         bail!("partial request head");
     }
     let method = req.method.unwrap_or("").to_string();
@@ -128,7 +132,9 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
         if host.is_empty() {
             bail!("CONNECT 无主机");
         }
-        stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
         // 预读 ClientHello（SNI）；记录所有经过的主机便于实测校准白名单（M1）
         let mut pre = Vec::with_capacity(2048);
         let mut chunk = [0u8; 8192];
@@ -154,7 +160,10 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
             let sni = sni.unwrap();
             let acceptor = TlsAcceptor::from(sh.ca.leaf_config(&sni)?);
             let tls = acceptor
-                .accept(PreStream { pre: std::io::Cursor::new(pre), inner: stream })
+                .accept(PreStream {
+                    pre: std::io::Cursor::new(pre),
+                    inner: stream,
+                })
                 .await
                 .map_err(|e| anyhow!("MITM 握手失败: {e}"))?;
             mitm_loop(tls, &sni, sh).await
@@ -189,11 +198,20 @@ async fn passthrough(
     Ok(())
 }
 
-async fn plain_http(mut stream: TcpStream, head: Vec<u8>, _rest: Vec<u8>, sh: &Arc<ProxyShared>) -> Result<()> {
+async fn plain_http(
+    mut stream: TcpStream,
+    head: Vec<u8>,
+    _rest: Vec<u8>,
+    sh: &Arc<ProxyShared>,
+) -> Result<()> {
     // absolute-form 请求（http:// 经 PAC 进来）：按原样转发，响应回写
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
-    if req.parse(&head).map_err(|e| anyhow!("bad request: {e}"))?.is_partial() {
+    if req
+        .parse(&head)
+        .map_err(|e| anyhow!("bad request: {e}"))?
+        .is_partial()
+    {
         bail!("partial");
     }
     let url = req.path.unwrap_or("").to_string();
@@ -234,11 +252,17 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
     let (head, mut pending) = read_head(&mut tls).await?;
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    if req.parse(&head).map_err(|e| anyhow!("mitm bad request: {e}"))?.is_partial() {
+    if req
+        .parse(&head)
+        .map_err(|e| anyhow!("mitm bad request: {e}"))?
+        .is_partial()
+    {
         bail!("partial");
     }
     let method = req.method.unwrap_or("").to_string();
-    let host = header_str(req.headers.iter(), "host").unwrap_or(sni).to_string();
+    let host = header_str(req.headers.iter(), "host")
+        .unwrap_or(sni)
+        .to_string();
     let raw_path = req.path.unwrap_or("/").to_string();
     let url = if raw_path.starts_with("http") {
         raw_path.clone()
@@ -248,8 +272,8 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
 
     // 请求体（finder API 为 POST JSON，Chromium 用 content-length）
     let mut body: Option<Vec<u8>> = None;
-    if let Some(cl) = header_str(req.headers.iter(), "content-length")
-        .and_then(|v| v.parse::<usize>().ok())
+    if let Some(cl) =
+        header_str(req.headers.iter(), "content-length").and_then(|v| v.parse::<usize>().ok())
     {
         if cl > 8 * 1024 * 1024 {
             bail!("请求体超限");
@@ -283,11 +307,16 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
     if let Some(b) = body {
         rb = rb.body(b);
     }
-    let resp = rb.send().await.map_err(|e| anyhow!("上游请求失败 {url}: {e}"))?;
+    let resp = rb
+        .send()
+        .await
+        .map_err(|e| anyhow!("上游请求失败 {url}: {e}"))?;
 
     // 媒体直链：响应头到达即成条（content-length 供 UI 显示大小）
     if is_media_url(&url) {
-        let _ = sh.capture.media(&url, keep.clone(), resp.content_length(), now_ms());
+        let _ = sh
+            .capture
+            .media(&url, keep.clone(), resp.content_length(), now_ms());
     }
     let content_type = resp
         .headers()
@@ -309,7 +338,11 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
 async fn write_response<S: AsyncWrite + Unpin>(
     out: &mut S,
     resp: reqwest::Response,
-    scan: Option<(Arc<crate::capture::Capture>, &str, std::collections::HashMap<String, String>)>,
+    scan: Option<(
+        Arc<crate::capture::Capture>,
+        &str,
+        std::collections::HashMap<String, String>,
+    )>,
 ) -> Result<()> {
     let status = resp.status();
     let mut head = format!(
@@ -319,7 +352,10 @@ async fn write_response<S: AsyncWrite + Unpin>(
     );
     for (k, v) in resp.headers() {
         let name = k.as_str().to_ascii_lowercase();
-        if matches!(name.as_str(), "content-length" | "transfer-encoding" | "connection" | "keep-alive") {
+        if matches!(
+            name.as_str(),
+            "content-length" | "transfer-encoding" | "connection" | "keep-alive"
+        ) {
             continue;
         }
         head.push_str(&format!("{}: {}\r\n", k.as_str(), v.to_str().unwrap_or("")));
@@ -337,7 +373,8 @@ async fn write_response<S: AsyncWrite + Unpin>(
             }
         }
         if !chunk.is_empty() {
-            out.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await?;
+            out.write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await?;
             out.write_all(&chunk).await?;
             out.write_all(b"\r\n").await?;
         }
@@ -371,7 +408,10 @@ async fn read_exact_from<S: AsyncRead + Unpin>(s: &mut S, mut buf: &mut [u8]) ->
     Ok(())
 }
 
-fn header_str<'a>(mut hs: impl Iterator<Item = &'a httparse::Header<'a>>, name: &str) -> Option<&'a str> {
+fn header_str<'a>(
+    mut hs: impl Iterator<Item = &'a httparse::Header<'a>>,
+    name: &str,
+) -> Option<&'a str> {
     hs.find(|h| h.name.eq_ignore_ascii_case(name))
         .and_then(|h| std::str::from_utf8(h.value).ok())
         .map(|s| s.trim())
