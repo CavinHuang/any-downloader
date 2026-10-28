@@ -1,0 +1,28 @@
+[package]
+name = "dl-sniff"
+version.workspace = true
+edition.workspace = true
+
+# 桌面嗅探服务（docs/DESKTOP-SNIFF.md）：本地 CONNECT 代理 + 定向 MITM。
+# 默认透传一切；仅解密白名单 SNI（视频号 finder/channels 域），捕获媒体 URL
+# 与 decode_key（配对成引擎 postprocess 任务），其余域名纯 TCP 转发不解密。
+
+[dependencies]
+tokio = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+# =0.13.1：0.13.2 移除了 x509-parser feature（CA 持久化加载必需），升版需改加载路径
+rcgen = { version = "=0.13.1", features = ["pem", "x509-parser"] }
+httparse = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
