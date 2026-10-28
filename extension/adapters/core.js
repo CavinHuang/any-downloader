@@ -373,3 +373,56 @@ ADL.xSyndicationResources = (d, statusId) => {
   }
   return out;
 };
+
+// —— 视频悬浮下载的来源决策（video-overlays.js 单击 → background video-download）。
+// 纯函数：输入页面上下文与嗅探快照，输出推送计划（SW 与 node 测试共用）。优先级：
+//   adapter  站点适配器资源（抖音无水印/视频号解密走 adapterPush 管线，保
+//            postprocess/文件名规则；多候选时取时长最接近悬浮视频的一条——
+//            feed 页 probe 会带整页多条，须只挑当前在播的那条）
+//   direct   <video> 的 http(s) src（本身就是媒体地址；blob:/about: 不可直接下）
+//   sniff    本页嗅探记录里最优媒体（hls 清单最近一条优先——master 与子清单同为
+//            hls，后请求的是当前画质；mp4 次之按体积降序；segment/dash 不推：
+//            引擎无 DASH，分片单推不可播）
+//   ytdlp    页面 URL 交 yt-dlp 托管（YouTube/B站等 MSE 站点无直链可取，引擎
+//            建任务时按域名自动转 TaskKind::Ytdlp）
+// 返回 {via:"adapter", urls:[...]} / {via:"direct"|"sniff"|"ytdlp", url} /
+// {via:"none"}。
+ADL.pickVideoSource = ({ srcUrl, pageUrl, recs, adapterResources, duration, ytdlpHosts }) => {
+  const vids = (adapterResources || []).filter((r) => r && r.kind === "video" && r.url);
+  if (vids.length) {
+    const want = Number(duration) || 0;
+    const durOf = (r) => (r.meta && Number(r.meta.durationSec)) || 0;
+    const hasDur = want > 0 && vids.some((r) => durOf(r) > 0);
+    let best = null;
+    let bestScore = Infinity;
+    vids.forEach((r, i) => {
+      const d = durOf(r);
+      // 时长可用：取 |d-want| 最小（无时长候选仅兜底）；否则非 optional 优先、
+      // 稳定取先出现者（适配器约定当前条目排最前）
+      const s = hasDur ? (d > 0 ? Math.abs(d - want) : Infinity) : (r.optional ? 1e9 : 0) + i * 1e-6;
+      if (s < bestScore) {
+        best = r;
+        bestScore = s;
+      }
+    });
+    if (best) return { via: "adapter", urls: [best.url] };
+  }
+  if (/^https?:/i.test(srcUrl || "")) return { via: "direct", url: srcUrl };
+  const rs = recs || [];
+  const hls = rs
+    .filter((r) => r && r.type === "hls" && r.url)
+    .sort((a, b) => (b.at || 0) - (a.at || 0));
+  if (hls.length) return { via: "sniff", url: hls[0].url };
+  const files = rs
+    .filter((r) => r && r.type === "video" && r.url)
+    .sort((a, b) => (b.bytes || 0) - (a.bytes || 0));
+  if (files.length) return { via: "sniff", url: files[0].url };
+  let host = "";
+  try {
+    host = new URL(pageUrl || "").hostname.toLowerCase();
+  } catch (_) {}
+  if (host && (ytdlpHosts || []).some((b) => host === b || host.endsWith("." + b))) {
+    return { via: "ytdlp", url: pageUrl };
+  }
+  return { via: "none" };
+};

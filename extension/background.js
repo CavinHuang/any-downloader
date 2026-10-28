@@ -74,6 +74,22 @@ const TAKEOVER_RE =
   /\.(zip|rar|7z|tar|gz|mp4|mkv|webm|mp3|flac|m4a|aac|ogg|wav|avi|mov|wmv|pdf|epub|apk|exe|msi|dmg|iso)(?=[?#]|$)/i;
 const MIN_TAKEOVER_BYTES = 1024 * 1024;
 
+// —— yt-dlp 托管域名（镜像 crates/dl-engine/src/ytdlp_task.rs is_ytdlp_host；
+//    引擎建任务按此自动转 TaskKind::Ytdlp）。视频悬浮下载的兜底路线：MSE 站点
+//    （YouTube/B站等）无直链可取时推页面 URL 交 yt-dlp 托管。改引擎侧须同步。
+const YTDLP_HOSTS = [
+  "youtube.com",
+  "youtu.be",
+  "youtube-nocookie.com",
+  "x.com",
+  "twitter.com",
+  "bilibili.com",
+  "b23.tv",
+  "tiktok.com",
+  "douyin.com",
+  "iesdouyin.com",
+];
+
 const MAX_PER_TAB = 100; // 单页资源上限（超限丢最旧，storage.session 配额治理）
 
 // —— 嗅探配置（popup 设置页写入，storage.local.sniffCfg；内存缓存避免监听器内异步）
@@ -787,6 +803,52 @@ async function adapterPush(tabId, urls) {
   };
 }
 
+// —— 视频悬浮下载（video-overlays.js 单击入口）：智能解析当前视频来源并推送。
+//     决策逻辑在 core.js pickVideoSource（纯函数，node 可测）；这里负责取
+//     probe 缓存/嗅探快照、按计划分派到 adapterPush（保解密/文件名规则）或
+//     pushTask（即建即下 + Cookie 兜底）。
+async function videoDownload(tabId, msg) {
+  if (tabId == null) return { ok: false, error: "no_tab" };
+  // 站点适配器命中且启用 → 取该页资源（复用 lastProbe 缓存，无缓存现 probe）
+  let adapterResources = [];
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const matched = (ADL.matchAdapters(tab.url || "") || []).filter((ad) => adapterEnabled(ad.id));
+    if (matched.length) {
+      const r = await adapterProbe(tabId);
+      if (r && r.ok && Array.isArray(r.resources)) adapterResources = r.resources;
+    }
+  } catch (_) {}
+  const recs = [...(byTab.get(tabId) || new Map()).values()];
+  const plan = ADL.pickVideoSource({
+    srcUrl: msg.srcUrl,
+    pageUrl: msg.pageUrl,
+    recs,
+    adapterResources,
+    duration: msg.duration,
+    ytdlpHosts: YTDLP_HOSTS,
+  });
+  let resp = null;
+  const norm = (r, via) => {
+    if (r && r.error === "task_exists") r = { ...r, ok: true, via, exists: true }; // 重复推送按成功反馈
+    return r && r.ok ? { ...r, via } : r;
+  };
+  if (plan.via === "adapter") {
+    resp = await adapterPush(tabId, plan.urls);
+    resp = norm(resp, "adapter");
+  } else if (plan.via === "direct" || plan.via === "sniff") {
+    const rec = plan.via === "sniff" ? findByUrl(plan.url) : null;
+    resp = await pushTask(plan.url, rec && rec.headers, undefined, rec && rec.postprocess);
+    resp = norm(resp, plan.via);
+  } else if (plan.via === "ytdlp") {
+    resp = await pushTask(plan.url);
+    resp = norm(resp, "ytdlp");
+  }
+  if (!resp) return { ok: false, error: "no_source" };
+  flashBadge(tabId, resp.ok || resp.error === "task_exists");
+  return resp;
+}
+
 // —— 分享链接解析（粘贴口令/短链）：抖音（移动端 UA）+ 小红书（带 Cookie 跟随）
 async function adapterResolve(text) {
   const link = ADL.extractLink(text);
@@ -1028,6 +1090,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
     adapterPush(tabId, msg.urls).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "video-download") {
+    // 视频悬浮按钮（video-overlays.js）：tabId 固定为发起页
+    videoDownload(_sender.tab && _sender.tab.id, msg).then(sendResponse);
     return true;
   }
   if (msg.type === "zip-download") {

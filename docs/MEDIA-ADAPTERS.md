@@ -1,6 +1,9 @@
 # 站点适配层设计：专用媒体资源下载器
 
 > 状态：**P1+P2 已实现**（扩展 v0.6.0 / app v0.4.0）。
+> - **全站视频悬浮下载（ext 0.9.0，§4.5）**：`video-overlays.js` 任意站点 `<video>`
+>   右上角 ⬇ 浮标，`pickVideoSource` 四级来源决策（适配器/直链/嗅探/yt-dlp），
+>   单测 `node scripts/test_video_resolver.js`（20）。
 > - P1（纯扩展）：L1 挂钩器、bridge、5 适配器（wechat-article/xhs/douyin/x/channels）、
 >   悬浮按钮、popup 站点卡片、平台开关、右键菜单。
 >   单测 `node scripts/test_adapters.js`（32）+ `test_channels.js`（8）+ `test_enhancements.js`（24）。
@@ -204,6 +207,13 @@ yt-dlp 重组来源构造的形态样本），接入真实环境后建议重录�
 3. **右键菜单**：按适配器能力注册——"下载全部图片"（微信文章页）、"下载此视频"（douyin/xhs/x）。
 4. **设置页平台开关**：每适配器独立启停（复用 `sniffCfg` 的 storage.local 模式，
    `adaptersCfg: { douyin: true, xhs: true, ... }`），关闭时 L1 不注入、菜单不注册。
+5. **视频悬浮下载按钮（ext 0.9.0，全站）**：`video-overlays.js` 在任意站点的
+   `<video>` 上浮现右上角 ⬇ 浮标（鼠标移入触发，全屏/shadow DOM 内同样生效）。
+   单击由 `ADL.pickVideoSource` 决策来源：命中适配器的页面取当前条目最优资源
+   （时长就近匹配 feed 多候选）→ 走 adapterPush（保无水印/视频号解密）；
+   `<video>` 的 http src 直推；否则用本页嗅探记录（hls 最近优先/mp4 按体积，
+   segment/dash 不推）；MSE 站点（YouTube/B站）落页面 URL 交引擎 yt-dlp 托管。
+   开关：popup 设置 04（`sniffCfg.videoOverlay`，默认开）。
 
 ## 5. 引擎侧改动（Rust，最小集）
 

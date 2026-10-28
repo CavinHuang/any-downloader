@@ -140,6 +140,8 @@ const selected = new Set(); // 选中资源 url 集合
 const CFG_DEFAULTS = {
   types: { video: true, hls: true, audio: true, archive: true, binary: true, doc: true, image: false, other: true },
   minSizeMB: 1,
+  videoOverlay: true, // 视频悬浮下载按钮（video-overlays.js）
+  videoOverlayHosts: [], // 站点黑名单（预留，暂无编辑 UI）
 };
 let CFG = JSON.parse(JSON.stringify(CFG_DEFAULTS));
 async function loadCfg() {
@@ -149,6 +151,8 @@ async function loadCfg() {
       CFG = {
         types: { ...CFG_DEFAULTS.types, ...(sniffCfg.types || {}) },
         minSizeMB: sniffCfg.minSizeMB ?? 1,
+        videoOverlay: sniffCfg.videoOverlay !== false,
+        videoOverlayHosts: Array.isArray(sniffCfg.videoOverlayHosts) ? sniffCfg.videoOverlayHosts : [],
       };
     }
   } catch (_) {}
@@ -879,6 +883,16 @@ function init() {
       CFG.minSizeMB = Math.max(0, Number(minEl.value) || 0);
       await chrome.storage.local.set({ sniffCfg: CFG });
     });
+
+    // —— 视频悬浮下载按钮开关（video-overlays.js 读同一配置即时生效）
+    const voEl = document.getElementById("set-video-overlay");
+    if (voEl) {
+      voEl.checked = CFG.videoOverlay;
+      voEl.addEventListener("change", async () => {
+        CFG.videoOverlay = voEl.checked;
+        await chrome.storage.local.set({ sniffCfg: CFG });
+      });
+    }
 
     // —— 平台适配器开关（storage.local.adaptersCfg）
     try {
