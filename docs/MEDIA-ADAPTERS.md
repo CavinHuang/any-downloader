@@ -1,6 +1,12 @@
 # 站点适配层设计：专用媒体资源下载器
 
 > 状态：**P1+P2 已实现**（扩展 v0.6.0 / app v0.4.0）。
+> - **桌面嗅探（app 0.5.0，docs/DESKTOP-SNIFF.md）**：浏览器之外的新战场——
+>   微信电脑版视频号。本地 CONNECT 代理（`crates/dl-sniff`）仅对 finder/
+>   channels 域定向 MITM（其余 TCP 透传），decode_key 配对解密复用引擎
+>   postprocess；PAC 路由 + CurrentUser 证书 + 崩溃还原；主界面「桌面嗅探」
+>   列表 + 微信视频窗右上角 ⬇ 悬浮图标（`wechat_overlay.rs` 窗口跟踪）。
+>   cargo 18 项新增测试（dl-sniff 10 + dl-app 8）。
 > - **全站视频悬浮下载（ext 0.9.0，§4.5）**：`video-overlays.js` 任意站点 `<video>`
 >   右上角 ⬇ 浮标，`pickVideoSource` 四级来源决策（适配器/直链/嗅探/yt-dlp），
 >   单测 `node scripts/test_video_resolver.js`（20）。
@@ -35,8 +41,7 @@
 >   （原先只有设置无消费方）+ 运行自定义命令（{file}/{dir} 占位符）；yt-dlp
 >   选项（字幕 srt / 缩略图+元数据嵌入 / cookies.txt，设置驱动）；**直播 HLS
 >   自动转 yt-dlp 托管录制**（HTTP 驱动遇 LiveUnsupported 一次性重路由，
->   托管子进程独占限速槽）。cargo 109 + 扩展 506 断言全绿。
-> - P2（Rust）：**视频号**——channels 适配器（decode_key 配对）+ 引擎 postprocess
+>   托管子进程独占限速槽）。cargo 109 + 扩展 506 断言全绿。> - P2（Rust）：**视频号**——channels 适配器（decode_key 配对）+ 引擎 postprocess
 >   （`dl-engine::postprocess`，Isaac64-XOR 解密前 128KB；算法已用官方样本逐位对拍锁定：
 >   seed→randrsl[0]、u64 大端拼接、整体 reverse）+ `Decrypting` 任务状态 +
 >   `tasks.postprocess_json` 列 + `CreateTask.postprocess`（IPC/CLI `--isaac64-seed` 透传）。

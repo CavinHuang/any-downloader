@@ -132,6 +132,8 @@ cargo build --release -p dl-app
 | YouTube / **X / Bilibili / TikTok / 抖音** | 视频/音频下载 | yt-dlp sidecar 托管模式（`TaskKind::Ytdlp`，URL 自动识别覆盖五平台；**安装器已内置 yt-dlp + deno，开箱即用**，设置里可覆盖路径） |
 | **文章站点 ×12** | **文章下载（Markdown）+ 文章图片 + 操作菜单** | 微信公众号/知乎专栏/掘金/CSDN/简书/博客园/51CTO/脚本之家/php中文网/SegmentFault/开源中国/Medium；自研 GFM 转换器（YAML front matter / 代码块语言探测 / 表格列对齐 / figure 图注）；**文章合集模式**：`下载目录/标题/` 统一存放 .md 与原图，相对引用离线完整可读；**文章操作菜单**（对齐 code-box）：获取封面/文章摘要/净化链接/原始链接/编辑 Markdown/解析 Markdown/打包下载/下载 PDF/下载 Word/下载所有图片/生成海报；文档经 `task.add_content` 直达已完成任务，图片走常规下载管线 |
 
+**桌面嗅探（Windows，v0.5.0）**：微信电脑版刷视频号时，视频窗口右上角出现 ⬇ 悬浮图标（或主界面「桌面嗅探」列表），一键下载并自动解密——本地代理仅解密视频号相关域名，其余流量透传不解密（详见 [docs/DESKTOP-SNIFF.md](docs/DESKTOP-SNIFF.md)）。
+
 入口：popup 站点卡片、**粘贴分享口令**（抖音/小红书/X 的"复制链接"直接粘）、页面悬浮 ⬇ 按钮、**视频悬浮下载按钮**（任意站点播放视频时，鼠标移入视频右上角 ⬇ 一键下载——YouTube/B站等自动交 yt-dlp，抖音/X/小红书/视频号走适配器）、右键"下载本页媒体"、设置页按平台开关。
 仅供个人备份学习使用，请遵守各平台服务条款。
 

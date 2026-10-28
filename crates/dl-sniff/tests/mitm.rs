@@ -126,7 +126,7 @@ async fn mitm_captures_media_and_pairs_key() {
         .await
         .unwrap();
     assert_eq!(api.status(), 200);
-    assert_eq!(api.text().await.unwrap().contains("decode_key"), true);
+    assert!(api.text().await.unwrap().contains("decode_key"));
 
     // 2. 媒体直链（Range 场景外的整段 GET）
     let media = client
@@ -209,7 +209,7 @@ async fn handshake_ok(server: &dl_sniff::ca::SniffCa, root_of: &dl_sniff::ca::Sn
         }
     });
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    let mut pem = root_of.cert_pem();
+    let pem = root_of.cert_pem();
     for c in rustls_pemfile::certs(&mut pem.as_bytes()) {
         roots.add(c.unwrap()).unwrap();
     }

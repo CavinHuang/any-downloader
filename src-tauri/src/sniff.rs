@@ -376,7 +376,7 @@ pub fn shutdown_cleanup(app: &AppHandle, sniff: &SniffState) {
     #[cfg(windows)]
     if sniff.is_enabled() {
         if let Ok(txt) = std::fs::read_to_string(flag_path()) {
-            if let Some(b) = serde_json::from_str::<crate::sysproxy::PacBackup>(&txt).ok() {
+            if let Ok(b) = serde_json::from_str::<crate::sysproxy::PacBackup>(&txt) {
                 let _ = crate::sysproxy::disable(&b);
             }
         }

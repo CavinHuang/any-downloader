@@ -5,6 +5,7 @@
 //! - 解密域上的 API 响应：JSON 含 `decode_key` → 记待配对 key（120s 有效），
 //!   与随后的最近一条媒体配对成 `postprocess: isaac64-xor` 种子；同一响应若
 //!   同时带媒体 URL 则直接成条。
+//!
 //! 条目环形缓冲（默认 50）+ broadcast 事件供宿主（Tauri）转发 UI。
 
 use std::collections::VecDeque;

@@ -7,6 +7,7 @@
 //!      （reqwest 上游，禁系统代理防回环），响应边回写边捕获；
 //!    - 未命中 → 原样转发已读字节 + TCP 双向透传，不解密任何内容。
 //! 3. 非 CONNECT（PAC 下罕见的 http:// 绝对形式）→ 直接转发后关闭。
+//!
 //! MITM 侧响应统一 chunked + Connection: close（每请求一条连接，本地握手
 //! 开销可忽略，规避 keep-alive/pipelining 边界）。
 
