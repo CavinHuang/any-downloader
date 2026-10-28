@@ -16,6 +16,20 @@
         "height": 720,
         "minWidth": 860,
         "minHeight": 540
+      },
+      {
+        "label": "sniff-overlay",
+        "url": "sniff-overlay.html",
+        "width": 40,
+        "height": 40,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "shadow": false,
+        "focus": false
       }
     ],
     "security": {

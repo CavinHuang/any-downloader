@@ -13,6 +13,8 @@ mod schedule;
 mod sniff;
 #[cfg(windows)]
 mod sysproxy;
+#[cfg(windows)]
+mod wechat_overlay;
 mod ytdlp_update;
 
 use dl_engine::Engine;
@@ -237,7 +239,10 @@ thread: {:?}
                             std::thread::sleep(std::time::Duration::from_millis(800));
                         }
                         // 桌面嗅探退出清理（还原系统 PAC）
-                        sniff::shutdown_cleanup(&app.state::<sniff::SniffState>());
+                        sniff::shutdown_cleanup(
+                            app,
+                            &app.state::<std::sync::Arc<sniff::SniffState>>(),
+                        );
                         app.exit(0);
                     }
                     _ => {}

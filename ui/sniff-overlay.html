@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ADL</title>
+    <style>
+      /* 悬浮下载图标（sniff-overlay 窗口）：透明底 40x40，圆角 ⬇ 按钮。
+         状态：.has 新捕获微光 / .ok 成功 / .err 失败；tip 为 1.8s 轻提示。 */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+        user-select: none;
+      }
+      #btn {
+        width: 100%;
+        height: 100%;
+        border: none;
+        border-radius: 10px;
+        background: #fbfaf6ee;
+        color: #293c34;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 4px 14px rgba(35, 49, 38, 0.28);
+        outline: 1px solid #dedfd5;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      #btn:hover {
+        background: #47644d;
+        color: #eef1e6;
+        outline-color: #344e3c;
+      }
+      #btn.has {
+        box-shadow: 0 0 0 2px #b6c99c, 0 4px 16px rgba(70, 100, 77, 0.5);
+      }
+      #btn.ok {
+        background: #dcfce7;
+        color: #166534;
+        outline-color: #86efac;
+      }
+      #btn.err {
+        background: #fee2e2;
+        color: #991b1b;
+        outline-color: #fca5a5;
+      }
+      svg {
+        display: block;
+      }
+      #tip {
+        position: fixed;
+        top: 44px;
+        right: 0;
+        background: #fbfaf6f2;
+        color: #293c34;
+        border: 1px solid #dedfd5;
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+        box-shadow: 0 6px 18px rgba(35, 49, 38, 0.2);
+        opacity: 0;
+        transition: opacity 0.18s ease;
+        pointer-events: none;
+      }
+      #tip.on {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="btn" title="下载嗅探到的视频号视频" aria-label="下载嗅探到的视频号视频">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 12 5 5 5-5"/><path d="M5 20h14"/></svg>
+    </button>
+    <div id="tip" role="status"></div>
+    <script type="module" src="/src/sniff-overlay.ts"></script>
+  </body>
+</html>
