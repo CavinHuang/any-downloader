@@ -248,6 +248,7 @@ fn ok_json(sniff: &SniffState) -> serde_json::Value {
     serde_json::json!({ "ok": true, "enabled": sniff.is_enabled() })
 }
 
+#[cfg(windows)]
 async fn configured_port(engine: &AppState) -> u16 {
     engine
         .engine
