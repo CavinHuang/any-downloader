@@ -168,11 +168,10 @@ async fn passthrough_does_not_capture() {
     cfg.insecure_upstream = true;
     cfg.host_map = HashMap::from([("example.org".to_string(), origin)]);
     let capture = Arc::new(Capture::new(10));
-    let ca_pem = std::fs::read_to_string(tmp.path().join("sniff/ca-cert.pem")).unwrap_or_default();
     let svc = start(cfg, capture.clone()).await.unwrap();
 
     // 透传：客户端直信源站证书（若被解密会因不信任 MITM CA 而失败）
-    let client = client_with(svc.port, &[origin_pem, ca_pem]);
+    let client = client_with(svc.port, &[origin_pem]);
     let resp = client
         .get("https://example.org/media/v.mp4")
         .send()
