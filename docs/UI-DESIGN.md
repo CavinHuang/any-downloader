@@ -1,6 +1,6 @@
 # Anything Downloader · 跨端统一交互规范 v1.0
 
-> 桌面端当前布局与视觉以 [UI-DOWNLOADER.md](UI-DOWNLOADER.md) 和 `ui/src/styles.css` 为准；浏览器扩展保留 [UI-STUDIO.md](UI-STUDIO.md) 中的工作流。本文保留旧版交互约束作为参考。
+> 桌面端与浏览器扩展的当前布局与视觉以 [UI-DOWNLOADER.md](UI-DOWNLOADER.md)、`ui/src/styles.css` 和 `extension/studio.css` 为准。本文保留旧版交互约束作为参考。
 
 适用范围：桌面应用（Tauri + React，`ui/src/`）、浏览器扩展（`extension/popup.html`、`extension/sync.html`、`extension/float-button.js`）。
 下文为旧版规范，视觉值与布局以各端当前设计文档为准。关于操作反馈、数据保护、键盘可达性及适配器管线的约束继续适用；扩展不增加 manifest 权限。

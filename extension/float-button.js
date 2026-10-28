@@ -9,25 +9,25 @@
   if (window.__adlFloat) return;
   window.__adlFloat = true;
 
-  // —— Anything Studio 色板副本（与 extension/studio.css 一致）。
+  // —— Anything Downloader 色板副本（与 extension/studio.css 一致）。
   //     内容脚本无法跨 document 共享 CSS 变量，故按主题各存一组，matchMedia 切换
   const TOKENS = {
     light: {
-      panel: "#fbfaf6", text: "#293c34", muted: "#687263",
-      border: "#dedfd5", borderSoft: "#e9e9df",
-      accent: "#47644d", accentStrong: "#344e3c", accentInk: "#36543e", accentSoft: "#e9eddf", buttonInk: "#fbfaf6",
-      okSoft: "#e9eddf", okInk: "#45633e",
-      errSoft: "#f7e6df", errInk: "#a14d3d",
-      warnSoft: "#f1e9d7", warnInk: "#856225",
-      shadow: "0 12px 40px rgba(35,49,38,.16)",
+      panel: "#ffffff", text: "#243147", muted: "#6c788a",
+      border: "#e3e8ef", borderSoft: "#eef1f5",
+      accent: "#3779ec", accentStrong: "#2865d3", accentInk: "#2463d1", accentSoft: "#eef4ff", buttonInk: "#ffffff",
+      okSoft: "#eaf6f0", okInk: "#217d5c",
+      errSoft: "#fdf0f0", errInk: "#b83a3a",
+      warnSoft: "#fff6e6", warnInk: "#936417",
+      shadow: "0 12px 40px rgba(24,36,56,.16)",
     },
     dark: {
-      panel: "#242e27", text: "#e3e7d9", muted: "#a0ad9b",
-      border: "#3b463c", borderSoft: "#303b32",
-      accent: "#b6c99c", accentStrong: "#bdd29c", accentInk: "#c1d5aa", accentSoft: "#34432f", buttonInk: "#22301f",
-      okSoft: "#34432f", okInk: "#c1d5aa",
-      errSoft: "#4d302b", errInk: "#edaf98",
-      warnSoft: "#453d2b", warnInk: "#e0c18b",
+      panel: "#1c2634", text: "#e0e7f2", muted: "#9baabd",
+      border: "#303d50", borderSoft: "#283445",
+      accent: "#79aaff", accentStrong: "#326bd0", accentInk: "#94baff", accentSoft: "#253b5b", buttonInk: "#ffffff",
+      okSoft: "#203d35", okInk: "#83d5b1",
+      errSoft: "#442c35", errInk: "#f2a4a4",
+      warnSoft: "#403a2a", warnInk: "#e4c17f",
       shadow: "0 12px 40px rgba(0,0,0,.3)",
     },
   };
@@ -50,11 +50,11 @@ button {
 }
 button:hover { border-color: ${t.accentInk}; color: ${t.accentInk}; }
 button:active { opacity: .85; }
-button:focus-visible { outline: 2px solid ${t.accentInk}; outline-offset: 2px; }
+button:focus-visible, summary:focus-visible { outline: 2px solid ${t.accentInk}; outline-offset: 2px; }
 button:disabled { opacity: .5; cursor: default; }
 input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
 .head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
-.wordmark { font: 600 25px/1 Georgia, serif; letter-spacing: -1.5px; }
+.wordmark { font: 600 16px/1.4 "Segoe UI", system-ui, sans-serif; }
 .context-line { color: ${t.muted}; font-size: 10px; padding-bottom: 13px; margin-bottom: 10px; border-bottom: 1px solid ${t.border}; }
 .section-label { display: flex; align-items: center; gap: 8px; font-size: 11px; color: ${t.muted}; padding: 2px 0 9px; }
 .x {
@@ -77,7 +77,11 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
   text-overflow: ellipsis; white-space: nowrap;
   background: transparent; border-color: transparent; font-size: 11px;
 }
-.menu button::before { content: attr(data-index); color: ${t.muted}; font: 9px/1.5 Consolas, monospace; }
+
+.article-tools { border-top: 1px solid ${t.border}; margin-top: 14px; padding-top: 12px; }
+.article-tools summary::before { content: "›"; font-size: 16px; }
+.article-tools[open] summary::before { content: "⌄"; }
+.article-tools summary { color: ${t.muted}; font-size: 11px; cursor: pointer; padding-bottom: 6px; }
 .menu button:hover { background: ${t.accentSoft}; }
 .res-row { display: flex; align-items: center; gap: 8px; padding: 9px 2px; cursor: pointer; border-bottom: 1px solid ${t.borderSoft}; font-size: 11px; }
 .res-row:hover { background: ${t.accentSoft}; }
@@ -168,8 +172,8 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
     btn.setAttribute("aria-label", baseTitle);
     btn.setAttribute("aria-haspopup", "dialog");
     btn.setAttribute("aria-expanded", "false");
-    const bookmarkIcon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 4 11-1 1 4M3 6l11-1 2 15-11 1z"/><path d="m14 8 6-1 1 14-6 1M7 11h4m-3 4h4"/></svg>';
-    const restoreButton = () => { btn.innerHTML = bookmarkIcon; btn.title = baseTitle; };
+    const downloadIcon = '<svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>';
+    const restoreButton = () => { btn.innerHTML = downloadIcon; btn.title = baseTitle; };
     restoreButton();
     btn.title = baseTitle;
     S(btn, {
@@ -177,13 +181,13 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       margin: "0", padding: "0", border: "none", boxSizing: "border-box",
       lineHeight: "1", appearance: "none",
       // 显式声明 background 与 font（Tailwind preflight 会重置这两项）
-      background: "#e4edb5", color: "#293c34", border: "1px solid #c7d19f",
+      background: "#2865d3", color: "#ffffff", border: "1px solid #2865d3",
       font: "16px/1 system-ui, sans-serif",
       // 形态
       position: "fixed", right: "18px", bottom: "18px", zIndex: "2147483646",
       width: "46px", height: "46px", borderRadius: "12px", cursor: "pointer",
       display: "flex", alignItems: "center", justifyContent: "center",
-      boxShadow: "0 4px 18px rgba(35,49,38,.18)", userSelect: "none",
+      boxShadow: "0 4px 18px rgba(24,36,56,.18)", userSelect: "none",
       opacity: "0.85",
     });
     btn.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
@@ -191,10 +195,10 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
     // 键盘焦点环（inline 无法表达 :focus-visible；双色 ring 保证任意页面可辨）
     btn.addEventListener("focus", () => {
       btn.style.boxShadow =
-        "0 4px 18px rgba(35,49,38,.18), 0 0 0 2px #fbfaf6, 0 0 0 4px #47644d";
+        "0 4px 18px rgba(24,36,56,.18), 0 0 0 2px #ffffff, 0 0 0 4px #3779ec";
     });
     btn.addEventListener("blur", () => {
-      btn.style.boxShadow = "0 4px 18px rgba(35,49,38,.18)";
+      btn.style.boxShadow = "0 4px 18px rgba(24,36,56,.18)";
     });
 
     // —— 面板状态（闭包内；host= Shadow DOM 宿主元素）
@@ -217,8 +221,8 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
 
     const focusables = () =>
       panelEl
-        ? [...panelEl.querySelectorAll("button, input, select, a[href], [tabindex]:not([tabindex='-1'])")]
-            .filter((el) => !el.disabled)
+        ? [...panelEl.querySelectorAll("button, input, select, summary, a[href], [tabindex]:not([tabindex='-1'])")]
+            .filter((el) => !el.disabled && el.getClientRects().length > 0 && (!el.closest("details:not([open])") || el.tagName === "SUMMARY"))
         : [];
 
     const onDocClick = (e) => {
@@ -313,7 +317,7 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       head.className = "head";
       const wordmark = document.createElement("span");
       wordmark.className = "wordmark";
-      wordmark.textContent = "anything.";
+      wordmark.textContent = "Anything Downloader";
       head.append(wordmark);
       // F1：✕ span → button，命中区 28×28，带 aria-label
       const x = document.createElement("button");
@@ -326,7 +330,7 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       panel.append(head);
       const contextLine = document.createElement("div");
       contextLine.className = "context-line";
-      contextLine.textContent = `${label} / 把这一页，收好。`;
+      contextLine.textContent = `${label} · 页面下载工具`;
       panel.append(contextLine);
 
       // —— 旧版脚本提示：扩展重载后未刷新的页面缺新注入（actions.js 不在）
@@ -338,11 +342,15 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
       }
 
       // —— 文章操作菜单（对齐 code-box；非文章站无此区）
+      let articleTools = null;
       if (actions.length) {
-        const menuLabel = document.createElement("div");
+        articleTools = document.createElement("details");
+        articleTools.className = "article-tools";
+        articleTools.open = !(r && r.ok && r.resources && r.resources.length);
+        const menuLabel = document.createElement("summary");
         menuLabel.className = "section-label";
         menuLabel.textContent = "文章工具";
-        panel.append(menuLabel);
+        articleTools.append(menuLabel);
         const menu = document.createElement("div");
         menu.className = "menu";
         for (const act of actions) {
@@ -370,14 +378,14 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
           });
           menu.append(b);
         }
-        panel.append(menu);
+        articleTools.append(menu);
       }
 
       // —— 媒体资源区
       if (r && r.ok && r.resources && r.resources.length) {
         const resourceLabel = document.createElement("div");
         resourceLabel.className = "section-label";
-        resourceLabel.textContent = `本页发现 / ${r.resources.length} 项`;
+        resourceLabel.textContent = `可下载资源 · ${r.resources.length} 项`;
         panel.append(resourceLabel);
         const boxes = [];
         for (const res of r.resources) {
@@ -413,9 +421,9 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
         // F3：计数随勾选实时联动；0 项禁用并给 title 说明（替代静默 return）
         const syncCount = () => {
           const n = boxes.filter(([cb]) => cb.checked).length;
-          push.textContent = `收下 ${n} 项 ↗`;
+          push.textContent = `下载选中 ${n} 项`;
           push.disabled = n === 0;
-          push.title = n === 0 ? "请先勾选要推送的资源" : "";
+          push.title = n === 0 ? "请先勾选要下载的资源" : "";
         };
         for (const [cb] of boxes) cb.addEventListener("change", syncCount);
         syncCount();
@@ -423,45 +431,58 @@ input[type="checkbox"] { accent-color: ${t.accent}; margin: 0; flex: none; }
           const urls = boxes.filter(([cb]) => cb.checked).map(([, res]) => res.url);
           if (!urls.length) return; // 双保险：0 项时按钮已 disabled
           push.disabled = true;
-          push.textContent = "推送中…";
+          for (const [cb] of boxes) cb.disabled = true;
+          push.textContent = "正在添加下载任务…";
           try {
             const pr = await chrome.runtime.sendMessage({ type: "adapter-push", urls });
             if (pr && pr.ok) {
               // 反馈带落点目录（文章合集模式）；部分失败时如实报 N/M
               const partial =
                 pr.total && pr.pushed < pr.total ? `/${pr.total}` : "";
-              push.textContent = `已保存 ${pr.pushed}${partial} 项${pr.dir ? ` → ${pr.dir}/` : ""}`;
-              if (pr.docTaskId) {
+              push.textContent = `已添加 ${pr.pushed}${partial} 项下载任务${pr.dir ? ` → ${pr.dir}/` : ""}`;
+              if (pr.docTaskId && !foot.querySelector(".open-doc")) {
                 // 「打开文章」= task.open 打开排版 HTML（浏览器内直接预览导出效果）
                 const open = document.createElement("button");
                 open.type = "button";
                 open.className = "open-doc";
                 open.textContent = "打开文章";
-                open.addEventListener("click", () => {
-                  chrome.runtime
-                    .sendMessage({ type: "nm", method: "task.open", params: { id: pr.docTaskId } })
-                    .catch(() => {});
+                open.addEventListener("click", async () => {
+                  open.disabled = true;
+                  try {
+                    const result = await chrome.runtime.sendMessage({ type: "nm", method: "task.open", params: { id: pr.docTaskId } });
+                    if (!result?.ok) throw new Error(pushErrText(result));
+                  } catch (error) { showPanelError("打开文章失败：" + errText(error), 6000); }
+                  finally { open.disabled = false; }
                 });
                 foot.append(open);
               }
               // 成功留足查看时间（8s），不再 1.6s 抢关
-              panelTimer = setTimeout(() => { if (panelHost) closePanel(false); }, 8000);
+              if (partial) {
+                showPanelError("部分资源未添加，请检查下载任务后重试。", 0);
+                push.disabled = false;
+                push.textContent = "重试选中资源";
+              } else {
+                panelTimer = setTimeout(() => { if (panelHost) closePanel(false); }, 8000);
+              }
             } else {
               // F3：失败带原因、停留 ≥6s 或至用户关闭；按钮转「重试」，面板不抢关
-              showPanelError("推送失败：" + pushErrText(pr), 6000);
+              showPanelError("下载失败：" + pushErrText(pr), 6000);
               push.disabled = false;
               push.textContent = "重试";
             }
           } catch (e) {
-            showPanelError("推送失败：" + errText(e), 6000);
+            showPanelError("下载失败：" + errText(e), 6000);
             push.disabled = false;
             push.textContent = "重试";
+          } finally {
+            for (const [cb] of boxes) cb.disabled = false;
           }
         });
         foot.append(push);
         panel.append(foot);
       }
 
+      if (articleTools) panel.append(articleTools);
       document.documentElement.append(host);
       document.addEventListener("click", onDocClick, true);
       // F1：打开时焦点落首交互元素（✕）；Tab 循环由 onHostKeydown 兜住

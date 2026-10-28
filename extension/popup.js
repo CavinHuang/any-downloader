@@ -664,7 +664,7 @@ async function renderTasks() {
   }
   stats.textContent =
     activeTasks.length
-      ? `${activeTasks.length} 个任务进行中 · 总速度 ${fmtSpeed(totalBps)}`
+      ? `${activeTasks.length} 个任务进行中${activeTasks.every(task => task.kind !== "hls") ? " · 总速度 " + fmtSpeed(totalBps) : ""}`
       : "无进行中的任务";
   if (truncated) stats.textContent += ` · 共 ${tasks.length} 条`;
   stats.textContent += ` · 当前 ${sorted.length} 项`;
@@ -824,6 +824,7 @@ function switchToRes() {
   document.getElementById("res-wrap").classList.remove("hidden");
   document.getElementById("tasks").classList.add("hidden");
   clearInterval(taskTimer);
+  updateBatchBar();
 }
 
 function setSettingsOpen(open) {

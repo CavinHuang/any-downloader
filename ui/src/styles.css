@@ -396,4 +396,4 @@ code { font: 11px/1.6 Consolas, monospace; }
 .sniff-item .t1 svg { flex: none; color: var(--muted); }
 .sniff-item .meta { font-size: 11px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .sniff-item .ops { display: flex; gap: 8px; align-items: center; }
-.sniff-tag { font-size: 10px; color: var(--accent, #47644d); border: 1px solid var(--border-soft, var(--border)); border-radius: 4px; padding: 1px 5px; }
+.sniff-tag { font-size: 10px; color: var(--accent, #3779ec); border: 1px solid var(--border-soft, var(--border)); border-radius: 4px; padding: 1px 5px; }

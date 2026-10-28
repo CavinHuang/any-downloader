@@ -40,20 +40,20 @@
   let rafId = 0;
   let busy = false;
 
-  // —— Anything Studio 色板（float-button.js TOKENS 精简副本）
+  // —— Anything Downloader 色板（float-button.js TOKENS 精简副本）
   const TOKENS = {
     light: {
-      panel: "#fbfaf6", ink: "#293c34", border: "#dedfd5",
-      accent: "#47644d", accentInk: "#eef1e6",
+      panel: "#ffffff", ink: "#243147", border: "#e3e8ef",
+      accent: "#3779ec", accentInk: "#ffffff",
       okBg: "#dcfce7", okBorder: "#86efac", okInk: "#166534",
       errBg: "#fee2e2", errBorder: "#fca5a5", errInk: "#991b1b",
-      shadow: "0 6px 22px rgba(35,49,38,.22)",
+      shadow: "0 6px 22px rgba(24,36,56,.22)",
     },
     dark: {
-      panel: "#242e27", ink: "#e3e7d9", border: "#3b463c",
-      accent: "#b6c99c", accentInk: "#22301f",
-      okBg: "#22301f", okBorder: "#3b463c", okInk: "#c1d5aa",
-      errBg: "#4d302b", errBorder: "#5c3a33", errInk: "#edaf98",
+      panel: "#1c2634", ink: "#e0e7f2", border: "#303d50",
+      accent: "#326bd0", accentInk: "#ffffff",
+      okBg: "#203d35", okBorder: "#2f6d56", okInk: "#83d5b1",
+      errBg: "#442c35", errBorder: "#5c3a33", errInk: "#f2a4a4",
       shadow: "0 6px 22px rgba(0,0,0,.45)",
     },
   };
@@ -320,10 +320,10 @@
     setState(ok ? "ok" : "err");
     if (ok) {
       showToast(
-        resp.exists ? "任务已存在" : resp.via === "ytdlp" ? "已交给 yt-dlp 托管下载" : "已创建下载任务"
+        resp.exists ? "任务已存在" : resp.via === "ytdlp" ? "已添加视频下载任务" : "已创建下载任务"
       );
     } else {
-      showToast(ERR_TEXT[(resp && resp.error) || ""] || "推送失败，请重试");
+      showToast(ERR_TEXT[(resp && resp.error) || ""] || "下载任务添加失败，请重试");
     }
     setTimeout(() => {
       setState("idle");

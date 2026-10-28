@@ -4,7 +4,7 @@ Chrome/Edge 的 MV3 扩展负责「眼睛和手」：嗅探资源、推送任务
 本指南覆盖开发环境的完整链路：注册 NM host → 加载扩展 → 启动主程序 → 推送下载。
 （普通用户装扩展请看 [EXTENSION-INSTALL.md](EXTENSION-INSTALL.md)：安装包随 Release 发布，桌面端 v0.4.3 起启动时自动注册通道。）
 
-界面已统一为 Anything Studio「网页收集室」，视觉与交互说明见 [UI-STUDIO.md](UI-STUDIO.md)。扩展无需前端构建；修改后在扩展管理页点击「重新加载」，再刷新已打开的网页，使浮动收集面板和文章操作也使用新版本。打包时请包含 `studio.css`、`popup.css`、`sync.css` 与 `icons/`，不可只复制 HTML 和 JS。
+界面已统一为以下载任务为中心的工具界面，视觉与交互说明见 [UI-DOWNLOADER.md](UI-DOWNLOADER.md)。扩展无需前端构建；修改后在扩展管理页点击「重新加载」，再刷新已打开的网页，使浮动下载面板和文章操作也使用新版本。打包时请包含 `studio.css`、`popup.css`、`sync.css` 与 `icons/`，不可只复制 HTML 和 JS。
 
 ## 组件与职责
 

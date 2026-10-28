@@ -34,19 +34,19 @@
 
   async function saveHighlight(text) {
     const all = await chrome.storage.local.get(STORE_KEY);
-    const map = all[STORE_KEY] || {};
+    const map = { ...(all[STORE_KEY] || {}) };
     const key = canonical();
-    const list = map[key] || [];
+    const list = [...(map[key] || [])];
     if (list.some((h) => h.text === text)) return { ok: true, dup: true, count: list.length };
     list.push({ text: text.slice(0, MAX_TEXT), at: Date.now() });
     while (list.length > MAX_PER_PAGE) list.shift();
     map[key] = list;
-    mem[key] = list;
     await chrome.storage.local.set({ [STORE_KEY]: map });
+    mem[key] = list;
     return { ok: true, count: list.length };
   }
 
-  // —— 浮动按钮：跟随选区，点击收藏，点击别处/再选自动消失
+  // —— 浮动按钮：跟随选区，保存标注，点击别处/再选自动消失
   let btn = null;
   function hideBtn() {
     if (btn) {
@@ -56,22 +56,37 @@
   }
   function showBtn(rect, text) {
     hideBtn();
-    btn = document.createElement("div");
+    btn = document.createElement("button");
+    btn.type = "button";
     btn.id = "adl-hl-btn";
     btn.textContent = "✚ 标注";
     btn.style.cssText =
       "position:fixed;z-index:2147483647;padding:6px 12px;border-radius:8px;" +
-      "background:#233126;color:#fff;font:600 12px/1.4 system-ui,sans-serif;" +
-      "cursor:pointer;box-shadow:0 6px 18px #23312633;border:0;user-select:none;";
+      "background:#2865d3;color:#fff;font:600 12px/1.4 system-ui,sans-serif;" +
+      "cursor:pointer;box-shadow:0 6px 18px #18243833;border:0;user-select:none;";
     btn.addEventListener("mousedown", (e) => e.stopPropagation());
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
+      const buttonStyle = btn.style.cssText;
       hideBtn();
-      const r = await saveHighlight(text);
+      let r;
+      try { r = await saveHighlight(text); }
+      catch (_) {
+        const error = document.createElement("div");
+        error.setAttribute("role", "alert");
+        error.textContent = "标注保存失败，请重试。";
+        error.style.cssText = buttonStyle + "background:#b83a3a;cursor:default;";
+        error.style.left = Math.max(8, rect.left) + "px";
+        error.style.top = Math.max(8, rect.top - 38) + "px";
+        document.documentElement.appendChild(error);
+        setTimeout(() => error.remove(), 3000);
+        return;
+      }
       const tip = document.createElement("div");
       tip.id = "adl-hl-tip";
-      tip.textContent = r && r.dup ? "标注已存在" : `已收下标注（本页 ${r && r.count || 1} 条）`;
-      tip.style.cssText = btn.style.cssText + "background:#45633e;cursor:default;";
+      tip.textContent = r && r.dup ? "标注已存在" : `已保存标注（本页 ${r && r.count || 1} 条）`;
+      tip.setAttribute("role", "status");
+      tip.style.cssText = buttonStyle + "background:#217d5c;cursor:default;";
       tip.style.left = rect.left + "px";
       tip.style.top = rect.top - 8 + "px";
       document.documentElement.appendChild(tip);

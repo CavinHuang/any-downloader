@@ -7,6 +7,10 @@
     <style>
       /* 悬浮下载图标（sniff-overlay 窗口）：透明底 40x40，圆角 ⬇ 按钮。
          状态：.has 新捕获微光 / .ok 成功 / .err 失败；tip 为 1.8s 轻提示。 */
+      :root { color-scheme: light; --panel:#ffffffee; --text:#243147; --border:#e3e8ef; --accent:#2865d3; --ok-bg:#eaf6f0; --ok-ink:#217d5c; --ok-border:#83c7a7; --err-bg:#fdf0f0; --err-ink:#b83a3a; --err-border:#e49b9b; }
+      @media (prefers-color-scheme: dark) {
+        :root { color-scheme: dark; --panel:#1c2634ee; --text:#e0e7f2; --border:#303d50; --accent:#326bd0; --ok-bg:#203d35; --ok-ink:#83d5b1; --ok-border:#2f6d56; --err-bg:#442c35; --err-ink:#f2a4a4; --err-border:#754651; }
+      }
       html,
       body {
         margin: 0;
@@ -21,34 +25,36 @@
         height: 100%;
         border: none;
         border-radius: 10px;
-        background: #fbfaf6ee;
-        color: #293c34;
+        background: var(--panel);
+        color: var(--text);
         display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
-        box-shadow: 0 4px 14px rgba(35, 49, 38, 0.28);
-        outline: 1px solid #dedfd5;
+        box-shadow: 0 4px 14px rgba(24, 36, 56, 0.28);
+        outline: 1px solid var(--border);
         transition: background 0.15s ease, color 0.15s ease;
       }
       #btn:hover {
-        background: #47644d;
-        color: #eef1e6;
-        outline-color: #344e3c;
+        background: var(--accent);
+        color: #fff;
+        outline-color: var(--accent);
       }
       #btn.has {
-        box-shadow: 0 0 0 2px #b6c99c, 0 4px 16px rgba(70, 100, 77, 0.5);
+        box-shadow: 0 0 0 2px #79aaff, 0 4px 16px rgba(55, 121, 236, 0.5);
       }
       #btn.ok {
-        background: #dcfce7;
-        color: #166534;
-        outline-color: #86efac;
+        background: var(--ok-bg);
+        color: var(--ok-ink);
+        outline-color: var(--ok-border);
       }
       #btn.err {
-        background: #fee2e2;
-        color: #991b1b;
-        outline-color: #fca5a5;
+        background: var(--err-bg);
+        color: var(--err-ink);
+        outline-color: var(--err-border);
       }
+      #btn:focus-visible { outline: 2px solid #79aaff; outline-offset: -3px; }
+      @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
       svg {
         display: block;
       }
@@ -56,14 +62,14 @@
         position: fixed;
         top: 44px;
         right: 0;
-        background: #fbfaf6f2;
-        color: #293c34;
-        border: 1px solid #dedfd5;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 6px 10px;
         font-size: 12px;
         white-space: nowrap;
-        box-shadow: 0 6px 18px rgba(35, 49, 38, 0.2);
+        box-shadow: 0 6px 18px rgba(24, 36, 56, 0.2);
         opacity: 0;
         transition: opacity 0.18s ease;
         pointer-events: none;

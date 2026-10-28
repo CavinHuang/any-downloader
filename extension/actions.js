@@ -38,8 +38,8 @@
   // ---------------------------------------------------------------- UI 基件
 
   const uiTheme = () => window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? { panel: "#242e27", text: "#e3e7d9", muted: "#a0ad9b", border: "#3b463c", accent: "#bdd29c", ink: "#22301f", soft: "#34432f", accentInk: "#c1d5aa" }
-    : { panel: "#fbfaf6", text: "#293c34", muted: "#687263", border: "#dedfd5", accent: "#344e3c", ink: "#fbfaf6", soft: "#e9eddf", accentInk: "#36543e" };
+    ? { panel: "#1c2634", text: "#e0e7f2", muted: "#9baabd", border: "#303d50", accent: "#326bd0", ink: "#ffffff", soft: "#253b5b", accentInk: "#94baff" }
+    : { panel: "#ffffff", text: "#243147", muted: "#6c788a", border: "#e3e8ef", accent: "#2865d3", ink: "#ffffff", soft: "#eef4ff", accentInk: "#2463d1" };
 
   // 轻提示（1.8s 自动消失）
   function toast(msg) {
@@ -49,7 +49,7 @@
     t.style.cssText =
       "position:fixed;left:50%;top:24px;transform:translateX(-50%);z-index:2147483647;" +
       `background:${theme.panel};color:${theme.text};border:1px solid ${theme.border};font:13px/1.5 system-ui,sans-serif;padding:10px 16px;` +
-      "border-radius:7px;box-shadow:0 8px 28px rgba(35,49,38,.2);";
+      "border-radius:7px;box-shadow:0 8px 28px rgba(24,36,56,.2);";
     document.documentElement.appendChild(t);
     setTimeout(() => t.remove(), 1800);
   }
@@ -60,19 +60,19 @@
     const opener = document.activeElement;
     const mask = document.createElement("div");
     mask.style.cssText =
-      "position:fixed;inset:0;z-index:2147483647;background:rgba(24,39,31,.4);backdrop-filter:blur(3px);";
+      "position:fixed;inset:0;z-index:2147483647;background:rgba(24,36,56,.4);backdrop-filter:blur(3px);";
     const box = document.createElement("div");
     box.style.cssText =
       "position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);" +
       "width:min(720px,92vw);max-height:86vh;display:flex;flex-direction:column;" +
       `background:${theme.panel};color:${theme.text};border:1px solid ${theme.border};border-radius:12px;overflow:hidden;` +
-      "box-shadow:0 16px 48px rgba(35,49,38,.2);font:14px/1.6 system-ui,sans-serif;";
+      "box-shadow:0 16px 48px rgba(24,36,56,.2);font:14px/1.6 system-ui,sans-serif;";
     box.setAttribute("role", "dialog");
     box.setAttribute("aria-modal", "true");
     box.setAttribute("aria-label", title);
     const head = document.createElement("div");
     head.style.cssText =
-      `display:flex;align-items:center;padding:21px 24px 17px;border-bottom:1px solid ${theme.border};font:400 25px/1.5 SimSun,Georgia,serif;`;
+      `display:flex;align-items:center;padding:21px 24px 17px;border-bottom:1px solid ${theme.border};font:600 21px/1.5 system-ui,sans-serif;`;
     head.textContent = title;
     const x = document.createElement("button");
     x.type = "button";
