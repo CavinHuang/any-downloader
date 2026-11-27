@@ -73,6 +73,8 @@ fn register_windows(manifest_body: &str) -> bool {
     for sub in [
         format!(r"Software\Google\Chrome\NativeMessagingHosts\{NM_HOST}"),
         format!(r"Software\Microsoft\Edge\NativeMessagingHosts\{NM_HOST}"),
+        format!(r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\{NM_HOST}"),
+        format!(r"Software\Vivaldi\NativeMessagingHosts\{NM_HOST}"),
     ] {
         match hkcu
             .create_subkey(&sub)
@@ -117,6 +119,10 @@ fn browser_nm_dirs() -> Vec<std::path::PathBuf> {
         vec![
             support.join("Google/Chrome/NativeMessagingHosts"),
             support.join("Microsoft Edge/NativeMessagingHosts"),
+            support.join("BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            support.join("Arc/User Data/NativeMessagingHosts"),
+            support.join("Vivaldi/NativeMessagingHosts"),
+            support.join("Chromium/NativeMessagingHosts"),
         ]
     } else {
         let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
@@ -124,6 +130,8 @@ fn browser_nm_dirs() -> Vec<std::path::PathBuf> {
             config.join("google-chrome/NativeMessagingHosts"),
             config.join("microsoft-edge/NativeMessagingHosts"),
             config.join("chromium/NativeMessagingHosts"),
+            config.join("BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            config.join("vivaldi/NativeMessagingHosts"),
         ]
     }
 }

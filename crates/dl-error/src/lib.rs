@@ -53,6 +53,11 @@ pub enum ErrorKind {
     ChecksumMismatch,
     /// 下载后处理失败（如视频号解密：算法可能已更新）。
     DecryptFailed,
+    /// 命中 HTML 下载中转页/登录墙，未解析到真实直链。
+    InterstitialPage {
+        url: String,
+        title: Option<String>,
+    },
     Internal,
 }
 
@@ -87,6 +92,7 @@ impl ErrorKind {
             ErrorKind::TaskExists { .. } => "task_exists",
             ErrorKind::ChecksumMismatch => "checksum_mismatch",
             ErrorKind::DecryptFailed => "decrypt_failed",
+            ErrorKind::InterstitialPage { .. } => "interstitial_page",
             ErrorKind::Internal => "internal",
         }
     }

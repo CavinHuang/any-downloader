@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { api, isActive, Task } from "../api";
 import { fmtBytes, fmtSpeed } from "../App";
 import { ROW_H } from "../const";
-import { t } from "../i18n";
+import { formatTaskError, t } from "../i18n";
 import { store } from "../store";
 import { showToast } from "../toast";
 import { categoryOf, sourceOf } from "../fileTypes";
@@ -96,11 +96,11 @@ export function TaskRow({
       <div className="c-file">
         <button className="name" title={name} onClick={onDetail}>{name}</button>
         <div className="sub">
-          <span className={`status ${task.status}`}><span className={`dot ${task.status}`} />{t(`status_${task.status}` as never)}</span>
+          <span className={`status-pill status ${task.status}`}><span className={`dot ${task.status}`} />{t(`status_${task.status}` as never)}</span>
           <span className="source" title={task.url}>{sourceOf(task.url)}</span>
           {task.status === "failed" && task.error ? (
-            <span className="err" title={JSON.stringify(task.error)}>
-              {errorCode(task.error)}
+            <span className="err" title={formatTaskError(task.error)}>
+              {formatTaskError(task.error)}
             </span>
           ) : null}
           {task.status === "done" && isExe ? (
@@ -111,7 +111,24 @@ export function TaskRow({
         </div>
       </div>
       <div className={`c-progress ${task.status}`}>
-        <div className="progress-summary"><span>{task.status === "done" ? t("status_done") : total ? `${pct}%` : t(`status_${task.status}`)}</span>{task.status === "done" && <Icon name="check" size={14} />}</div>
+        <div className="progress-summary">
+          <span className="progress-pct-label">{task.status === "done" ? t("status_done") : total ? `${pct}%` : t(`status_${task.status}`)}</span>
+          {active && segs && segs.length > 1 && (
+            <span className="thread-pill">
+              {t("threadsN").replace("{n}", String(segs.filter((sg) => sg.written < sg.end - sg.start).length || segs.length))}
+            </span>
+          )}
+          <span className="pct">
+            {task.kind === "hls" && total
+              ? `${downloaded || 0}/${total} ${t("segsUnit")}`
+              : total
+                ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}`
+                : task.status === "done"
+                  ? fmtBytes(task.downloaded_bytes)
+                  : <span title={t("sizeUnknown")}>—</span>}
+          </span>
+          {task.status === "done" && <Icon name="check" size={14} />}
+        </div>
         {segs && segs.length > 1 && total ? (
           <div
             className="bar multi"
@@ -162,16 +179,6 @@ export function TaskRow({
             )}
           </div>
         )}
-        <span className="pct">
-          {task.kind === "hls" && total
-            ? `${downloaded || 0}/${total} ${t("segsUnit")}`
-            : total
-              ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}`
-              : task.status === "done"
-                ? fmtBytes(task.downloaded_bytes)
-                : // A11：「—」时说明总大小未知，避免误读为卡死
-                  <span title={t("sizeUnknown")}>—</span>}
-        </span>
       </div>
       <div className="c-speed">{active && bps > 0 ? fmtSpeed(bps) : "—"}</div>
       <div className="c-eta">{remaining == null ? "—" : fmtRemaining(remaining)}</div>
@@ -185,7 +192,7 @@ export function TaskRow({
         ) : task.status === "done" ? (
           <>
             {/* A1：完成态固定 [打开][文件夹][详情]，行内 ≤3；删除统一收进详情抽屉 */}
-            <ActionBtn icon="arrow" label={t("open")} onClick={openFile} />
+            <ActionBtn icon="external" label={t("open")} onClick={openFile} />
             <ActionBtn
               icon="folder"
               label={t("openFolder")}
@@ -206,12 +213,21 @@ export function TaskRow({
                 })}
               />
             ) : (
-              <ActionBtn
-                primary
-                icon="play"
-                label={t("start")}
-                onClick={guard(() => api.startDownload(task.id))}
-              />
+              <>
+                {task.status === "queued" && (
+                  <ActionBtn
+                    icon="arrowUp"
+                    label={t("moveTop")}
+                    onClick={guard(() => api.reorderQueue(task.id, "top"))}
+                  />
+                )}
+                <ActionBtn
+                  primary
+                  icon="play"
+                  label={t("start")}
+                  onClick={guard(() => api.startDownload(task.id))}
+                />
+              </>
             )}
             <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
@@ -247,10 +263,6 @@ function displayName(url: string): string {
   } catch {
     return url;
   }
-}
-
-function errorCode(err: Record<string, unknown>): string {
-  return String(err.code ?? JSON.stringify(err));
 }
 
 function fmtRemaining(seconds: number): string {

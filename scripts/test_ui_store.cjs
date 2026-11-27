@@ -90,3 +90,85 @@ test('late progress for a removed task does not recreate it', async () => {
   assert.equal(store.getSnapshot(), snapshot);
   assert.equal(store.liveOf('gone'), undefined);
 });
+
+test('queued tasks sort by priority DESC then queue_order ASC ahead of paused and done', async () => {
+  const { store } = fixture([
+    task('done1', { status: 'done', created_at: 100 }),
+    task('paused1', { status: 'paused', created_at: 200 }),
+    task('q_low', { status: 'queued', priority: 0, queue_order: 30, created_at: 30 }),
+    task('q_first', { status: 'queued', priority: 0, queue_order: 10, created_at: 50 }),
+    task('q_high', { status: 'queued', priority: 30, queue_order: 99, created_at: 10 }),
+    task('active1', { status: 'downloading', created_at: 5 }),
+  ]);
+  await store.refresh();
+  assert.deepEqual(
+    store.getSnapshot().map((t) => t.id),
+    ['active1', 'q_high', 'q_first', 'q_low', 'paused1', 'done1']
+  );
+});
+
+test('segment speeds track segments by start offset across dynamic splits', async () => {
+  const { store } = fixture([task('a', { total_bytes: 1000 })]);
+  await store.refresh();
+  store.applyEvent(
+    progress('a', 200, {
+      segments: [
+        { start: 0, written: 100, end: 500 },
+        { start: 500, written: 100, end: 1000 },
+      ],
+    })
+  );
+  // Wait > 200ms so segSpeeds delta computes
+  await new Promise((r) => setTimeout(r, 230));
+  store.applyEvent(
+    progress('a', 550, {
+      segments: [
+        { start: 0, written: 200, end: 300 },
+        { start: 300, written: 50, end: 500 }, // dynamically split new segment
+        { start: 500, written: 300, end: 1000 },
+      ],
+    })
+  );
+  const live = store.liveOf('a');
+  assert.equal(live.segSpeeds.length, 3);
+  assert.ok(live.segSpeeds[0] > 0, 'seg 0 speed computed');
+  assert.equal(live.segSpeeds[1], 0, 'newly split seg starts at 0 without false delta');
+  assert.ok(live.segSpeeds[2] > live.segSpeeds[0], 'seg at start=500 kept its baseline');
+});
+
+test('totalBps equals exact sum of downloading tasks and ignores paused/verifying/done', async () => {
+  const { store } = fixture([
+    task('d1', { status: 'downloading' }),
+    task('d2', { status: 'downloading' }),
+    task('p1', { status: 'paused' }),
+  ]);
+  await store.refresh();
+  assert.equal(store.getTotalBps(), 0);
+
+  store.applyEvent(progress('d1', 100, { bps: 3000 }));
+  store.applyEvent(progress('d2', 200, { bps: 7000 }));
+  store.applyEvent(progress('p1', 50, { bps: 9999 }));
+  assert.equal(store.getTotalBps(), 10000);
+
+  // Transitioning d1 to verifying immediately removes its speed from totalBps
+  store.applyEvent({ type: 'state_changed', task_id: 'd1', status: 'verifying' });
+  assert.equal(store.getTotalBps(), 7000);
+  assert.equal(store.liveOf('d1').bps, 0);
+
+  // Pausing d2 drops totalBps to 0
+  store.applyEvent({ type: 'state_changed', task_id: 'd2', status: 'paused' });
+  assert.equal(store.getTotalBps(), 0);
+});
+
+test('pruneStaleSpeeds decays old speeds without breaking list snapshot reference', async () => {
+  const { store } = fixture([task('d1', { status: 'downloading' })]);
+  await store.refresh();
+  const snap = store.getSnapshot();
+  store.applyEvent(progress('d1', 300, { bps: 4500 }));
+  assert.equal(store.getTotalBps(), 4500);
+  await new Promise((r) => setTimeout(r, 20));
+  store.pruneStaleSpeeds(5);
+  assert.equal(store.getTotalBps(), 0);
+  assert.equal(store.liveOf('d1').bps, 0);
+  assert.equal(store.getSnapshot(), snap);
+});

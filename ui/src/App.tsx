@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { api, isActive, listenEngineEvents, listenSniffEvents, Task, TaskStatus } from "./api";
+import { api, isActive, listenEngineEvents, listenSniffEvents, QueueStatus, Task, TaskStatus } from "./api";
 
 // 剪贴板事件监听（复用 tauri event 通道）
 function listenEngineEventsClip(cb: (url: string) => void) {
@@ -27,12 +27,14 @@ import { Icon, type IconName } from "./components/Icon";
 import { TransferPanel } from "./components/TransferPanel";
 
 type Filter = "all" | "active" | "queued" | "paused" | "done" | "failed" | "canceled";
-const TASK_VIEWS: { key: Filter; icon: IconName }[] = [
+const PRIMARY_VIEWS: { key: Filter; icon: IconName }[] = [
   { key: "all", icon: "grid" },
   { key: "active", icon: "download" },
   { key: "queued", icon: "clock" },
   { key: "paused", icon: "pause" },
   { key: "done", icon: "check" },
+];
+const SECONDARY_VIEWS: { key: Filter; icon: IconName }[] = [
   { key: "failed", icon: "alert" },
   { key: "canceled", icon: "close" },
 ];
@@ -40,9 +42,10 @@ const OVERSCAN = 8;
 
 export function App() {
   const tasks = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const totalBps = useSyncExternalStore(store.subscribe, store.getTotalBps);
   const toasts = useSyncExternalStore(subscribeToasts, getToasts);
   const upd = useSyncExternalStore(subscribeUpdate, getUpdateState);
-  // 更新提示形态：设置图标角标 + 悬停 tooltip（完整进度/操作在设置 → 05）
+  // 更新提示形态：设置图标角标 + 悬停 tooltip（完整进度/操作在设置 → 更新）
   const updateNudge =
     upd.status === "available" ||
     upd.status === "installing" ||
@@ -69,10 +72,10 @@ export function App() {
   // A12：只存 id，详情任务渲染时从 store 快照按 id 取（打开期间实时更新）
   const [detailId, setDetailId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  // 全文搜索：文章任务正文命中（设置 → 05 之外的采集能力；docs/MEDIA-ADAPTERS.md）
+  // 全文搜索：文章任务正文命中
   const [contentHits, setContentHits] = useState<Set<string>>(new Set());
   const [inTauri] = useState(() => "__TAURI_INTERNALS__" in window);
-  const [totalBps, setTotalBps] = useState(0);
+  const [queueSt, setQueueSt] = useState<QueueStatus | null>(null);
 
   // 正文命中（防抖 250ms）：文章任务的 Markdown 全文搜索（命中任务的 id 集合）
   useEffect(() => {
@@ -145,14 +148,30 @@ export function App() {
     };
   }, [inTauri]);
 
+  // 衰减超过 3.5s 未收到新进度包的速度残留，确保总速度与行速度不滞留虚高
+  useEffect(() => {
+    const prune = setInterval(() => store.pruneStaleSpeeds(3500), 1000);
+    return () => clearInterval(prune);
+  }, []);
+
   useEffect(() => {
     if (!inTauri) return;
+    const refreshQueue = () => {
+      api.queueStatus().then(setQueueSt).catch(() => {});
+    };
     store
       .refresh()
       .catch(() => {})
       .finally(() => setFirstLoad(false));
-    const poll = setInterval(() => store.pollIncremental(), 2000);
-    const unlisten = listenEngineEvents((ev) => store.applyEvent(ev)).catch(() => () => {});
+    refreshQueue();
+    const poll = setInterval(() => {
+      store.pollIncremental();
+      refreshQueue();
+    }, 2000);
+    const unlisten = listenEngineEvents((ev) => {
+      store.applyEvent(ev);
+      if (ev.type === "state_changed") refreshQueue();
+    }).catch(() => () => {});
     const unclip = listenEngineEventsClip((url) => {
       // 同链接本会话只提示一次（DESIGN §8 防误触发）
       if (seenClips.current.has(url)) return;
@@ -161,34 +180,35 @@ export function App() {
     }).catch(() => () => {});
     // 自动更新：启动后静默首查，此后每 6 小时一轮；发现新版本自动后台下载（§docs/RELEASE.md）
     scheduleAutoChecks();
-    // 汇总速度（从 live 数据聚合，节流 500ms）
+    let lastTitle = "";
+    let lastProg = -1;
+    // 窗口标题与任务栏进度同步（直接读取 store.getTotalBps() 精确汇总值，去重减少无效 IPC）
     const speedTimer = setInterval(async () => {
-      let sum = 0;
+      const sum = store.getTotalBps();
       let doneBytes = 0;
       let totalBytes = 0;
       for (const t of store.getSnapshot()) {
         if (isActive(t.status)) {
-          sum += store.liveOf(t.id)?.bps ?? 0;
           doneBytes += store.liveOf(t.id)?.downloaded ?? 0;
           totalBytes += t.total_bytes ?? 0;
         }
       }
-      setTotalBps(sum);
       if (speedSortRef.current) setSpeedRevision(revision => revision + 1);
       try {
-        // 任务栏进度条 + 标题栏速度
         const w = getCurrentWindow();
-        if (sum > 0) {
-          await w.setTitle(`⬇ ${fmtSpeed(sum)} — ${t("appTitle")}`);
-          if (totalBytes > 0) {
-            await w.setProgressBar({
-              status: "Normal" as never,
-              progress: Math.round((doneBytes / totalBytes) * 100),
-            });
+        const nextTitle = sum > 0 ? `⬇ ${fmtSpeed(sum)} — ${t("appTitle")}` : t("appTitle");
+        if (nextTitle !== lastTitle) {
+          lastTitle = nextTitle;
+          await w.setTitle(nextTitle);
+        }
+        const nextProg = sum > 0 && totalBytes > 0 ? Math.round((doneBytes / totalBytes) * 100) : -1;
+        if (nextProg !== lastProg) {
+          lastProg = nextProg;
+          if (nextProg >= 0) {
+            await w.setProgressBar({ status: "Normal" as never, progress: nextProg });
+          } else {
+            await w.setProgressBar({ status: "None" as never });
           }
-        } else {
-          await w.setTitle(t("appTitle"));
-          await w.setProgressBar({ status: "None" as never });
         }
       } catch {
         // 非 Tauri 环境忽略
@@ -370,12 +390,19 @@ export function App() {
       toastBatch(t("pausedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
     });
 
-  const resumeAll = () =>
-    runBatch("resumeAll", async () => {
-      const targets = tasks.filter((x) => x.status === "paused");
-      const rs = await Promise.allSettled(targets.map((x) => api.startDownload(x.id)));
-      store.refresh();
-      toastBatch(t("resumedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+  const startAllPending = () =>
+    runBatch("startAll", async () => {
+      const pausedTargets = tasks.filter((x) => x.status === "paused");
+      const rs = await Promise.allSettled(pausedTargets.map((x) => api.startDownload(x.id)));
+      const qStarted = counts.queued > 0 ? await api.startQueue() : 0;
+      setQueueSt(await api.queueStatus().catch(() => null));
+      await store.refresh();
+      const totalOk = countOk(rs) + qStarted;
+      if (pausedTargets.length > 0) {
+        toastBatch(t("resumedN").replace("{n}", String(totalOk)), countOk(rs), pausedTargets.length);
+      } else {
+        showToast(t("queueStarted"), "success");
+      }
     });
 
   const retryAllFailed = () =>
@@ -401,6 +428,36 @@ export function App() {
       store.refresh();
       toastBatch(t("clearedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
     });
+
+  const toggleQueue = () =>
+    runBatch("queue", async () => {
+      if (queueSt?.paused) {
+        await api.startQueue();
+        showToast(t("queueStarted"), "success");
+      } else {
+        await api.pauseQueue();
+        showToast(t("queuePaused"), "info");
+      }
+      setQueueSt(await api.queueStatus().catch(() => null));
+      await store.refresh();
+    });
+
+  const startAllQueued = () =>
+    runBatch("startQueue", async () => {
+      await api.startQueue();
+      setQueueSt(await api.queueStatus().catch(() => null));
+      await store.refresh();
+      showToast(t("queueStarted"), "success");
+    });
+
+  const changeConcurrent = async (val: number) => {
+    if (!requireDesktop()) return;
+    try {
+      setQueueSt(await api.setMaxConcurrent(val));
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  };
 
   // —— 选中项批量操作：targets = 选中 ∩ 适用状态；空集给中性提示不静默（§3.8）
   const runSelected = (
@@ -475,18 +532,18 @@ export function App() {
 
   const showSkeleton = inTauri && firstLoad && tasks.length === 0 && skeletonOn;
 
-  const pausedCount = tasks.filter(task => task.status === "paused").length;
   const openAdd = () => setShowAdd(true);
   const requireDesktop = () => {
     if (inTauri) return true;
     showToast(t("desktopRequired"), "warn");
     return false;
   };
-  const quickDownload = async () => {
+  const quickSubmit = async (startImmediately: boolean) => {
     if (quickBusy || !requireDesktop()) return;
     const urls = draftUrl.trim().split(/\s+/).filter(Boolean);
     if (urls.length === 0) return;
-    if (urls.some(url => { try { return !["http:", "https:"].includes(new URL(url).protocol); } catch { return true; } })) {
+    const supportedUrl = /^(?:https?|thunder|flashget|qqdl):\/\//i;
+    if (urls.some((url) => !supportedUrl.test(url))) {
       showToast(t("invalidDownloadUrl"), "warn");
       return;
     }
@@ -494,16 +551,23 @@ export function App() {
     try {
       const results = await Promise.allSettled(urls.map(async url => {
         const task = await api.addTask({ url });
-        await api.startDownload(task.id);
+        if (startImmediately) {
+          await api.startDownload(task.id);
+        }
       }));
       const failedUrls = urls.filter((_, index) => results[index].status === "rejected");
       const ok = results.length - failedUrls.length;
       setDraftUrl(failedUrls.join(" "));
       if (ok > 0) { setFilter("all"); setCatFilter("all"); setSearch(""); }
       const duplicate = results.filter(result => result.status === "rejected" && String(result.reason).includes("task_exists")).length;
-      showToast(t("addSummary").replace("{ok}", String(ok)).replace("{dup}", String(duplicate)).replace("{fail}", String(failedUrls.length - duplicate)), failedUrls.length ? "warn" : "success");
+      if (!startImmediately && ok > 0 && failedUrls.length === 0) {
+        showToast(t("queuedN").replace("{n}", String(ok)), "success");
+      } else {
+        showToast(t("addSummary").replace("{ok}", String(ok)).replace("{dup}", String(duplicate)).replace("{fail}", String(failedUrls.length - duplicate)), failedUrls.length ? "warn" : "success");
+      }
       const error = results.find(result => result.status === "rejected" && !String(result.reason).includes("task_exists"));
       if (error?.status === "rejected") showToast(String(error.reason), "error");
+      setQueueSt(await api.queueStatus().catch(() => null));
       await store.refresh();
     } catch (error) {
       showToast(String(error), "error");
@@ -535,40 +599,62 @@ export function App() {
     <div className="app">
       <aside className="sidebar">
         <button className="brand" aria-label={t("home")} onClick={() => { setFilter("all"); setCatFilter("all"); setSearch(""); }}>
-          <span className="brand-icon"><Icon name="download" size={23} /></span>
+          <span className="brand-icon"><Icon name="download" size={20} /></span>
           <span className="brand-name">Anything<span>Downloader</span></span>
         </button>
-        <button className="primary new-task" onClick={openAdd} aria-label={t("newTask")} title={`${t("newTask")} (Ctrl+N)`}><Icon name="plus" size={18} /><span>{t("newTask")}</span><kbd>Ctrl N</kbd></button>
-        <div className="nav-label">{t("downloadTasks")}</div>
+        <button className="primary new-task" onClick={openAdd} aria-label={t("newTask")} title={`${t("newTask")} (Ctrl+N)`}><Icon name="plus" size={17} /><span>{t("newTask")}</span><kbd>Ctrl N</kbd></button>
+        <div className="nav-label">{t("navMainGroup")}</div>
         <nav className="task-nav" aria-label={t("sideStatus")}>
-          {TASK_VIEWS.map(({key, icon}) => (
+          {PRIMARY_VIEWS.map(({key, icon}) => (
             <button key={key} className={`nav-item${filter === key ? " active" : ""}`} onClick={() => setFilter(key)} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={filter === key ? "page" : undefined}>
-              <Icon name={icon} size={18} /><span>{t(`view_${key}`)}</span><span className={`nav-count${key === "failed" && counts.failed > 0 ? " has-errors" : ""}`}>{counts[key]}</span>
+              <Icon name={icon} size={17} /><span>{t(`view_${key}`)}</span><span className="nav-count">{counts[key]}</span>
+            </button>
+          ))}
+          <div className="nav-divider" />
+          {SECONDARY_VIEWS.map(({key, icon}) => (
+            <button key={key} className={`nav-item${filter === key ? " active" : ""}`} onClick={() => setFilter(key)} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={filter === key ? "page" : undefined}>
+              <Icon name={icon} size={17} /><span>{t(`view_${key}`)}</span><span className={`nav-count${key === "failed" && counts.failed > 0 ? " has-errors" : ""}`}>{counts[key]}</span>
             </button>
           ))}
         </nav>
         <div className="sidebar-tools">
           <div className="nav-label">{t("tools")}</div>
-          <button className="nav-item" aria-label={t("sniffPanel")} title={t("sniffPanel")} onClick={() => { if (requireDesktop()) { setSniffCount(0); setSniffOpen(true); } }}>
-            <Icon name="radar" size={18} /><span>{t("sniffPanel")}</span>{sniffCount > 0 && <span className="nav-count">{sniffCount}</span>}
+          <button className="nav-item" aria-label={t("sniffTool")} title={t("sniffTool")} onClick={() => { if (requireDesktop()) { setSniffCount(0); setSniffOpen(true); } }}>
+            <Icon name="radar" size={17} /><span>{t("sniffTool")}</span>{sniffCount > 0 && <span className="nav-count has-badge">{sniffCount}</span>}
           </button>
           <button className="nav-item settings-entry" aria-label={t("settings")} title={updateTooltip} onClick={() => requireDesktop() && setShowSettings(true)}>
-            <Icon name="settings" size={18} /><span>{t("settings")}</span>{updateNudge && <span className="update-dot" aria-hidden="true" />}
+            <Icon name="settings" size={17} /><span>{t("settings")}</span>{updateNudge && <span className="update-dot" aria-hidden="true" />}
           </button>
         </div>
-        <div className="sidebar-bottom"><span className={`connection-dot${inTauri ? " connected" : ""}`} /><span>{t(inTauri ? "desktopMode" : "previewMode")}</span></div>
+        <div className="sidebar-bottom">
+          <span className={`connection-pill${inTauri ? " connected" : ""}`}>
+            <span className={`connection-dot${inTauri ? " connected" : ""}`} />
+            <span>{t(inTauri ? "engineReady" : "previewMode")}</span>
+          </span>
+        </div>
       </aside>
 
       <div className="workspace">
         <header className="workspace-header">
-          <div className="page-heading"><h1>{t(`view_${filter}`)}</h1><span className="task-total">{t("taskCount").replace("{n}", String(counts[filter]))}</span></div>
-          <label className="search-box"><Icon name="search" size={16} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchTasks")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>Ctrl K</kbd></label>
+          <div className="page-heading">
+            <h1>{t(`view_${filter}`)}</h1>
+            <span className="task-total">{t("taskCount").replace("{n}", String(counts[filter]))}</span>
+          </div>
+          <div className={`header-speed-pill${counts.active > 0 ? " active" : ""}`} title={t("totalSpeedLabel")}>
+            <span className={`pulse-dot${counts.active > 0 ? " live" : ""}`} />
+            <span className="header-speed-label">{t("totalSpeedLabel")}</span>
+            <strong className="header-speed-val">{fmtSpeed(totalBps)}</strong>
+            {counts.active > 0 && (
+              <span className="header-active-badge">{t("activeDownloads").replace("{n}", String(counts.active))}</span>
+            )}
+          </div>
+          <label className="search-box"><Icon name="search" size={15} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchTasks")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>Ctrl K</kbd></label>
         </header>
 
         <main className="main">
           <section className="download-entry" aria-label={t("quickDownload")}>
-            <form className="link-entry" onSubmit={e => { e.preventDefault(); void quickDownload(); }}>
-              <Icon name="link" size={19} />
+            <form className="link-entry" onSubmit={e => { e.preventDefault(); void quickSubmit(true); }}>
+              <Icon name="link" size={18} />
               <input aria-label={t("quickLinkLabel")} value={draftUrl} disabled={quickBusy} onChange={e => setDraftUrl(e.target.value)} onPaste={e => {
                 const pasted = e.clipboardData.getData("text");
                 if (/[\r\n]/.test(pasted)) {
@@ -577,23 +663,48 @@ export function App() {
                   setDraftUrl(draftUrl.slice(0, input.selectionStart ?? 0) + pasted.replace(/\s+/g, " ").trim() + draftUrl.slice(input.selectionEnd ?? draftUrl.length));
                 }
               }} placeholder={t("quickLinkPlaceholder")} />
-              <button className="primary" type="submit" disabled={quickBusy || !draftUrl.trim()}><Icon name="download" size={16} />{t(quickBusy ? "addingTasks" : "downloadNow")}</button>
+              <button type="button" className="entry-queue-btn" disabled={quickBusy || !draftUrl.trim()} onClick={() => void quickSubmit(false)}>{t("addToQueue")}</button>
+              <button className="primary" type="submit" disabled={quickBusy || !draftUrl.trim()}><Icon name="download" size={15} />{t(quickBusy ? "addingTasks" : "downloadNow")}</button>
+              <button type="button" className="entry-more-btn" onClick={openAdd} title={t("downloadOptions")}>{t("moreOptions")}</button>
             </form>
-            <div className="entry-caption"><span>{t("quickLinkHint")}</span><button className="text-button" onClick={openAdd}>{t("downloadOptions")}<Icon name="arrow" size={13} /></button></div>
           </section>
 
           <section className="task-panel" aria-label={t("downloadTasks")}>
             <div className="task-toolbar" role="toolbar" aria-label={t("taskActions")}>
               <div className="toolbar-actions">
-                <button onClick={pauseAll} disabled={busyOp !== null || counts.active === 0}><Icon name="pause" size={15} />{t("pauseAll")}</button>
-                <button onClick={resumeAll} disabled={busyOp !== null || pausedCount === 0}><Icon name="play" size={15} />{t("resumeAll")}</button>
-                {filter === "failed" && counts.failed > 0 && <button onClick={retryAllFailed} disabled={busyOp !== null}><Icon name="retry" size={15} />{t("retryAllFailed")}</button>}
+                <button onClick={startAllPending} disabled={busyOp !== null || counts.queued + counts.paused === 0}><Icon name="play" size={14} />{t("startAll")}</button>
+                <button onClick={pauseAll} disabled={busyOp !== null || counts.active === 0}><Icon name="pause" size={14} />{t("pauseAll")}</button>
+                {counts.queued > 0 && (
+                  <button
+                    className={`queue-pill ${queueSt?.paused ? "paused" : "running"}`}
+                    onClick={queueSt?.paused ? startAllQueued : toggleQueue}
+                    disabled={busyOp !== null}
+                    title={queueSt?.paused ? t("startQueue") : t("pauseQueue")}
+                  >
+                    <Icon name={queueSt?.paused ? "pause" : "clock"} size={14} />
+                    {queueSt?.paused ? t("queueStopped") : t("queueRunning")}
+                  </button>
+                )}
+                {filter === "failed" && counts.failed > 0 && <button onClick={retryAllFailed} disabled={busyOp !== null}><Icon name="retry" size={14} />{t("retryAllFailed")}</button>}
                 {filter === "done" && counts.done > 0 && <button onClick={clearDone} disabled={busyOp !== null}>{t("clearDone")}</button>}
               </div>
               <div className="toolbar-secondary">
-                <button className="icon-button" title={t("importTasks")} aria-label={t("importTasks")} onClick={importTasks}><Icon name="import" size={17} /></button>
-                <button className="icon-button" title={t("exportTasks")} aria-label={t("exportTasks")} onClick={exportTasks}><Icon name="export" size={17} /></button>
-                <span className="toolbar-divider" />
+                {inTauri && (
+                  <label className="conc-control" title={t("maxConcurrent")}>
+                    <span>{t("concurrentTasksLabel")}</span>
+                    <select
+                      value={String(queueSt?.max_concurrent ?? 3)}
+                      onChange={(e) => void changeConcurrent(Number(e.target.value))}
+                    >
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                      <option value="5">5</option>
+                      <option value="8">8</option>
+                      <option value="0">{t("concurrentUnlimited")}</option>
+                    </select>
+                  </label>
+                )}
                 <label className="type-control"><span className="sr-only">{t("sideCategory")}</span><select value={catFilter} onChange={e => setCatFilter(e.target.value as Category)}>{CATEGORIES.map(({key, label}) => <option key={key} value={key}>{t(label)}</option>)}</select></label>
                 <label className="sort-control"><span className="sr-only">{t("sortTasks")}</span><select value={sortKey ? sortKey + ":" + sortDir : "default"} onChange={e => {
                   const [key, direction] = e.target.value.split(":");
@@ -607,6 +718,9 @@ export function App() {
                   <option value="size:1">{t("sortSizeAsc")}</option>
                   <option value="speed:-1">{t("sortSpeedDesc")}</option>
                 </select></label>
+                <span className="toolbar-divider" />
+                <button className="icon-button" title={t("importTasks")} aria-label={t("importTasks")} onClick={importTasks}><Icon name="import" size={16} /></button>
+                <button className="icon-button" title={t("exportTasks")} aria-label={t("exportTasks")} onClick={exportTasks}><Icon name="export" size={16} /></button>
               </div>
             </div>
 
@@ -652,7 +766,7 @@ export function App() {
             <div className="list-footer"><span>{t("visibleTasks").replace("{n}", String(filtered.length))}</span><span>{t("taskDetailHint")}</span></div>
           </section>
         </main>
-        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} />
+        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} queued={counts.queued} />
       </div>
 
       <div className="toast-stack">{toasts.map(x => <div key={x.id} className={`banner toast ${x.kind}`} role={x.kind === "error" ? "alert" : "status"}><span className="banner-text">{x.text}</span><button className="banner-close" aria-label={t("close")} onClick={() => dismissToast(x.id)}>×</button></div>)}</div>

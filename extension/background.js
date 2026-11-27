@@ -93,9 +93,14 @@ const YTDLP_HOSTS = [
 const MAX_PER_TAB = 100; // 单页资源上限（超限丢最旧，storage.session 配额治理）
 
 // —— 嗅探配置（popup 设置页写入，storage.local.sniffCfg；内存缓存避免监听器内异步）
+const BRIDGE_DEFAULT_PORT = 14371;
+const KEEP_REQ_HEADERS = ["referer", "user-agent", "cookie", "authorization", "origin"];
 const CFG_DEFAULTS = {
   types: { video: true, hls: true, audio: true, archive: true, binary: true, doc: true, image: false, other: true },
   minSizeMB: 1,
+  prefixPageTitle: true,
+  bridgePort: BRIDGE_DEFAULT_PORT,
+  bridgeToken: "",
 };
 let CFG = JSON.parse(JSON.stringify(CFG_DEFAULTS));
 async function loadCfg() {
@@ -105,6 +110,9 @@ async function loadCfg() {
       CFG = {
         types: { ...CFG_DEFAULTS.types, ...(sniffCfg.types || {}) },
         minSizeMB: sniffCfg.minSizeMB ?? 1,
+        prefixPageTitle: sniffCfg.prefixPageTitle !== false,
+        bridgePort: Number(sniffCfg.bridgePort) || BRIDGE_DEFAULT_PORT,
+        bridgeToken: typeof sniffCfg.bridgeToken === "string" ? sniffCfg.bridgeToken : "",
       };
     }
   } catch (_) {}
@@ -129,10 +137,12 @@ function minBytesCfg() {
 const RECENT_HEADERS_MAX = 500;
 const RECENT_HEADERS_TTL = 60 * 1000;
 
-// ---------------------------------------------------------------- NM 长连接
+// ---------------------------------------------------------------- 双通道（NM + 本地 HTTP 桥）
 
 let port = null;
 let msgSeq = 0;
+let nmCooldownUntil = 0;
+let lastTransport = "none";
 const pending = new Map(); // id -> { resolve, timer }
 
 function ensurePort() {
@@ -148,6 +158,7 @@ function ensurePort() {
   });
   port.onDisconnect.addListener(() => {
     port = null;
+    nmCooldownUntil = Date.now() + 15000;
     for (const [, p] of pending) {
       clearTimeout(p.timer);
       p.resolve({ ok: false, error: "app_not_running" });
@@ -156,14 +167,15 @@ function ensurePort() {
   });
 }
 
-/** NM 请求-响应（port 串行 roundtrip）；超时/断链以结构化错误兜底。 */
-function nmCall(method, params, timeoutMs = 8000) {
+function nmDirectCall(method, params, timeoutMs = 8000) {
+  if (Date.now() < nmCooldownUntil) {
+    return Promise.resolve({ ok: false, error: "app_not_running" });
+  }
   return new Promise((resolve) => {
-    // connectNative 找不到/无法启动 host 时会同步抛错——必须在这里兜底，
-    // 否则 Promise 永不落定，popup 的 sendMessage 将永久挂起
     try {
       ensurePort();
     } catch (e) {
+      nmCooldownUntil = Date.now() + 15000;
       resolve({ ok: false, error: "app_not_running" });
       return;
     }
@@ -179,9 +191,95 @@ function nmCall(method, params, timeoutMs = 8000) {
       clearTimeout(timer);
       pending.delete(id);
       port = null;
+      nmCooldownUntil = Date.now() + 15000;
       resolve({ ok: false, error: "app_not_running" });
     }
   });
+}
+
+function bridgeBaseUrl() {
+  const p = Number(CFG.bridgePort) || BRIDGE_DEFAULT_PORT;
+  return `http://127.0.0.1:${p}`;
+}
+
+function bridgeHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (CFG.bridgeToken) h["X-ADL-Token"] = CFG.bridgeToken;
+  return h;
+}
+
+async function httpBridgeCall(method, params, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const id = ++msgSeq;
+    const resp = await fetch(`${bridgeBaseUrl()}/rpc`, {
+      method: "POST",
+      headers: bridgeHeaders(),
+      body: JSON.stringify({ v: 1, id, method, params: params === undefined ? null : params }),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      return { ok: false, error: resp.status === 401 ? "unauthorized" : "app_not_running" };
+    }
+    const data = await resp.json();
+    if (data && data.ok) lastTransport = "http";
+    return data;
+  } catch (e) {
+    return {
+      ok: false,
+      error: e && e.name === "AbortError" ? "timeout" : "app_not_running",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 双通道 RPC：优先 NM 长连接，失败/冷却期无缝切本地 127.0.0.1:14371 HTTP 桥。 */
+async function nmCall(method, params, timeoutMs = 8000) {
+  const nmResp = await nmDirectCall(method, params, timeoutMs);
+  if (nmResp && nmResp.ok) {
+    nmCooldownUntil = 0;
+    lastTransport = "nm";
+    return { ...nmResp, transport: "nm" };
+  }
+  const errCode = nmResp && (typeof nmResp.error === "string" ? nmResp.error : nmResp.error && nmResp.error.code);
+  if (nmResp && !nmResp.ok && errCode !== "app_not_running" && errCode !== "timeout") {
+    return nmResp;
+  }
+  const httpResp = await httpBridgeCall(method, params, timeoutMs);
+  if (httpResp && httpResp.ok) {
+    return { ...httpResp, transport: "http" };
+  }
+  return httpResp && httpResp.error !== "app_not_running" ? httpResp : nmResp;
+}
+
+async function reportSniffToDesktop(rec) {
+  try {
+    if (!rec || !rec.url || rec.type === "segment") return;
+    if (rec.type === "image" && !groupAllowed("image")) return;
+    const payload = {
+      url: rec.url,
+      tab_url: rec.tabUrl || null,
+      page_title: rec.pageTitle || null,
+      filename: rec.filename || null,
+      kind: rec.type || "other",
+      mime: rec.mime || null,
+      bytes: rec.bytes ?? null,
+      duration_sec: rec.durationSec ?? null,
+      variants: Array.isArray(rec.variants) ? rec.variants.slice(0, 12) : [],
+      headers: rec.headers || {},
+      at: rec.at || Date.now(),
+    };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
+    await fetch(`${bridgeBaseUrl()}/sniff/report`, {
+      method: "POST",
+      headers: bridgeHeaders(),
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    }).finally(() => clearTimeout(timer));
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------- 嗅探存储
@@ -271,10 +369,115 @@ function guessType(url) {
   return EXT_TYPE[m[1].toLowerCase()] || "other";
 }
 
+const tabTitles = new Map(); // tabId -> { title, url }
+async function getTabMeta(tabId) {
+  if (tabId == null || tabId < 0) return { title: "", url: "" };
+  const cached = tabTitles.get(tabId);
+  if (cached && cached.title) return cached;
+  try {
+    const t = await chrome.tabs.get(tabId);
+    const meta = { title: t.title || "", url: t.url || "" };
+    tabTitles.set(tabId, meta);
+    return meta;
+  } catch (_) {
+    return cached || { title: "", url: "" };
+  }
+}
+
+function visibleTabItems(tabId) {
+  const m = byTab.get(tabId);
+  if (!m) return [];
+  const all = [...m.values()];
+  const hasPlaylist = all.some((r) => r.type === "hls" || r.type === "dash");
+  return hasPlaylist ? all.filter((r) => r.type !== "segment") : all;
+}
+
 function updateBadge(tabId) {
-  const n = byTab.get(tabId)?.size || 0;
+  const n = visibleTabItems(tabId).length;
   chrome.action.setBadgeText({ tabId, text: n ? String(n) : "" });
   chrome.action.setBadgeBackgroundColor({ tabId, color: "#2563eb" });
+}
+
+function applyNamingMeta(rec, meta) {
+  if (!rec) return;
+  if (meta && meta.title && !rec.pageTitle) rec.pageTitle = meta.title;
+  if (meta && meta.url && !rec.tabUrl) rec.tabUrl = meta.url;
+  const bestVar = Array.isArray(rec.variants) && rec.variants.length ? rec.variants[0].label : null;
+  const built = ADL.buildMediaFilename(
+    rec.pageTitle || "",
+    rec.url,
+    rec.type,
+    bestVar,
+    CFG.prefixPageTitle !== false
+  );
+  if (built) rec.filename = built;
+}
+
+const GENERIC_MANIFEST_URL_RE =
+  /playlist|manifest|master|chunk|index|stream|hls|dash|m3u|mpd|play|video/i;
+const probedManifests = new Set();
+function rememberProbed(url) {
+  if (probedManifests.size > 300) probedManifests.clear();
+  probedManifests.add(url);
+}
+
+async function peekGenericManifest(tabId, url, ct, len) {
+  if (probedManifests.has(url)) return;
+  const mime = (ct || "").split(";")[0].trim().toLowerCase();
+  const isGeneric =
+    mime === "text/plain" ||
+    mime === "application/octet-stream" ||
+    mime === "application/xml" ||
+    mime === "text/xml";
+  if (!isGeneric || (len != null && len > 512 * 1024) || !GENERIC_MANIFEST_URL_RE.test(url)) {
+    return;
+  }
+  rememberProbed(url);
+  try {
+    const hdrs = recentHeaders.get(url)?.headers;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3500);
+    const resp = await fetch(url, { headers: hdrs || undefined, signal: ctrl.signal }).finally(() =>
+      clearTimeout(timer)
+    );
+    if (!resp.ok) return;
+    const text = await resp.text();
+    if (!text || text.length > 512 * 1024) return;
+    await ingestManifestText(tabId, url, text, hdrs, null);
+  } catch (_) {}
+}
+
+async function ingestManifestText(tabId, url, text, explicitHeaders, explicitTitle) {
+  const hls = ADL.parseHlsManifest(text, url);
+  const dash = hls ? null : ADL.parseDashManifest(text, url);
+  const parsed = hls || dash;
+  if (!parsed) return null;
+  const type = hls ? "hls" : "dash";
+  if (!groupAllowed(type)) return null;
+  const meta = await getTabMeta(tabId);
+  const map = tabMap(tabId);
+  const existing = map.get(url);
+  const rec = existing || {
+    url,
+    tabId,
+    type,
+    mime: hls ? "application/vnd.apple.mpegurl" : "application/dash+xml",
+    bytes: null,
+    headers: explicitHeaders || recentHeaders.get(url)?.headers || null,
+    at: Date.now(),
+  };
+  rec.type = type;
+  if (!rec.headers) rec.headers = explicitHeaders || recentHeaders.get(url)?.headers || null;
+  if (parsed.variants && parsed.variants.length) rec.variants = parsed.variants;
+  if (parsed.durationSec != null) rec.durationSec = parsed.durationSec;
+  if (parsed.segmentCount) rec.segmentCount = parsed.segmentCount;
+  if (explicitTitle) rec.pageTitle = explicitTitle;
+  applyNamingMeta(rec, meta);
+  putRec(tabId, rec);
+  updateBadge(tabId);
+  scheduleFlush();
+  void reportSniffToDesktop(rec);
+  return rec;
 }
 
 // ---------------------------------------------------------------- 嗅探管线
@@ -286,21 +489,27 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (!MEDIA_RE.test(details.url) && !IMAGE_RE.test(details.url)) return;
     const type = guessType(details.url);
     if (!groupAllowed(type)) return;
-    putRec(details.tabId, {
+    const tmeta = tabTitles.get(details.tabId);
+    const rec = {
       url: details.url,
       tabId: details.tabId,
-      type: guessType(details.url),
+      tabUrl: tmeta?.url || null,
+      pageTitle: tmeta?.title || null,
+      filename: null,
+      type,
       mime: null,
       bytes: null,
       headers: null,
       at: Date.now(),
-    });
+    };
+    applyNamingMeta(rec, tmeta);
+    putRec(details.tabId, rec);
     updateBadge(details.tabId);
   },
   { urls: ["<all_urls>"] }
 );
 
-// —— 2. 候选请求抓头（extraHeaders 才能看到 Cookie/Referer，Chrome 72+ 脱敏）
+// —— 2. 候选请求抓头（extraHeaders 才能看到 Cookie/Referer/Authorization，Chrome 72+ 脱敏）
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     if (details.tabId < 0) return;
@@ -310,7 +519,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       (details.requestHeaders || []).map((x) => [x.name.toLowerCase(), x.value])
     );
     rec.headers = {};
-    for (const k of ["referer", "user-agent", "cookie"]) {
+    for (const k of KEEP_REQ_HEADERS) {
       if (h[k]) rec.headers[k] = h[k];
     }
     if (Object.keys(rec.headers).length) {
@@ -322,47 +531,75 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ["requestHeaders", "extraHeaders"]
 );
 
-// —— 3. 完成：抓 MIME/大小；直链小文件丢弃（内存缓存命中的请求 webRequest 不可见，
-//     大小标注「已观测值」，实际以主程序探测为准）
+// —— 3. 完成：抓 MIME/大小 + 解析 HLS/DASH 变体与时长；泛化流清单魔数兜底
 chrome.webRequest.onCompleted.addListener(
-  (details) => {
+  async (details) => {
     if (details.tabId < 0) return;
+    if (details.statusCode != null && (details.statusCode < 200 || details.statusCode >= 300)) {
+      const m = byTab.get(details.tabId);
+      if (m && m.delete(details.url)) {
+        updateBadge(details.tabId);
+        scheduleFlush();
+      }
+      return;
+    }
     const map = tabMap(details.tabId);
     let rec = map.get(details.url);
     const h = Object.fromEntries(
       (details.responseHeaders || []).map((x) => [x.name.toLowerCase(), x.value])
     );
+    const ct = h["content-type"] || null;
+    const len = h["content-length"] ? parseInt(h["content-length"], 10) : null;
     if (!rec) {
       // 扩展名没命中时按响应 MIME 兜底：真资源（视频/音频/压缩包/二进制…）
       // 即使 URL 无扩展名也收录；text/html、json、接口响应永远不进列表
-      const mt = mimeToType(h["content-type"]);
+      const mt = mimeToType(ct);
       if (mt && groupAllowed(mt)) {
+        const tmeta = await getTabMeta(details.tabId);
         rec = {
           url: details.url,
           tabId: details.tabId,
+          tabUrl: tmeta?.url || null,
+          pageTitle: tmeta?.title || null,
+          filename: null,
           type: mt,
-          mime: h["content-type"] || null,
+          mime: ct,
           bytes: null,
-          headers: null,
+          headers: recentHeaders.get(details.url)?.headers || null,
           at: Date.now(),
         };
-        map.set(details.url, rec);
+        applyNamingMeta(rec, tmeta);
+        putRec(details.tabId, rec);
+      } else {
+        void peekGenericManifest(details.tabId, details.url, ct, len);
+        return;
       }
     }
     if (!rec) return;
-    rec.mime = h["content-type"] || null;
-    const len = h["content-length"] ? parseInt(h["content-length"], 10) : null;
+    if (!rec.headers) {
+      const cached = recentHeaders.get(details.url)?.headers;
+      if (cached) rec.headers = cached;
+    }
+    rec.mime = ct;
     const exempt =
       rec.type === "hls" || rec.type === "segment" || rec.type === "dash";
-    if (len != null && len < MIN_BYTES && !exempt) {
+    const minBytes = minBytesCfg();
+    if (len != null && minBytes > 0 && len < minBytes && !exempt) {
       map.delete(details.url);
       updateBadge(details.tabId);
       scheduleFlush();
       return;
     }
     rec.bytes = len;
+    const tmeta = await getTabMeta(details.tabId);
+    applyNamingMeta(rec, tmeta);
     updateBadge(details.tabId);
     scheduleFlush();
+    if (rec.type === "hls" || rec.type === "dash") {
+      await fetchVariants(rec);
+    } else {
+      void reportSniffToDesktop(rec);
+    }
   },
   { urls: ["<all_urls>"] },
   ["responseHeaders"]
@@ -381,6 +618,7 @@ chrome.webRequest.onErrorOccurred.addListener(
 );
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  tabTitles.delete(tabId);
   if (byTab.delete(tabId)) scheduleFlush();
 });
 
@@ -402,7 +640,7 @@ function rememberHeaders(url, headers) {
   }
 }
 
-// 非媒体请求也记 Referer/UA（无 extraHeaders，Cookie 脱敏——接管非媒体直链时降级为匿名下载）
+// 非媒体扩展名请求也记录 Cookie/Referer/UA/Authorization，供按 MIME 兜底命中的流媒体/网盘链接复用
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     if (recentHeaders.has(details.url)) return;
@@ -410,7 +648,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       (details.requestHeaders || []).map((x) => [x.name.toLowerCase(), x.value])
     );
     const headers = {};
-    for (const k of ["referer", "user-agent"]) {
+    for (const k of KEEP_REQ_HEADERS) {
       if (h[k]) headers[k] = h[k];
     }
     if (Object.keys(headers).length) {
@@ -418,8 +656,108 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     }
   },
   { urls: ["<all_urls>"] },
-  ["requestHeaders"]
+  ["requestHeaders", "extraHeaders"]
 );
+
+/** 响应头元数据缓存（用于捕获无URL后缀但带 Content-Disposition: attachment 的网盘/发布页下载） */
+const recentResponseMeta = new Map();
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (details.statusCode != null && (details.statusCode < 200 || details.statusCode >= 300)) return;
+    const h = Object.fromEntries(
+      (details.responseHeaders || []).map((x) => [x.name.toLowerCase(), x.value])
+    );
+    const cd = h["content-disposition"] || "";
+    const isAttachment = /\battachment\b/i.test(cd);
+    const mime = (h["content-type"] || "").split(";")[0].trim().toLowerCase();
+    const contentLength = h["content-length"] ? parseInt(h["content-length"], 10) : null;
+    if (!isAttachment && !mime) return;
+    recentResponseMeta.set(details.url, { isAttachment, mime, contentLength, at: Date.now() });
+    if (recentResponseMeta.size > 300) {
+      recentResponseMeta.delete(recentResponseMeta.keys().next().value);
+    }
+  },
+  { urls: ["<all_urls>"] },
+  ["responseHeaders"]
+);
+
+const handledDownloadIds = new Map();
+function markDownloadHandled(id) {
+  const now = Date.now();
+  handledDownloadIds.set(id, now);
+  if (handledDownloadIds.size > 200) {
+    for (const [k, t] of handledDownloadIds) {
+      if (now - t > 60000) handledDownloadIds.delete(k);
+    }
+  }
+}
+
+async function handleDownloadTakeover(item, suggestedFilename) {
+  if (!item || handledDownloadIds.has(item.id)) return false;
+  if (!(await takeoverEnabled())) return false;
+  const url = item.finalUrl || item.url;
+  const meta = recentResponseMeta.get(url) || recentResponseMeta.get(item.url) || null;
+  const mime = item.mime || (meta && meta.mime) || "";
+  const fileSize =
+    item.fileSize && item.fileSize > 0
+      ? item.fileSize
+      : meta && meta.contentLength
+        ? meta.contentLength
+        : 0;
+  const filename = suggestedFilename || item.filename || "";
+  const ignored = await ignoredHosts();
+  if (
+    !ADL.shouldTakeoverDownload({
+      url,
+      filename,
+      mime,
+      fileSize,
+      isAttachment: !!(meta && meta.isAttachment),
+      ignoredHosts: ignored,
+      minBytes: MIN_TAKEOVER_BYTES,
+      takeoverRe: TAKEOVER_RE,
+    })
+  ) {
+    return false;
+  }
+  markDownloadHandled(item.id);
+  try {
+    await chrome.downloads.pause(item.id);
+  } catch (_) {
+    return false;
+  }
+
+  const sniffed = findByUrl(url);
+  const headers =
+    (sniffed && sniffed.headers && Object.keys(sniffed.headers).length ? sniffed.headers : null) ||
+    recentHeaders.get(url)?.headers ||
+    recentHeaders.get(item.url)?.headers ||
+    null;
+
+  let cleanFn = null;
+  if (filename) {
+    const base = String(filename).split(/[\\/]/).pop();
+    if (base && base.trim()) cleanFn = base.trim();
+  }
+  const resp = await pushTask(url, headers, cleanFn || undefined);
+  if (resp.ok) {
+    rememberTakeover(url);
+    const outcome = await cancelWithVerify(item.id);
+    if (outcome === "complete") {
+      try {
+        await chrome.downloads.removeFile(item.id);
+      } catch (_) {}
+    }
+    try {
+      await chrome.downloads.erase({ id: item.id });
+    } catch (_) {}
+    return true;
+  }
+  try {
+    await chrome.downloads.resume(item.id);
+  } catch (_) {}
+  return false;
+}
 
 /** cancel + onChanged 复核（cancel 对已完成下载是静默 no-op——必须以
  *  onChanged 状态为准，DESIGN §7.3）。返回 "canceled" | "complete" | "timeout"。 */
@@ -449,56 +787,32 @@ function cancelWithVerify(id, timeoutMs = 3000) {
   });
 }
 
-chrome.downloads.onCreated.addListener(async (item) => {
-  if (!(await takeoverEnabled())) return;
-  const url = item.finalUrl || item.url;
-  if (!/^https?:/i.test(url)) return;
-  try {
-    const host = new URL(url).hostname;
-    const ignored = await ignoredHosts();
-    if (host && ignored.includes(host)) return; // 用户忽略过的站点不接管
-  } catch (_) {}
-  const nameHit = TAKEOVER_RE.test(url) || TAKEOVER_RE.test(item.filename || "");
-  // fileSize 可能为 0（未知）：未知大小时放行类型命中者
-  const sizeOk =
-    item.fileSize == null ||
-    item.fileSize === 0 ||
-    item.fileSize >= MIN_TAKEOVER_BYTES;
-  if (!nameHit || !sizeOk) return;
-
-  try {
-    await chrome.downloads.pause(item.id);
-  } catch (_) {
-    return; // 已完成/无法暂停：放行
-  }
-
-  // 请求头：优先嗅探缓存（可能含 Cookie），其次近期快照（匿名头）
-  const sniffed = findByUrl(url);
-  const headers =
-    (sniffed && sniffed.headers && Object.keys(sniffed.headers).length
-      ? sniffed.headers
-      : null) ||
-    recentHeaders.get(url)?.headers ||
-    null;
-
-  const resp = await pushTask(url, headers);
-  if (resp.ok) {
-    rememberTakeover(url);
-    const outcome = await cancelWithVerify(item.id);
-    if (outcome === "complete") {
-      // 浏览器侧已下完：删掉记录避免误解（文件留在下载目录）
-      try {
-        await chrome.downloads.removeFile(item.id);
-      } catch (_) {}
+if (chrome.downloads.onDeterminingFilename) {
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    const url = item.finalUrl || item.url;
+    const meta = recentResponseMeta.get(url) || recentResponseMeta.get(item.url) || null;
+    const hit = TAKEOVER_RE.test(url) || TAKEOVER_RE.test(item.filename || "") || !!(meta && meta.isAttachment);
+    if (hit) {
+      handleDownloadTakeover(item, item.filename).finally(() => {
+        try {
+          suggest();
+        } catch (_) {}
+      });
+      return true;
     }
-    try {
-      await chrome.downloads.erase({ id: item.id });
-    } catch (_) {}
-  } else {
-    // 主程序不在/推送失败 → 放行浏览器原生下载
-    try {
-      await chrome.downloads.resume(item.id);
-    } catch (_) {}
+    suggest();
+    return false;
+  });
+}
+
+chrome.downloads.onCreated.addListener((item) => {
+  const url = item.finalUrl || item.url;
+  const meta = recentResponseMeta.get(url) || recentResponseMeta.get(item.url) || null;
+  if (TAKEOVER_RE.test(url) || TAKEOVER_RE.test(item.filename || "") || (meta && meta.isAttachment)) {
+    // 略延 60ms 让 onDeterminingFilename（若已拿到真实文件名）优先执行
+    setTimeout(() => {
+      void handleDownloadTakeover(item, item.filename);
+    }, 60);
   }
 });
 
@@ -520,36 +834,40 @@ function findByUrl(url) {
   return null;
 }
 
-// master 清单变体解析（尽力而为：抓取失败静默跳过，推送主清单本身也能下）
+// master 清单变体与时长解析（尽力而为：抓取失败静默跳过，推送主清单本身也能下）
 async function fetchVariants(rec) {
+  if (!rec || !rec.url || probedManifests.has(rec.url)) {
+    void reportSniffToDesktop(rec);
+    return;
+  }
+  rememberProbed(rec.url);
   try {
-    const init = { headers: rec.headers || undefined };
-    const resp = await fetch(rec.url, init);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4500);
+    const init = { headers: rec.headers || undefined, signal: ctrl.signal };
+    const resp = await fetch(rec.url, init).finally(() => clearTimeout(timer));
     const text = await resp.text();
-    if (!/#EXT-X-STREAM-INF/i.test(text)) return; // 媒体清单，无变体
-    const variants = [];
-    const re = /#EXT-X-STREAM-INF:([^\r\n]*)\r?\n([^#\r\n]+)/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const attrs = m[1];
-      const uri = m[2].trim();
-      const bw = /BANDWIDTH=(\d+)/i.exec(attrs);
-      const res = /RESOLUTION=(\d+x\d+)/i.exec(attrs);
-      const name = /NAME="([^"]+)"/i.exec(attrs);
-      variants.push({
-        url: new URL(uri, rec.url).href,
-        bandwidth: bw ? parseInt(bw[1], 10) : 0,
-        resolution: res ? res[1] : null,
-        name: name ? name[1] : null,
-      });
-    }
-    if (variants.length > 1) {
-      rec.variants = variants.sort((a, b) => b.bandwidth - a.bandwidth);
+    const parsed =
+      rec.type === "dash"
+        ? ADL.parseDashManifest(text, rec.url)
+        : ADL.parseHlsManifest(text, rec.url) || ADL.parseDashManifest(text, rec.url);
+    if (parsed) {
+      if (parsed.variants && parsed.variants.length) {
+        rec.variants = parsed.variants;
+      }
+      if (parsed.durationSec != null) {
+        rec.durationSec = parsed.durationSec;
+      }
+      if (parsed.segmentCount) {
+        rec.segmentCount = parsed.segmentCount;
+      }
+      applyNamingMeta(rec, tabTitles.get(rec.tabId));
       scheduleFlush();
     }
   } catch (_) {
     // 跨域/网络失败：master 本身仍可推送（引擎自动选最高码率）
   }
+  void reportSniffToDesktop(rec);
 }
 
 // ---------------------------------------------------------------- 推送
@@ -585,17 +903,16 @@ async function cookieHeaderFor(url) {
 }
 
 async function pushTask(url, headers, filename, postprocess, dir) {
-  // Cookie 兜底：显式头（嗅探/适配器）没有 Cookie 时从浏览器 cookie store 补
-  let head = headers && Object.keys(headers).length ? { ...headers } : null;
-  if (!head || !head.Cookie) {
-    const ck = await cookieHeaderFor(url);
-    if (ck) head = { ...(head || {}), Cookie: ck };
-  }
+  // 统一小写规范化请求头并补 Cookie，彻底消除 cookie vs Cookie 重复键 bug
+  const existingCookie =
+    headers && Object.entries(headers).find(([k, v]) => k.toLowerCase() === "cookie" && v);
+  const fallbackCookie = existingCookie ? null : await cookieHeaderFor(url);
+  const head = ADL.normalizeHeadersWithCookie(headers, fallbackCookie);
   const add = await nmCall(
     "task.add",
     {
       url,
-      headers: head && Object.keys(head).length ? head : undefined,
+      headers: head || undefined,
       filename: filename || undefined,
       postprocess: postprocess && postprocess.length ? postprocess : undefined,
       dir: dir || undefined,
@@ -603,7 +920,7 @@ async function pushTask(url, headers, filename, postprocess, dir) {
     5000
   );
   if (!add.ok) {
-    return { ok: false, error: (add.error && add.error.code) || "unknown" };
+    return { ok: false, error: (add.error && (add.error.code || add.error)) || "unknown" };
   }
   const taskId = add.result && add.result.id;
   // 即建即下：推送成功后立刻请求宿主开始下载（DESIGN §5.4 即建即下）
@@ -832,6 +1149,30 @@ async function adapterPush(tabId, urls) {
 //     pushTask（即建即下 + Cookie 兜底）。
 async function videoDownload(tabId, msg) {
   if (tabId == null) return { ok: false, error: "no_tab" };
+  const tmeta = await getTabMeta(tabId);
+  const pageTitle = msg.title || tmeta.title || "";
+  if (msg.variantUrl) {
+    const rec = findByUrl(msg.parentUrl || msg.variantUrl);
+    const filename = ADL.buildMediaFilename(
+      pageTitle,
+      msg.variantUrl,
+      rec?.type || "hls",
+      msg.variantLabel || null,
+      CFG.prefixPageTitle !== false
+    );
+    const r = await pushTask(
+      msg.variantUrl,
+      (rec && rec.headers) || recentHeaders.get(msg.variantUrl)?.headers,
+      filename || undefined,
+      rec && rec.postprocess
+    );
+    if (r && r.error === "task_exists") {
+      flashBadge(tabId, true);
+      return { ...r, ok: true, via: "sniff", exists: true };
+    }
+    flashBadge(tabId, !!(r && r.ok));
+    return r && r.ok ? { ...r, via: "sniff" } : r || { ok: false, error: "unknown" };
+  }
   // 站点适配器命中且启用 → 取该页资源（复用 lastProbe 缓存，无缓存现 probe）
   let adapterResources = [];
   try {
@@ -842,7 +1183,7 @@ async function videoDownload(tabId, msg) {
       if (r && r.ok && Array.isArray(r.resources)) adapterResources = r.resources;
     }
   } catch (_) {}
-  const recs = [...(byTab.get(tabId) || new Map()).values()];
+  const recs = visibleTabItems(tabId);
   const plan = ADL.pickVideoSource({
     srcUrl: msg.srcUrl,
     pageUrl: msg.pageUrl,
@@ -861,7 +1202,21 @@ async function videoDownload(tabId, msg) {
     resp = norm(resp, "adapter");
   } else if (plan.via === "direct" || plan.via === "sniff") {
     const rec = plan.via === "sniff" ? findByUrl(plan.url) : null;
-    resp = await pushTask(plan.url, rec && rec.headers, undefined, rec && rec.postprocess);
+    const filename =
+      (rec && rec.filename) ||
+      ADL.buildMediaFilename(
+        pageTitle,
+        plan.url,
+        (rec && rec.type) || "video",
+        null,
+        CFG.prefixPageTitle !== false
+      );
+    resp = await pushTask(
+      plan.url,
+      (rec && rec.headers) || recentHeaders.get(plan.url)?.headers,
+      filename || undefined,
+      rec && rec.postprocess
+    );
     resp = norm(resp, plan.via);
   } else if (plan.via === "ytdlp") {
     resp = await pushTask(plan.url);
@@ -933,7 +1288,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // 真实导航（hard navigation / reload）清空该 tab 的适配层缓冲（docs/MEDIA-ADAPTERS.md
 // §2 生命周期契约）。SPA 内部路由（pushState）只触发 changeInfo.url、不改 status，
 // 因此不会误清；status 变 loading 仅发生在主框架真实加载时。
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tab && (changeInfo.title || changeInfo.url)) {
+    tabTitles.set(tabId, { title: tab.title || "", url: tab.url || "" });
+  }
   if (changeInfo.status === "loading") {
     hookBuf.delete(tabId);
     lastProbe.delete(tabId);
@@ -1078,13 +1436,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "ping") {
     // 存活探测：popup 打开时一次，不轮询（DESIGN §7.5）
     nmCall("ping", undefined, 3000)
-      .then((resp) => sendResponse({ ok: !!resp.ok }))
+      .then((resp) => sendResponse({ ok: !!resp.ok, transport: resp.transport || lastTransport }))
       .catch(() => sendResponse({ ok: false }));
     return true; // 异步响应
   }
   if (msg.type === "list") {
-    const items = [...(byTab.get(msg.tabId) || new Map()).values()];
+    const items = visibleTabItems(msg.tabId);
     sendResponse({ items });
+    return;
+  }
+  if (msg.type === "manifest-sniff") {
+    const tabId = _sender.tab && _sender.tab.id;
+    if (tabId != null && tabId >= 0) {
+      void ingestManifestText(tabId, msg.url, msg.text, null, msg.pageTitle);
+    }
+    return;
+  }
+  if (msg.type === "video-sources") {
+    const tabId = _sender.tab && _sender.tab.id;
+    if (tabId == null || tabId < 0) {
+      sendResponse({ ok: false, items: [] });
+      return;
+    }
+    const items = visibleTabItems(tabId)
+      .filter((r) => r.type === "hls" || r.type === "video")
+      .sort((a, b) => (b.at || 0) - (a.at || 0))
+      .slice(0, 6);
+    sendResponse({ ok: true, items });
     return;
   }
   if (msg.type === "push") {

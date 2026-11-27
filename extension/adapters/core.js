@@ -426,3 +426,171 @@ ADL.pickVideoSource = ({ srcUrl, pageUrl, recs, adapterResources, duration, ytdl
   }
   return { via: "none" };
 };
+
+// —— 清单解析与嗅探对齐工具函数（background / popup / node 单测共用）
+
+ADL.parseHlsManifest = (text, baseUrl) => {
+  const src = String(text || "").trimStart();
+  if (!src.startsWith("#EXTM3U")) return null;
+  if (/#EXT-X-STREAM-INF/i.test(src)) {
+    const variants = [];
+    const seen = new Set();
+    const re = /#EXT-X-STREAM-INF:([^\r\n]*)\r?\n+([^#\r\n]+)/g;
+    let m;
+    while ((m = re.exec(src))) {
+      const attrs = m[1];
+      const uri = m[2].trim();
+      if (!uri) continue;
+      let absUrl = uri;
+      try {
+        if (baseUrl) absUrl = new URL(uri, baseUrl).href;
+      } catch (_) {}
+      if (seen.has(absUrl)) continue;
+      seen.add(absUrl);
+      const bw = /BANDWIDTH=(\d+)/i.exec(attrs);
+      const res = /RESOLUTION=(\d+x\d+)/i.exec(attrs);
+      const name = /NAME="([^"]+)"/i.exec(attrs);
+      const resolution = res ? res[1] : null;
+      const height = resolution ? parseInt(resolution.split("x")[1], 10) || null : null;
+      const bandwidth = bw ? parseInt(bw[1], 10) : 0;
+      const label = height
+        ? `${height}p`
+        : (name && name[1]) || (bandwidth ? `${Math.round(bandwidth / 1000)}k` : "默认");
+      variants.push({
+        url: absUrl,
+        bandwidth,
+        resolution,
+        height,
+        name: name ? name[1] : null,
+        label,
+      });
+    }
+    variants.sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
+    return { isMaster: true, durationSec: null, segmentCount: 0, variants };
+  }
+  let durationSec = 0;
+  let segmentCount = 0;
+  const infRe = /#EXTINF:([0-9]+(?:\.[0-9]+)?)/g;
+  let m;
+  while ((m = infRe.exec(src))) {
+    durationSec += parseFloat(m[1]) || 0;
+    segmentCount += 1;
+  }
+  return {
+    isMaster: false,
+    durationSec: segmentCount > 0 ? Math.round(durationSec * 10) / 10 : null,
+    segmentCount,
+    variants: [],
+  };
+};
+
+ADL.parseDashManifest = (text, baseUrl) => {
+  const src = String(text || "");
+  if (!/<MPD[\s>]/i.test(src)) return null;
+  let durationSec = null;
+  const durM = /mediaPresentationDuration\s*=\s*["']PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?["']/i.exec(src);
+  if (durM) {
+    const sec = (Number(durM[1] || 0) * 3600) + (Number(durM[2] || 0) * 60) + (Number(durM[3] || 0));
+    if (sec > 0) durationSec = Math.round(sec * 10) / 10;
+  }
+  const variants = [];
+  const seen = new Set();
+  const repRe = /<Representation\b([^>]*)/gi;
+  let m;
+  while ((m = repRe.exec(src))) {
+    const attrs = m[1];
+    const width = /\bwidth\s*=\s*["'](\d+)["']/i.exec(attrs);
+    const heightM = /\bheight\s*=\s*["'](\d+)["']/i.exec(attrs);
+    const bwM = /\bbandwidth\s*=\s*["'](\d+)["']/i.exec(attrs);
+    const height = heightM ? parseInt(heightM[1], 10) : null;
+    const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
+    const resolution = width && height ? `${width[1]}x${height}` : null;
+    const key = `${height || 0}:${bandwidth}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = height ? `${height}p` : bandwidth ? `${Math.round(bandwidth / 1000)}k` : null;
+    if (!label) continue;
+    variants.push({
+      url: baseUrl || "",
+      bandwidth,
+      resolution,
+      height,
+      label,
+    });
+  }
+  variants.sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
+  return { isMaster: variants.length > 0, durationSec, variants };
+};
+
+const GENERIC_MEDIA_STEM_RE =
+  /^(index|playlist|master|chunklist|manifest|video|audio|media|play|stream|default|download|file|segment|blob|output|[0-9a-f]{16,}|[0-9]{8,})$/i;
+
+ADL.buildMediaFilename = (pageTitle, url, type, variantLabel, prefixEnabled = true) => {
+  let rawBase = "";
+  try {
+    const seg = new URL(url).pathname.split("/").filter(Boolean).pop() || "";
+    rawBase = decodeURIComponent(seg);
+  } catch (_) {}
+  const dot = rawBase.lastIndexOf(".");
+  const rawStem = dot > 0 ? rawBase.slice(0, dot) : rawBase;
+  const rawExt = dot > 0 && /^[a-z0-9]{1,8}$/i.test(rawBase.slice(dot + 1)) ? rawBase.slice(dot).toLowerCase() : "";
+  const cleanStem = ADL.cleanName(rawStem, 80);
+  const cleanTitle = ADL.cleanName(pageTitle || "", 80);
+
+  const isStreamOrAv = type === "video" || type === "hls" || type === "dash" || type === "audio";
+  if (isStreamOrAv) {
+    let ext = rawExt;
+    if (type === "hls" || type === "dash") ext = ".mp4";
+    else if (type === "video" && !/\.(mp4|mkv|webm|mov|flv|avi|m4v|3gp)$/i.test(ext)) ext = ".mp4";
+    else if (type === "audio" && !/\.(mp3|m4a|aac|flac|ogg|wav|opus|wma)$/i.test(ext)) ext = ".m4a";
+
+    let base = cleanStem;
+    if (prefixEnabled && cleanTitle) {
+      if (!base || GENERIC_MEDIA_STEM_RE.test(base)) {
+        base = cleanTitle;
+      } else if (!base.toLowerCase().includes(cleanTitle.toLowerCase())) {
+        base = `${cleanTitle} - ${base}`;
+      }
+    }
+    if (!base) base = type === "audio" ? "audio" : "video";
+    const varSuffix = variantLabel ? ` - ${ADL.cleanName(variantLabel, 24)}` : "";
+    return `${ADL.cleanName(base, 96)}${varSuffix}${ext}`;
+  }
+
+  if (cleanStem) {
+    return `${cleanStem}${rawExt}`;
+  }
+  return cleanTitle ? `${cleanTitle}${rawExt}` : "";
+};
+
+const KEEP_HEADER_KEYS = ["referer", "user-agent", "cookie", "authorization", "origin"];
+
+ADL.normalizeHeadersWithCookie = (headers, fallbackCookie) => {
+  const out = {};
+  if (headers && typeof headers === "object") {
+    for (const [k, v] of Object.entries(headers)) {
+      if (v == null || v === "") continue;
+      const lk = String(k).toLowerCase();
+      if (KEEP_HEADER_KEYS.includes(lk)) {
+        out[lk] = String(v);
+      }
+    }
+  }
+  if (!out.cookie && fallbackCookie) {
+    out.cookie = String(fallbackCookie);
+  }
+  return Object.keys(out).length ? out : null;
+};
+
+ADL.shouldTakeoverDownload = ({ url, filename, mime, fileSize, isAttachment, ignoredHosts, minBytes, takeoverRe }) => {
+  if (!url || !/^https?:/i.test(url)) return false;
+  if (mime && /^text\/html/i.test(mime)) return false;
+  try {
+    const host = new URL(url).hostname;
+    if (host && Array.isArray(ignoredHosts) && ignoredHosts.includes(host)) return false;
+  } catch (_) {}
+  const nameHit = !!(takeoverRe && (takeoverRe.test(url) || takeoverRe.test(filename || ""))) || !!isAttachment;
+  if (!nameHit) return false;
+  if (fileSize != null && fileSize > 0 && minBytes > 0 && fileSize < minBytes) return false;
+  return true;
+};

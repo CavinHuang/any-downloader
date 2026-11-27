@@ -20,6 +20,7 @@ pub struct PacBackup {
 }
 
 /// 生成 PAC：仅视频号域走本地代理，其余一律 DIRECT。
+#[allow(dead_code)]
 pub fn write_pac(path: &Path, port: u16) -> Result<()> {
     let pac = format!(
         r#"// Anything Downloader 桌面嗅探：仅视频号相关域走本地代理，其余直连
@@ -41,6 +42,7 @@ function FindProxyForURL(url, host) {{
 }
 
 /// 本地路径 → file:/// URL（路径按字节百分号编码，兼容含空格/中文的路径）。
+#[allow(dead_code)]
 pub fn file_url(p: &Path) -> String {
     let mut s = String::from("file:///");
     for b in p.to_string_lossy().bytes() {
@@ -56,14 +58,16 @@ pub fn file_url(p: &Path) -> String {
     s
 }
 
-/// 写入 AutoConfigURL 指向 PAC；返回原值备份。
-pub fn enable(pac_path: &Path) -> Result<PacBackup> {
+/// 写入 AutoConfigURL 指向本地代理提供的 HTTP PAC；返回原值备份。
+/// （现代 Chromium / WeChatAppEx 已禁止 file:/// 协议 PAC，必须走 http://127.0.0.1:{port}/proxy.pac）
+pub fn enable(port: u16) -> Result<PacBackup> {
     let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu
         .open_subkey_with_flags(INET_KEY, KEY_READ | KEY_WRITE)
         .context("open Internet Settings")?;
     let prev: Option<String> = key.get_value("AutoConfigURL").ok();
-    key.set_value("AutoConfigURL", &file_url(pac_path))
+    let pac_url = format!("http://127.0.0.1:{port}/proxy.pac");
+    key.set_value("AutoConfigURL", &pac_url)
         .context("set AutoConfigURL")?;
     refresh();
     Ok(PacBackup { autoconfig: prev })

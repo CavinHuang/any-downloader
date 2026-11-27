@@ -19,6 +19,7 @@ pub mod sni;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -56,6 +57,8 @@ impl SniffConfig {
             decrypt_exact: vec![
                 "channels.weixin.qq.com".into(),
                 "finder.video.qq.com".into(),
+                "mpvideo.qpic.cn".into(),
+                "wxapp.tc.qq.com".into(),
             ],
             decrypt_suffix: vec![".video.qq.com".into()],
             host_map: HashMap::new(),
@@ -112,10 +115,12 @@ pub async fn start(cfg: SniffConfig, capture: Arc<Capture>) -> Result<SniffServi
         ca,
         capture,
         client,
+        port: AtomicU16::new(0),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", cfg.port)).await?;
     let port = listener.local_addr()?.port();
+    shared.port.store(port, Ordering::Relaxed);
     tracing::info!(port, "sniff 代理监听 127.0.0.1");
     let (tx, mut rx) = watch::channel(false);
     let join = tokio::spawn(async move {

@@ -330,3 +330,134 @@ async fn ts_with_ffmpeg_remuxes_to_mp4() {
     assert!(head.len() > 1024);
     assert_eq!(&head[4..8], b"ftyp", "必须是合法 mp4 容器");
 }
+
+#[tokio::test]
+async fn hls_resume_no_double_count_and_recovers_truncated_segment() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let mut s0 = vec![0u8, 0, 0, 24, b'f', b't', b'y', b'p'];
+    s0.resize(1024, 0x11);
+    let s1 = vec![0x22u8; 1024];
+    let s2 = vec![0x33u8; 1880];
+    let s3 = vec![0x44u8; 1024];
+
+    let playlist = "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:10\n#EXTINF:5,\ns0.m4s\n#EXTINF:5,\ns1.m4s\n#EXTINF:5,\ns2.m4s\n#EXTINF:5,\ns3.m4s\n#EXT-X-ENDLIST\n";
+    let playlist_bytes = playlist.as_bytes().to_vec();
+    let s2_hits = Arc::new(AtomicUsize::new(0));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+
+    let s0_c = s0.clone();
+    let s1_c = s1.clone();
+    let s2_c = s2.clone();
+    let s3_c = s3.clone();
+    let pl_c = playlist_bytes.clone();
+    let s2_hits_srv = s2_hits.clone();
+
+    std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let s0 = s0_c.clone();
+                    let s1 = s1_c.clone();
+                    let s2 = s2_c.clone();
+                    let s3 = s3_c.clone();
+                    let pl = pl_c.clone();
+                    let hits = s2_hits_srv.clone();
+                    std::thread::spawn(move || {
+                        let _ = s.set_nonblocking(false);
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("/");
+                        if path == "/v.m3u8" {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                pl.len()
+                            );
+                            if s.write_all(hdr.as_bytes()).is_ok() {
+                                let _ = s.write_all(&pl);
+                            }
+                            return;
+                        }
+                        if path == "/s2.m4s" {
+                            let hit = hits.fetch_add(1, Ordering::Relaxed);
+                            if hit == 0 {
+                                // 第 1 次：声明 1880 字节但仅发 400 字节即截断断链，测试 Content-Length 校验与重试
+                                let hdr = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    s2.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&s2[..400]);
+                                }
+                                return;
+                            }
+                        }
+                        let body = match path {
+                            "/s0.m4s" => s0,
+                            "/s1.m4s" => s1,
+                            "/s2.m4s" => s2,
+                            "/s3.m4s" => s3,
+                            _ => {
+                                let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                                return;
+                            }
+                        };
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        if s.write_all(hdr.as_bytes()).is_ok() {
+                            let _ = s.write_all(&body);
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let db = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = engine_in(&db).await;
+    let t = engine
+        .create_task(CreateTask::of(format!("http://{addr}/v.m3u8")))
+        .await
+        .unwrap();
+
+    // 预置断持续传目录：0 号分片有效、1 号分片为坏损 0 字节文件
+    let tmp_dir = db.path().join("dl-tmp").join(&t.id);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let hash = xxh64(&playlist_bytes, 0);
+    std::fs::write(tmp_dir.join("playlist.meta"), format!("{hash:x}")).unwrap();
+    std::fs::write(tmp_dir.join("0"), &s0).unwrap();
+    std::fs::write(tmp_dir.join("1"), b"").unwrap();
+
+    let done = engine.download(&t.id, hls_opts(&out)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(done.status, TaskStatus::Done);
+    assert!(s2_hits.load(Ordering::Relaxed) >= 2, "截断分片必须触发重试");
+
+    let got = std::fs::read(out.path().join("v.mp4")).unwrap();
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&s0);
+    expected.extend_from_slice(&s1);
+    expected.extend_from_slice(&s2);
+    expected.extend_from_slice(&s3);
+    assert_eq!(
+        got, expected,
+        "0 字节损坏缓存须重下、已缓存分片不重复计数、截断分片重试后完整拼接"
+    );
+}

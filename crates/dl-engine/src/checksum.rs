@@ -1,5 +1,5 @@
 //! 哈希校验（完成阶段校验集的增强项，DESIGN §5.3）。
-//! 支持 sha256 / sha1 / md5，流式计算（任意大小文件内存恒定）。
+//! 支持 sha512 / sha256 / sha1 / md5，流式计算（任意大小文件内存恒定）。
 
 use std::io::Read;
 use std::path::Path;
@@ -7,29 +7,44 @@ use std::path::Path;
 use dl_error::{DownloadError, ErrorKind, Res};
 use sha2::Digest; // RustCrypto 三件套共用 digest 核心，此处一个 trait 覆盖 new/update/finalize
 
-pub const ALGOS: &[&str] = &["sha256", "sha1", "md5"];
+pub const ALGOS: &[&str] = &["sha512", "sha256", "sha1", "md5"];
 
-/// 解析校验值："algo:hex" 或裸 hex（按长度推断：64=sha256、40=sha1、32=md5）。
+/// 解析校验值：支持 `algo:hex`、`algo=hex` 或裸 hex，也支持 `sha256sum` 格式（`<hex>  filename`）。
+/// 裸 hex 按长度推断：128=sha512、64=sha256、40=sha1、32=md5。
 /// 返回 (算法, 小写 hex)。
 pub fn parse_checksum(input: &str) -> Option<(String, String)> {
     let s = input.trim();
-    if let Some((algo, hex)) = s.split_once(':') {
-        let algo = algo.trim().to_ascii_lowercase();
-        let hex = hex.trim().to_ascii_lowercase();
-        if ALGOS.contains(&algo.as_str())
-            && !hex.is_empty()
-            && hex.len() % 2 == 0
-            && hex.chars().all(|c| c.is_ascii_hexdigit())
-        {
+    if let Some((algo_raw, rest)) = s.split_once([':', '=']) {
+        let algo = algo_raw.trim().to_ascii_lowercase().replace('-', "");
+        let hex = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let expect_len = match algo.as_str() {
+            "sha512" => 128,
+            "sha256" => 64,
+            "sha1" => 40,
+            "md5" => 32,
+            _ => return None,
+        };
+        if hex.len() == expect_len && hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Some((algo, hex));
         }
         return None;
     }
-    let hex = s.trim().to_ascii_lowercase();
+    let hex = s
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     match hex.len() {
+        128 => Some(("sha512".into(), hex)),
         64 => Some(("sha256".into(), hex)),
         40 => Some(("sha1".into(), hex)),
         32 => Some(("md5".into(), hex)),
@@ -39,41 +54,25 @@ pub fn parse_checksum(input: &str) -> Option<(String, String)> {
 
 fn hash_file(path: &Path, algo: &str) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; 256 * 1024];
+    macro_rules! digest_with {
+        ($h:expr) => {{
+            let mut h = $h;
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            hex::encode(h.finalize())
+        }};
+    }
     let hex = match algo {
-        "sha256" => {
-            let mut h = sha2::Sha256::new();
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-            hex::encode(h.finalize())
-        }
-        "sha1" => {
-            let mut h = sha1::Sha1::new();
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-            hex::encode(h.finalize())
-        }
-        "md5" => {
-            let mut h = md5::Md5::new();
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-            hex::encode(h.finalize())
-        }
+        "sha512" => digest_with!(sha2::Sha512::new()),
+        "sha256" => digest_with!(sha2::Sha256::new()),
+        "sha1" => digest_with!(sha1::Sha1::new()),
+        "md5" => digest_with!(md5::Md5::new()),
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -84,15 +83,20 @@ fn hash_file(path: &Path, algo: &str) -> std::io::Result<String> {
     Ok(hex)
 }
 
-/// 流式计算文件哈希并与期望值比对（大小写不敏感）。true = 一致。
-pub fn verify_file(path: &Path, algo: &str, expected_hex: &str) -> Res<bool> {
-    let algo = algo.to_ascii_lowercase();
-    let got = hash_file(path, &algo).map_err(|e| {
+/// 流式计算文件哈希，返回小写 hex（支持 `sha512` / `sha256` / `sha1` / `md5`）。
+pub fn compute_file_hash(path: &Path, algo: &str) -> Res<String> {
+    let algo = algo.trim().to_ascii_lowercase().replace('-', "");
+    hash_file(path, &algo).map_err(|e| {
         DownloadError::new(
             ErrorKind::FileAccessDenied,
             format!("hash {}: {e}", path.display()),
         )
-    })?;
+    })
+}
+
+/// 流式计算文件哈希并与期望值比对（大小写不敏感）。true = 一致。
+pub fn verify_file(path: &Path, algo: &str, expected_hex: &str) -> Res<bool> {
+    let got = compute_file_hash(path, algo)?;
     Ok(got.eq_ignore_ascii_case(expected_hex))
 }
 
@@ -142,5 +146,21 @@ mod tests {
         assert!(!verify_file(&p, "sha256", &"0".repeat(64)).unwrap());
         // 大小写不敏感
         assert!(verify_file(&p, "SHA256", &sha.to_uppercase()).unwrap());
+        assert_eq!(compute_file_hash(&p, "sha256").unwrap(), sha);
+    }
+
+    #[test]
+    fn parses_sha512_equals_and_sha256sum_trailing_filename() {
+        let s512 = "a".repeat(128);
+        assert_eq!(parse_checksum(&s512), Some(("sha512".into(), s512.clone())));
+        let s256 = "b".repeat(64);
+        assert_eq!(
+            parse_checksum(&format!("SHA-256={s256}")),
+            Some(("sha256".into(), s256.clone()))
+        );
+        assert_eq!(
+            parse_checksum(&format!("{s256}  *ubuntu-24.04.iso")),
+            Some(("sha256".into(), s256))
+        );
     }
 }

@@ -122,7 +122,7 @@ pub fn pick_name(
                     u.path_segments()
                         .and_then(|mut it| it.next_back())
                         .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
+                        .map(|s| percent_decode_utf8(s).unwrap_or_else(|| s.to_string()))
                 })
         })
         .unwrap_or_else(|| "download".to_string());
@@ -135,26 +135,40 @@ pub fn pick_name(
     name
 }
 
-/// 解析 Content-Disposition 的 filename*（RFC 5987，优先）与 filename。
+/// 解析 Content-Disposition 的 filename*（RFC 5987，优先，大小写不敏感）与 filename。
 pub fn disposition_filename(cd: &str) -> Option<String> {
     let mut plain = None;
     for part in cd.split(';') {
         let part = part.trim();
-        if let Some(v) = part.strip_prefix("filename*=") {
+        let lower = part.to_ascii_lowercase();
+        if lower.starts_with("filename*=") {
             // charset'lang'percent-encoded
-            let mut it = v.splitn(3, '\'');
-            let charset = it.next().unwrap_or("utf-8");
-            let encoded = it.nth(1);
-            if let (Some(encoded), true) = (encoded, charset.eq_ignore_ascii_case("utf-8")) {
-                if let Some(decoded) = percent_decode_utf8(encoded) {
-                    return Some(decoded);
-                }
-            }
-        } else if let Some(v) = part.strip_prefix("filename=") {
-            let v = v.trim();
+            let v = part["filename*=".len()..].trim();
             let v = v.strip_prefix('"').unwrap_or(v);
             let v = v.strip_suffix('"').unwrap_or(v);
-            plain = Some(v.to_string());
+            let mut it = v.splitn(3, '\'');
+            let charset = it.next().unwrap_or("utf-8").trim();
+            let encoded = it.nth(1);
+            if let Some(encoded) = encoded {
+                if charset.is_empty()
+                    || charset.eq_ignore_ascii_case("utf-8")
+                    || charset.eq_ignore_ascii_case("utf8")
+                    || charset.eq_ignore_ascii_case("iso-8859-1")
+                {
+                    if let Some(decoded) = percent_decode_utf8(encoded) {
+                        return Some(decoded);
+                    }
+                }
+            }
+        } else if lower.starts_with("filename=") {
+            let v = part["filename=".len()..].trim();
+            let v = v.strip_prefix('"').unwrap_or(v);
+            let v = v.strip_suffix('"').unwrap_or(v);
+            if let Some(decoded) = percent_decode_utf8(v) {
+                plain = Some(decoded);
+            } else {
+                plain = Some(v.to_string());
+            }
         }
     }
     plain
@@ -270,6 +284,14 @@ mod tests {
             disposition_filename("attachment; filename=\"a b.zip\""),
             Some("a b.zip".to_string())
         );
+        assert_eq!(
+            disposition_filename("attachment; FILENAME=\"UpperCase.tar.gz\""),
+            Some("UpperCase.tar.gz".to_string())
+        );
+        assert_eq!(
+            disposition_filename("attachment; Filename*=utf-8''%E4%B8%AD%E6%96%87%20file.zip"),
+            Some("中文 file.zip".to_string())
+        );
     }
 
     #[test]
@@ -277,6 +299,15 @@ mod tests {
         assert_eq!(
             pick_name(None, None, "/files/big+file.zip", None),
             "big+file.zip"
+        );
+        assert_eq!(
+            pick_name(
+                None,
+                None,
+                "/files/%E6%B5%8B%E8%AF%95%20%E6%96%87%E4%BB%B6.zip",
+                None
+            ),
+            "测试 文件.zip"
         );
         assert_eq!(pick_name(None, None, "/", None), "download");
     }

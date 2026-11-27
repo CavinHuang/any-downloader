@@ -4,12 +4,15 @@ pub mod checksum;
 pub mod driver;
 pub mod engine;
 pub mod hls;
+pub mod hosts;
 pub mod postprocess;
 pub mod ytdlp_task;
 
 pub use driver::{DownloadOptions, MAX_SEGMENTS};
-pub use engine::{Engine, EngineEvent};
+pub use engine::{Engine, EngineEvent, QueueStatus, DEFAULT_MAX_CONCURRENT};
 pub use hls::find_ffmpeg;
+pub use hosts::HostLimits;
+pub use ytdlp_task::is_ytdlp_host;
 
 /// 应用数据目录（可用 ANYTHING_DL_DATA_DIR 覆盖）：
 /// Windows %APPDATA%\anything-downloader，macOS ~/Library/Application Support/anything-downloader。

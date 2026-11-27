@@ -1,12 +1,15 @@
 import type { CSSProperties } from "react";
 
-export type IconName = "plus" | "arrow" | "download" | "search" | "settings" | "import" | "export" | "grid" | "video" | "audio" | "archive" | "doc" | "software" | "image" | "other" | "pause" | "play" | "check" | "retry" | "close" | "folder" | "more" | "link" | "radar" | "clock" | "alert";
+export type IconName = "plus" | "arrow" | "arrowUp" | "external" | "zap" | "download" | "search" | "settings" | "import" | "export" | "grid" | "video" | "audio" | "archive" | "doc" | "software" | "image" | "other" | "pause" | "play" | "check" | "retry" | "close" | "folder" | "more" | "link" | "radar" | "clock" | "alert";
 
 const paths: Record<IconName, React.ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7v6m0 4h.01" /></>,
   arrow: <path d="M5 12h14m-6-6 6 6-6 6" />,
+  arrowUp: <><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></>,
+  external: <><path d="M14 4h6v6" /><path d="M10 14 20 4" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></>,
+  zap: <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" />,
   download: <><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" /></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></>,
   settings: <><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="3" /><circle cx="15" cy="17" r="3" /></>,

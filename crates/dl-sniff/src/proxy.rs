@@ -1,16 +1,13 @@
-//! CONNECT 代理：默认透传，白名单 SNI 定向 MITM。
+//! CONNECT 代理：默认透传，白名单 SNI 定向 MITM，并内置 `/proxy.pac` HTTP 端点。
 //!
 //! 连接生命周期：
-//! 1. 读 CONNECT host:port → 回 `200 Connection Established`；
-//! 2. 预读 ClientHello 解析 SNI（不解密）：
-//!    - 命中解密白名单 → 本地 CA 签叶子证书终止 TLS，按 HTTP/1.1 逐请求转发
-//!      （reqwest 上游，禁系统代理防回环），响应边回写边捕获；
+//! 1. 普通请求 `/proxy.pac` → 直接返回动态 PAC 脚本（解决 Chromium/WeChatAppEx 禁用 `file://` PAC 问题）；
+//! 2. `CONNECT host:port` → 回 `200 Connection Established` → 预读 ClientHello 解析 SNI：
+//!    - 命中解密白名单 → 本地 CA 签叶子证书终止 TLS，转发上游，按 Content-Encoding 解压 JSON 捕获密钥/标题/媒体；
 //!    - 未命中 → 原样转发已读字节 + TCP 双向透传，不解密任何内容。
-//! 3. 非 CONNECT（PAC 下罕见的 http:// 绝对形式）→ 直接转发后关闭。
-//!
-//! MITM 侧响应统一 chunked + Connection: close（每请求一条连接，本地握手
-//! 开销可忽略，规避 keep-alive/pipelining 边界）。
 
+use std::io::Read;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -20,7 +17,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::ca::SniffCa;
-use crate::capture::{is_media_url, scan_api_json, Capture, KEEP_HEADERS};
+use crate::capture::{is_media_response, scan_api_json, Capture, KEEP_HEADERS};
 use crate::sni::parse_sni;
 
 pub struct ProxyShared {
@@ -28,6 +25,7 @@ pub struct ProxyShared {
     pub ca: SniffCa,
     pub capture: Arc<Capture>,
     pub client: reqwest::Client,
+    pub port: AtomicU16,
 }
 
 fn now_ms() -> i64 {
@@ -39,6 +37,24 @@ fn now_ms() -> i64 {
 
 fn find_head_end(b: &[u8]) -> Option<usize> {
     b.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// 生成 PAC：仅视频号相关域走本地 HTTP 代理，其余一律 DIRECT。
+pub fn pac_script(port: u16) -> String {
+    format!(
+        r#"// Anything Downloader 桌面嗅探：仅视频号相关域走本地代理，其余直连
+function FindProxyForURL(url, host) {{
+  if (dnsDomainIs(host, "video.qq.com") ||
+      dnsDomainIs(host, "channels.weixin.qq.com") ||
+      dnsDomainIs(host, "finder.weixin.qq.com") ||
+      dnsDomainIs(host, "mpvideo.qpic.cn") ||
+      dnsDomainIs(host, "wxapp.tc.qq.com")) {{
+    return "PROXY 127.0.0.1:{port}";
+  }}
+  return "DIRECT";
+}}
+"#
+    )
 }
 
 /// 在流上读出完整请求头（含结尾 \r\n\r\n），返回 (头字节, 已读入的剩余字节)。
@@ -62,7 +78,6 @@ async fn read_head<S: AsyncRead + Unpin>(s: &mut S) -> Result<(Vec<u8>, Vec<u8>)
     }
 }
 
-/// 已预读字节 + 内层流的拼接流（把吞进缓冲的 ClientHello 还给 TLS acceptor）。
 struct PreStream {
     pre: std::io::Cursor<Vec<u8>>,
     inner: TcpStream,
@@ -110,13 +125,12 @@ impl AsyncWrite for PreStream {
 
 pub async fn handle_conn(stream: TcpStream, sh: Arc<ProxyShared>) {
     if let Err(e) = handle_conn_inner(stream, &sh).await {
-        // 常规的客户端断开不算错误，降为 debug
         tracing::debug!(error = %e, "代理连接结束");
     }
 }
 
 async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Result<()> {
-    let (head, _rest) = read_head(&mut stream).await?;
+    let (head, rest) = read_head(&mut stream).await?;
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
     if req
@@ -127,8 +141,23 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
         bail!("partial request head");
     }
     let method = req.method.unwrap_or("").to_string();
+    let req_path = req.path.unwrap_or("").to_string();
+
+    if method == "GET" && (req_path == "/proxy.pac" || req_path.ends_with("/proxy.pac")) {
+        let port = sh.port.load(Ordering::Relaxed);
+        let body = pac_script(port);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes()).await?;
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
     if method == "CONNECT" {
-        let authority = req.path.unwrap_or("").to_string();
+        let authority = req_path;
         let (host, port) = split_authority(&authority);
         if host.is_empty() {
             bail!("CONNECT 无主机");
@@ -136,7 +165,6 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
         stream
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
-        // 预读 ClientHello（SNI）；记录所有经过的主机便于实测校准白名单（M1）
         let mut pre = Vec::with_capacity(2048);
         let mut chunk = [0u8; 8192];
         let sni = loop {
@@ -144,7 +172,7 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
                 break Some(s);
             }
             if pre.len() >= 5 && pre[0] != 0x16 {
-                break None; // 不是 TLS
+                break None;
             }
             if pre.len() > 32 * 1024 {
                 break None;
@@ -172,7 +200,7 @@ async fn handle_conn_inner(mut stream: TcpStream, sh: &Arc<ProxyShared>) -> Resu
             passthrough(stream, pre, &host, port, sh).await
         }
     } else {
-        plain_http(stream, head, _rest, sh).await
+        plain_http(stream, head, rest, sh).await
     }
 }
 
@@ -205,7 +233,6 @@ async fn plain_http(
     _rest: Vec<u8>,
     sh: &Arc<ProxyShared>,
 ) -> Result<()> {
-    // absolute-form 请求（http:// 经 PAC 进来）：按原样转发，响应回写
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
     if req
@@ -244,7 +271,6 @@ const HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// MITM 后的 HTTP/1.1 请求循环（Connection: close：单请求）
 async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
     mut tls: S,
     sni: &str,
@@ -271,7 +297,6 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
         format!("https://{host}{raw_path}")
     };
 
-    // 请求体（finder API 为 POST JSON，Chromium 用 content-length）
     let mut body: Option<Vec<u8>> = None;
     if let Some(cl) =
         header_str(req.headers.iter(), "content-length").and_then(|v| v.parse::<usize>().ok())
@@ -289,7 +314,6 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
         body = Some(b);
     }
 
-    // 保留头（引擎 allowlist 子集）随捕获条目记录
     let mut keep: std::collections::HashMap<String, String> = Default::default();
     let mut rb = sh
         .client
@@ -313,18 +337,22 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(|e| anyhow!("上游请求失败 {url}: {e}"))?;
 
-    // 媒体直链：响应头到达即成条（content-length 供 UI 显示大小）
-    if is_media_url(&url) {
-        let _ = sh
-            .capture
-            .media(&url, keep.clone(), resp.content_length(), now_ms());
-    }
     let content_type = resp
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if is_media_response(&url, Some(&content_type)) {
+        let _ = sh.capture.media_with_meta(
+            &url,
+            keep.clone(),
+            resp.content_length(),
+            Some(&content_type),
+            None,
+            now_ms(),
+        );
+    }
     let scan = if content_type.contains("json") {
         Some((sh.capture.clone(), url.as_str(), keep))
     } else {
@@ -334,8 +362,49 @@ async fn mitm_loop<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(())
 }
 
+fn decode_body(raw: &[u8], content_encoding: Option<&str>) -> String {
+    let enc = content_encoding
+        .unwrap_or("")
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let decoded: Vec<u8> = match enc.as_str() {
+        "gzip" | "x-gzip" => {
+            let mut d = flate2::read::GzDecoder::new(raw);
+            let mut out = Vec::new();
+            if d.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                out
+            } else {
+                raw.to_vec()
+            }
+        }
+        "deflate" => {
+            let mut d = flate2::read::ZlibDecoder::new(raw);
+            let mut out = Vec::new();
+            if d.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                out
+            } else {
+                raw.to_vec()
+            }
+        }
+        "br" => {
+            let mut d = brotli::Decompressor::new(raw, 4096);
+            let mut out = Vec::new();
+            if d.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                out
+            } else {
+                raw.to_vec()
+            }
+        }
+        _ => raw.to_vec(),
+    };
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 /// 回写上游响应：chunked + Connection: close。scan 携带 (capture, url, 保留头)
-/// 时缓冲 JSON 响应体做 API 扫描（decode_key/直链/标题）。
+/// 时按 Content-Encoding 解压缓冲后的 JSON 响应体做 API 扫描（decode_key/直链/标题）。
 async fn write_response<S: AsyncWrite + Unpin>(
     out: &mut S,
     resp: reqwest::Response,
@@ -346,6 +415,11 @@ async fn write_response<S: AsyncWrite + Unpin>(
     )>,
 ) -> Result<()> {
     let status = resp.status();
+    let content_encoding = resp
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let mut head = format!(
         "HTTP/1.1 {} {}\r\n",
         status.as_u16(),
@@ -384,13 +458,17 @@ async fn write_response<S: AsyncWrite + Unpin>(
     out.shutdown().await?;
 
     if let (Some(buf), Some((cap, _url, keep))) = (scanned, scan) {
-        let s = scan_api_json(&String::from_utf8_lossy(&buf));
+        let text = decode_body(&buf, content_encoding.as_deref());
+        let s = scan_api_json(&text);
+        let at = now_ms();
+        if let Some(title) = s.title.clone() {
+            cap.note_title(title, at);
+        }
         if let Some(key) = s.key {
-            let at = now_ms();
             cap.note_key(key, at);
             if let Some(mu) = s.media_url {
-                if is_media_url(&mu) {
-                    let _ = cap.media(&mu, keep, None, at);
+                if is_media_response(&mu, None) {
+                    let _ = cap.media_with_meta(&mu, keep, None, None, s.title, at);
                 }
             }
         }

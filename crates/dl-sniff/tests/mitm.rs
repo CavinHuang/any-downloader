@@ -225,3 +225,132 @@ async fn handshake_ok(server: &dl_sniff::ca::SniffCa, root_of: &dl_sniff::ca::Sn
     let _ = server_task.await;
     ok
 }
+
+#[tokio::test]
+async fn pac_endpoint_serves_dynamic_script() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = SniffConfig::new(tmp.path().to_path_buf());
+    cfg.port = 0;
+    let capture = Arc::new(Capture::new(10));
+    let svc = start(cfg, capture).await.unwrap();
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/proxy.pac", svc.port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("FindProxyForURL"));
+    assert!(body.contains(&format!("PROXY 127.0.0.1:{}", svc.port)));
+    svc.stop();
+}
+
+#[tokio::test]
+async fn mitm_captures_gzip_json_and_stodownload_media() {
+    use std::io::Write;
+    let dns_name = "finder.video.qq.com";
+    let key = KeyPair::generate().unwrap();
+    let params = CertificateParams::new(vec![dns_name.to_string()]).unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let cfg = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(cert.der().to_vec())],
+            PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let origin = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = TlsAcceptor::from(Arc::new(cfg.clone()));
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..p]).to_string();
+                        let path = head
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split(' ').nth(1))
+                            .unwrap_or("/");
+                        if path.contains("api/feed") {
+                            let json =
+                                r#"{"data":{"object_desc":"压缩标题","decode_key":"987654321"}}"#;
+                            let mut enc = flate2::write::GzEncoder::new(
+                                Vec::new(),
+                                flate2::Compression::default(),
+                            );
+                            enc.write_all(json.as_bytes()).unwrap();
+                            let gz = enc.finish().unwrap();
+                            let mut resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                gz.len()
+                            )
+                            .into_bytes();
+                            resp.extend_from_slice(&gz);
+                            let _ = tls.write_all(&resp).await;
+                        } else {
+                            let body = b"MP4DATA-STREAM";
+                            let mut resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            resp.extend_from_slice(body);
+                            let _ = tls.write_all(&resp).await;
+                        }
+                        let _ = tls.shutdown().await;
+                        return;
+                    }
+                    match tls.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+            });
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut scfg = SniffConfig::new(tmp.path().to_path_buf());
+    scfg.port = 0;
+    scfg.insecure_upstream = true;
+    scfg.host_map = HashMap::from([(dns_name.to_string(), origin)]);
+    let capture = Arc::new(Capture::new(10));
+    let svc = start(scfg, capture.clone()).await.unwrap();
+    let ca_pem = std::fs::read_to_string(tmp.path().join("sniff/ca-cert.pem")).unwrap();
+    let client = client_with(svc.port, &[ca_pem]);
+
+    let api = client
+        .get("https://finder.video.qq.com/api/feed")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api.status(), 200);
+    let _ = api.bytes().await.unwrap();
+
+    // 无 .mp4 后缀的 /stodownload 视频响应
+    let media = client
+        .get("https://finder.video.qq.com/251/20302/stodownload?encfilekey=xyz")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(media.status(), 200);
+    let _ = media.bytes().await.unwrap();
+
+    let items = capture.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].seed.as_deref(), Some("987654321"));
+    assert_eq!(items[0].title.as_deref(), Some("压缩标题"));
+    svc.stop();
+}

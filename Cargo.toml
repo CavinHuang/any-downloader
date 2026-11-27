@@ -38,6 +38,8 @@ sha1 = "0.10"
 md-5 = "0.10"
 fs4 = "0.9"
 open = "5"
+flate2 = "1"
+brotli = "9"
 # 视频号解密：必须与微信 WASM 的 Isaac64 行为逐位一致（样本对拍锁定 0.5.1）
 rand_isaac = "=0.5.1"
 rand_core = "0.10"

@@ -4,7 +4,17 @@ import { fmtBytes, fmtSpeed } from "../App";
 import { t } from "../i18n";
 import { Icon } from "./Icon";
 
-export function TransferPanel({ tasks, bps, active }: { tasks: Task[]; bps: number; active: number }) {
+export function TransferPanel({
+  tasks,
+  bps,
+  active,
+  queued = 0,
+}: {
+  tasks: Task[];
+  bps: number;
+  active: number;
+  queued?: number;
+}) {
   const [history, setHistory] = useState<number[]>(Array(40).fill(0));
   const currentBps = useRef(bps);
   useEffect(() => { currentBps.current = bps; }, [bps]);
@@ -25,16 +35,31 @@ export function TransferPanel({ tasks, bps, active }: { tasks: Task[]; bps: numb
   }, { completed: 0, bytes: 0, hasSegmented: false }), [tasks]);
   return (
     <footer className="transfer-status" aria-label={t("transferStatus")}>
-      <div className="transfer-speed"><Icon name="download" size={15} /><strong>{fmtSpeed(bps)}</strong>
+      <div className="transfer-speed">
+        <Icon name="zap" size={14} />
+        <span className="transfer-speed-label">{t("totalSpeedLabel")}</span>
+        <strong>{fmtSpeed(bps)}</strong>
         <svg className="speed-chart" viewBox="0 0 110 30" role="img" aria-label={t("speedHistory")}>
-          <path d={`M0 29 L${points} L110 29 Z`} fill="currentColor" opacity=".1" />
-          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+          <defs>
+            <linearGradient id="speedFillGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="currentColor" stopOpacity="0.22" />
+              <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+            </linearGradient>
+          </defs>
+          <path d={`M0 29 L${points} L110 29 Z`} fill="url(#speedFillGrad)" />
+          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
         </svg>
       </div>
-      <span className="transfer-active"><span className={`connection-dot${active > 0 ? " connected" : ""}`} />{active > 0 ? t("activeDownloads").replace("{n}", String(active)) : t("transferIdle")}</span>
+      <span className="transfer-active">
+        <span className={`connection-dot${active > 0 ? " connected" : ""}`} />
+        {active > 0 ? t("activeDownloads").replace("{n}", String(active)) : t("transferIdle")}
+      </span>
+      {queued > 0 && (
+        <span className="transfer-queued">{t("queuedCount").replace("{n}", String(queued))}</span>
+      )}
       <div className="spacer" />
       <span className="transfer-completed">{t("completedTasks").replace("{n}", String(summary.completed))}</span>
-      {!summary.hasSegmented && <span className="transfer-bytes">{t("completedSize")} <strong>{fmtBytes(summary.bytes)}</strong></span>}
+      <span className="transfer-bytes">{t("completedSize")} <strong>{fmtBytes(summary.bytes)}</strong></span>
     </footer>
   );
 }

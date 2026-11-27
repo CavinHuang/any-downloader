@@ -17,12 +17,16 @@ use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use dl_error::ErrorKind;
 use m3u8_rs::Playlist;
 
-use crate::driver::{drive_from, finalize, with_task_headers, Ctx, DriveErr, TargetPaths};
+use crate::driver::{
+    drive_from, finalize, move_file_or_copy, sleep_or_cancel, with_task_headers, Ctx, DriveErr,
+    TargetPaths,
+};
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 const WORKERS: usize = 16;
-const SEG_ATTEMPTS: u32 = 3;
+const SEG_ATTEMPTS: u32 = 6;
+const FETCH_RETRIES: u32 = 3;
 
 #[derive(Debug, Clone)]
 struct HlsSeg {
@@ -175,36 +179,87 @@ fn derive_iv_from_seq(seq: u64) -> [u8; 16] {
 // ---------------------------------------------------------------- IO 帮手
 
 async fn fetch_text(ctx: &Ctx, url: &str) -> Result<String, DriveErr> {
-    let req = with_task_headers(
-        dl_net::identity_headers(ctx.client.get(url)),
-        &ctx.task_headers,
-    );
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| DriveErr::Fatal(dl_net::map_reqwest_err(&e), e.to_string()))?;
-    let status = resp.status().as_u16();
-    if status != 200 {
-        let kind = dl_net::classify_status(status).unwrap_or(ErrorKind::Http {
-            status,
-            retry_after_secs: None,
-        });
-        return Err(DriveErr::Fatal(
-            kind,
-            format!("playlist fetch got HTTP {status}"),
-        ));
+    for attempt in 1..=FETCH_RETRIES {
+        if ctx.cancel.is_cancelled() {
+            return Err(DriveErr::Paused);
+        }
+        let req = with_task_headers(
+            dl_net::identity_headers(ctx.client.get(url)),
+            &ctx.task_headers,
+        );
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status == 200 {
+                    match resp.text().await {
+                        Ok(txt) => return Ok(txt),
+                        Err(e) => {
+                            let kind = dl_net::map_reqwest_err(&e);
+                            if attempt < FETCH_RETRIES && kind.is_retryable() {
+                                if !sleep_or_cancel(
+                                    &ctx.cancel,
+                                    Duration::from_millis(500 * attempt as u64),
+                                )
+                                .await
+                                {
+                                    return Err(DriveErr::Paused);
+                                }
+                                continue;
+                            }
+                            return Err(DriveErr::Fatal(kind, e.to_string()));
+                        }
+                    }
+                }
+                let ra = dl_net::retry_after_secs(resp.headers().get(reqwest::header::RETRY_AFTER));
+                let kind = dl_net::classify_status(status).unwrap_or(ErrorKind::Http {
+                    status,
+                    retry_after_secs: ra,
+                });
+                if attempt < FETCH_RETRIES && kind.is_retryable() {
+                    let wait = Duration::from_secs(ra.unwrap_or(0))
+                        .max(Duration::from_millis(500 * attempt as u64))
+                        .min(Duration::from_secs(5));
+                    if !sleep_or_cancel(&ctx.cancel, wait).await {
+                        return Err(DriveErr::Paused);
+                    }
+                    continue;
+                }
+                return Err(DriveErr::Fatal(
+                    kind,
+                    format!("playlist fetch got HTTP {status}"),
+                ));
+            }
+            Err(e) => {
+                let kind = dl_net::map_reqwest_err(&e);
+                if attempt < FETCH_RETRIES && kind.is_retryable() {
+                    if !sleep_or_cancel(&ctx.cancel, Duration::from_millis(500 * attempt as u64))
+                        .await
+                    {
+                        return Err(DriveErr::Paused);
+                    }
+                    continue;
+                }
+                return Err(DriveErr::Fatal(kind, e.to_string()));
+            }
+        }
     }
-    resp.text()
-        .await
-        .map_err(|e| DriveErr::Fatal(dl_net::map_reqwest_err(&e), e.to_string()))
+    unreachable!()
+}
+
+fn looks_like_html_segment(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
+    let trimmed = head.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("<!doctype html") || lower.starts_with("<html") || lower.starts_with("<head")
 }
 
 async fn fetch_segment_bytes(
     ctx: &Ctx,
+    client: &reqwest::Client,
     url: &str,
     range: Option<(u64, u64)>,
 ) -> Result<Vec<u8>, ErrorKind> {
-    let mut req = dl_net::identity_headers(ctx.client.get(url));
+    let mut req = dl_net::identity_headers(client.get(url));
     if let Some((off, len)) = range {
         req = req.header("Range", format!("bytes={off}-{}", off + len - 1));
     }
@@ -214,13 +269,36 @@ async fn fetch_segment_bytes(
     if status != 200 && status != 206 {
         return Err(dl_net::classify_status(status).unwrap_or(ErrorKind::Http {
             status,
-            retry_after_secs: None,
+            retry_after_secs: dl_net::retry_after_secs(
+                resp.headers().get(reqwest::header::RETRY_AFTER),
+            ),
         }));
     }
+    let expected_cl = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
     let bytes = resp
         .bytes()
         .await
         .map_err(|e| dl_net::map_reqwest_err(&e))?;
+    if bytes.is_empty() {
+        return Err(ErrorKind::NetworkConnectionReset);
+    }
+    if let Some(cl) = expected_cl {
+        if bytes.len() as u64 != cl {
+            return Err(ErrorKind::NetworkConnectionReset);
+        }
+    }
+    if let Some((_, want_len)) = range {
+        if bytes.len() as u64 != want_len {
+            return Err(ErrorKind::NetworkConnectionReset);
+        }
+    }
+    if looks_like_html_segment(&bytes) {
+        return Err(ErrorKind::NetworkConnectionReset);
+    }
     Ok(bytes.to_vec())
 }
 
@@ -357,10 +435,12 @@ pub(crate) async fn phase(ctx: Arc<Ctx>) -> Result<(), DriveErr> {
         Ordering::Relaxed,
     );
 
-    // 进度上报（字节速率 + 分片计数）
+    // 进度上报（字节速率 + 分片计数），随任务取消/结束自动退出（防任务泄漏）
+    let prog_cancel = ctx.cancel.child_token();
     {
         let ectx = ctx.clone();
         let eshared = shared.clone();
+        let p_cancel = prog_cancel.clone();
         tokio::spawn(async move {
             let mut last_bytes = 0u64;
             let mut last_t = std::time::Instant::now();
@@ -368,7 +448,10 @@ pub(crate) async fn phase(ctx: Arc<Ctx>) -> Result<(), DriveErr> {
             let total_local = total;
             let mut last_persisted = std::time::Instant::now();
             loop {
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::select! {
+                    _ = p_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+                }
                 let done = eshared.done_count.load(Ordering::Relaxed);
                 let bytes = eshared.bytes.load(Ordering::Relaxed);
                 let dt = last_t.elapsed().as_secs_f64();
@@ -401,17 +484,18 @@ pub(crate) async fn phase(ctx: Arc<Ctx>) -> Result<(), DriveErr> {
         });
     }
 
-    // 分片 worker 池
+    // 分片 worker 池（共享 HTTP/1.1 连接池避免单连接 HTTP/2 阻塞）
+    let hls_client = dl_net::build_pooled_worker_client(ctx.opts.proxy.as_deref(), WORKERS)
+        .unwrap_or_else(|_| ctx.client.clone());
     let segs = Arc::new(segs);
     let tmp = Arc::new(tmp_dir);
     let cursor = Arc::new(AtomicU64::new(0));
     let key_cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut handles = Vec::new();
     for _ in 0..WORKERS.min(segs.len().max(1)) {
-        let worker_ctx = ctx.engine.clone();
-        let _ = &worker_ctx;
         handles.push(tokio::spawn(hls_worker(
             std::sync::Arc::new(ctx.clone()),
+            hls_client.clone(),
             segs.clone(),
             tmp.clone(),
             shared.clone(),
@@ -422,6 +506,7 @@ pub(crate) async fn phase(ctx: Arc<Ctx>) -> Result<(), DriveErr> {
     for h in handles {
         let _ = h.await;
     }
+    prog_cancel.cancel();
 
     if let Some(kind) = shared.take_fatal() {
         return Err(DriveErr::Fatal(kind, "segment download failed".into()));
@@ -467,10 +552,16 @@ pub(crate) async fn phase(ctx: Arc<Ctx>) -> Result<(), DriveErr> {
         .map_err(drive_from)?;
     verify_hls(&paths.part, flavor)?;
 
-    // 哈希校验（与 HTTP 路径同语义）
-    if let Some((algo, expect)) = &ctx.checksum {
-        let ok = crate::checksum::verify_file(&paths.part, algo, expect)
-            .map_err(|e| DriveErr::Fatal(e.kind, e.message))?;
+    // 哈希校验（与 HTTP 路径同语义，放到 blocking 线程池执行）
+    if let Some((algo, expect)) = ctx.checksum.clone() {
+        let part_path = paths.part.clone();
+        let algo_c = algo.clone();
+        let ok = tokio::task::spawn_blocking(move || {
+            crate::checksum::verify_file(&part_path, &algo_c, &expect)
+        })
+        .await
+        .map_err(|e| DriveErr::Fatal(ErrorKind::Internal, format!("checksum task: {e}")))?
+        .map_err(|e| DriveErr::Fatal(e.kind, e.message))?;
         if !ok {
             return Err(DriveErr::Fatal(
                 ErrorKind::ChecksumMismatch,
@@ -521,6 +612,7 @@ impl HlsShared {
 
 async fn hls_worker(
     ctx: Arc<Ctx>,
+    client: reqwest::Client,
     segs: Arc<Vec<HlsSeg>>,
     tmp: Arc<PathBuf>,
     shared: Arc<HlsShared>,
@@ -537,16 +629,22 @@ async fn hls_worker(
             return;
         }
         let final_path = tmp.join(idx.to_string());
-        if final_path.exists() {
-            shared.done_count.fetch_add(1, Ordering::Relaxed);
-            continue;
+        if let Ok(m) = std::fs::metadata(&final_path) {
+            if m.len() > 0 {
+                // count_existing 已统计过非空缓存分片，此处绝不重复累加 done_count
+                continue;
+            }
+            let _ = std::fs::remove_file(&final_path);
         }
-        match download_one(&ctx, &segs[idx as usize], &final_path, &key_cache).await {
+        match download_one(&ctx, &client, &segs[idx as usize], &final_path, &key_cache).await {
             Ok(len) => {
                 shared.done_count.fetch_add(1, Ordering::Relaxed);
                 shared.bytes.fetch_add(len, Ordering::Relaxed);
             }
             Err(kind) => {
+                if ctx.cancel.is_cancelled() {
+                    return;
+                }
                 if matches!(kind, ErrorKind::AuthExpired | ErrorKind::UrlExpired) {
                     // 分片签名批量失效 → 触发一次清单刷新重下（DESIGN §5.4.8）
                     shared.restart.store(true, Ordering::Relaxed);
@@ -562,36 +660,67 @@ async fn hls_worker(
     }
 }
 
+async fn fetch_with_retry(
+    ctx: &Ctx,
+    client: &reqwest::Client,
+    url: &str,
+    range: Option<(u64, u64)>,
+) -> Result<Vec<u8>, ErrorKind> {
+    for attempt in 1..=FETCH_RETRIES {
+        match fetch_segment_bytes(ctx, client, url, range).await {
+            Ok(b) => return Ok(b),
+            Err(e) if attempt < FETCH_RETRIES && e.is_retryable() => {
+                if !sleep_or_cancel(&ctx.cancel, Duration::from_millis(500 * attempt as u64)).await
+                {
+                    return Err(ErrorKind::NetworkConnectionReset);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 async fn download_one(
     ctx: &Ctx,
+    client: &reqwest::Client,
     seg: &HlsSeg,
     final_path: &Path,
     key_cache: &Mutex<HashMap<String, Vec<u8>>>,
 ) -> Result<u64, ErrorKind> {
     let mut attempts = 0;
     loop {
+        if ctx.cancel.is_cancelled() {
+            return Err(ErrorKind::NetworkConnectionReset);
+        }
         attempts += 1;
         if attempts > SEG_ATTEMPTS {
             return Err(ErrorKind::NetworkConnectionReset);
         }
-        let raw = match fetch_segment_bytes(ctx, &seg.uri, seg.range).await {
+        let raw = match fetch_segment_bytes(ctx, client, &seg.uri, seg.range).await {
             Ok(b) => b,
             Err(e) if e.is_retryable() => {
-                tokio::time::sleep(Duration::from_secs(1 << attempts.min(3).saturating_sub(1)))
-                    .await;
+                if !sleep_or_cancel(
+                    &ctx.cancel,
+                    Duration::from_secs(1 << attempts.min(4).saturating_sub(1)),
+                )
+                .await
+                {
+                    return Err(ErrorKind::NetworkConnectionReset);
+                }
                 continue;
             }
             Err(e) => return Err(e),
         };
         let plain = match &seg.key {
             Some((key_uri, iv)) => {
-                // key 按 URI 缓存；缓存未命中时在锁外抓取（DESIGN §5.4.6）
+                // key 按 URI 缓存；缓存未命中时在锁外抓取（支持重试，DESIGN §5.4.6）
                 let key_bytes = {
                     let cached = key_cache.lock().unwrap().get(key_uri).cloned();
                     match cached {
                         Some(k) => k,
                         None => {
-                            let k = fetch_segment_bytes(ctx, key_uri, None).await?;
+                            let k = fetch_with_retry(ctx, client, key_uri, None).await?;
                             key_cache.lock().unwrap().insert(key_uri.clone(), k.clone());
                             k
                         }
@@ -605,11 +734,20 @@ async fn download_one(
             }
             None => raw,
         };
-        // 原子落盘：<idx>.part → <idx>
+        if plain.is_empty() {
+            return Err(ErrorKind::NetworkConnectionReset);
+        }
+        // HLS 限速遵循全局/任务限速器
+        let mut rem = plain.len() as u64;
+        while rem > 0 {
+            let take = rem.min(dl_throttle::Limiter::ACQUIRE_CAP);
+            ctx.limiter.acquire(take).await;
+            rem -= take;
+        }
+        // 原子落盘：<idx>.part → <idx>（最终统一在 merge sync，避免 16 并发逐片 fsync 拖慢 SSD/HDD）
         let part = final_path.with_extension("part");
         let mut f = std::fs::File::create(&part).map_err(|e| io_err_kind(&e))?;
         f.write_all(&plain).map_err(|e| io_err_kind(&e))?;
-        f.sync_all().map_err(|e| io_err_kind(&e))?;
         drop(f);
         std::fs::rename(&part, final_path).map_err(|e| io_err_kind(&e))?;
         return Ok(plain.len() as u64);
@@ -626,7 +764,11 @@ fn io_err_kind(e: &std::io::Error) -> ErrorKind {
 
 fn count_existing(tmp: &Path, len: usize) -> usize {
     (0..len)
-        .filter(|i| tmp.join(i.to_string()).exists())
+        .filter(|i| {
+            std::fs::metadata(tmp.join(i.to_string()))
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        })
         .count()
 }
 
@@ -686,41 +828,60 @@ async fn merge(
     flavor: Flavor,
     ffmpeg_hint: Option<&str>,
 ) -> Result<(), DriveErr> {
+    let init = if let Some(map) = segs.first().and_then(|s| s.map.as_deref()) {
+        // EXT-X-MAP init segment：必须位于拼接流最前（带重试，DESIGN §5.4.4）
+        Some(
+            fetch_with_retry(ctx, &ctx.client, map, None)
+                .await
+                .map_err(|e| DriveErr::Fatal(e, "fetch init segment failed".into()))?,
+        )
+    } else {
+        None
+    };
+
     let concat_path = tmp.join("_concat.bin");
-    let mut out = std::fs::File::create(&concat_path)
-        .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("create concat: {e}")))?;
-    for (i, seg) in segs.iter().enumerate() {
-        if i == 0 {
-            if let Some(map) = &seg.map {
-                // EXT-X-MAP init segment：必须位于拼接流最前（DESIGN §5.4.4）
-                let init = fetch_segment_bytes(ctx, map, None)
-                    .await
-                    .map_err(|e| DriveErr::Fatal(e, "fetch init segment failed".into()))?;
-                out.write_all(&init)
-                    .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("write init: {e}")))?;
-            }
+    let concat_clone = concat_path.clone();
+    let tmp_clone = tmp.to_path_buf();
+    let seg_count = segs.len();
+    tokio::task::spawn_blocking(move || -> Result<(), DriveErr> {
+        let out_file = std::fs::File::create(&concat_clone)
+            .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("create concat: {e}")))?;
+        let mut writer = std::io::BufWriter::with_capacity(256 * 1024, out_file);
+        if let Some(init_bytes) = init {
+            writer
+                .write_all(&init_bytes)
+                .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("write init: {e}")))?;
         }
-        let data = std::fs::read(tmp.join(i.to_string()))
-            .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("read segment {i}: {e}")))?;
-        out.write_all(&data)
-            .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("write segment {i}: {e}")))?;
-    }
-    out.sync_all()
-        .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("sync concat: {e}")))?;
-    drop(out);
+        for i in 0..seg_count {
+            let mut seg_file = std::fs::File::open(tmp_clone.join(i.to_string()))
+                .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("open segment {i}: {e}")))?;
+            std::io::copy(&mut seg_file, &mut writer)
+                .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("write segment {i}: {e}")))?;
+        }
+        writer
+            .flush()
+            .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("flush concat: {e}")))?;
+        writer
+            .get_ref()
+            .sync_data()
+            .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("sync concat: {e}")))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| DriveErr::Fatal(ErrorKind::Internal, format!("merge task: {e}")))??;
 
     match flavor {
         Flavor::Fmp4 => {
-            std::fs::rename(&concat_path, &paths.part)
+            move_file_or_copy(&concat_path, &paths.part)
                 .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("rename merged: {e}")))?;
         }
         Flavor::Ts => {
-            // ffmpeg 依扩展名猜 muxer：先输出到 .mp4 临时文件再 rename 成 .dlpart
+            // ffmpeg 依扩展名猜 muxer：先输出到 .mp4 临时文件再 move 成 .dlpart
             let remux_out = tmp.join("_remux.mp4");
             match remux_with_ffmpeg(&concat_path, &remux_out, ffmpeg_hint).await {
                 Ok(()) => {
                     let _ = std::fs::remove_file(&concat_path);
-                    std::fs::rename(&remux_out, &paths.part).map_err(|e| {
+                    move_file_or_copy(&remux_out, &paths.part).map_err(|e| {
                         DriveErr::Fatal(io_err_kind(&e), format!("rename remuxed: {e}"))
                     })?;
                 }
@@ -729,7 +890,7 @@ async fn merge(
                     tracing::warn!(error = %e, "ffmpeg remux unavailable; falling back to .ts");
                     let ts_name = format!("{}.ts", paths.name.trim_end_matches(".mp4"));
                     let ts_part = paths.dir.join(format!("{ts_name}.dlpart"));
-                    std::fs::rename(&concat_path, &ts_part)
+                    move_file_or_copy(&concat_path, &ts_part)
                         .map_err(|e| DriveErr::Fatal(io_err_kind(&e), format!("rename ts: {e}")))?;
                     paths.name = ts_name;
                     paths.part = ts_part;
@@ -974,5 +1135,27 @@ hi.m3u8
             Playlist::MediaPlaylist(p) => assert!(!p.end_list),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn looks_like_html_segment_detects_error_pages() {
+        assert!(looks_like_html_segment(
+            b"\xef\xbb\xbf<!DOCTYPE html><html>403</html>"
+        ));
+        assert!(looks_like_html_segment(
+            b"  <html><body>error</body></html>"
+        ));
+        assert!(!looks_like_html_segment(&[0x47, 0x40, 0x11, 0x10]));
+    }
+
+    #[test]
+    fn move_file_or_copy_moves_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        std::fs::write(&src, b"hello hls").unwrap();
+        move_file_or_copy(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hello hls");
     }
 }

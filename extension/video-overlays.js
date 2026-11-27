@@ -11,6 +11,23 @@
 // 不依赖 actions.js（本脚本注入 <all_urls>，文章工具栈只在适配器站点加载），
 // 反馈用自带迷你 toast。
 (() => {
+  // 通用流媒体清单转发（始终安装，不受悬浮按钮显隐开关影响）
+  window.addEventListener("message", (e) => {
+    try {
+      if (e.source !== window || !e.data || e.data.source !== "adl-media-manifest") return;
+      chrome.runtime.sendMessage(
+        {
+          type: "manifest-sniff",
+          kind: e.data.kind,
+          url: e.data.url,
+          text: e.data.text,
+          pageTitle: (document.title || "").slice(0, 120),
+        },
+        () => void chrome.runtime.lastError
+      );
+    } catch (_) {}
+  });
+
   if (window.__adlVideoOverlay) return;
   window.__adlVideoOverlay = true;
 
@@ -31,6 +48,8 @@
   let btn = null;
   let icons = null; // { dl, ok, err, spin } 预建节点，切状态只切 display
   let toastEl = null;
+  let menuEl = null;
+  let menuOptions = []; // [{ label, url, parentUrl, filename }]
 
   let videos = []; // 最近一次扫描到的 video 元素（含开放 shadow DOM 内）
   let active = null; // 当前悬浮命中的视频
@@ -99,6 +118,23 @@
   opacity: 0; transition: opacity .18s ease; pointer-events: none;
 }
 .toast.on { opacity: 1; }
+.menu {
+  position: absolute; top: ${BTN + 4}px; right: 0;
+  min-width: 118px; max-width: 220px; padding: 4px;
+  background: ${t.panel}; color: ${t.ink}; border: 1px solid ${t.border};
+  border-radius: 9px; box-shadow: ${t.shadow};
+  display: none; flex-direction: column; gap: 2px;
+  pointer-events: auto;
+}
+.wrap:hover .menu.has-opts, .menu.has-opts:hover { display: flex; }
+.menu-item {
+  width: 100%; border: 0; background: transparent; color: ${t.ink};
+  font: 11px/1.4 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  text-align: left; padding: 5px 8px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.menu-item:hover { background: ${t.accent}; color: ${t.accentInk}; }
+.menu-sub { opacity: .72; font-size: 10px; }
 @media (prefers-reduced-motion: reduce) {
   .btn, .toast { transition-duration: .01ms !important; animation: none !important; }
 }
@@ -126,10 +162,13 @@
     };
     applySheet();
     const root = document.createElement("div");
+    root.className = "wrap";
     root.innerHTML =
       `<button class="btn st-idle" type="button" aria-label="用 Anything Downloader 下载此视频" title="下载此视频">${svg("dl", 16)}${svg("ok", 16)}${svg("err", 16)}<span class="spin"></span></button>` +
+      `<div class="menu" role="menu"></div>` +
       `<div class="toast" role="status"></div>`;
     btn = root.querySelector(".btn");
+    menuEl = root.querySelector(".menu");
     toastEl = root.querySelector(".toast");
     icons = {
       dl: btn.querySelector(".ico-dl"),
@@ -137,7 +176,7 @@
       err: btn.querySelector(".ico-err"),
     };
     shadow.appendChild(root);
-    btn.addEventListener("click", onClick, true);
+    btn.addEventListener("click", () => void onClick(null), true);
     document.documentElement.appendChild(host);
     try {
       matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applySheet);
@@ -218,12 +257,77 @@
     rafId = requestAnimationFrame(track);
   }
 
+  function refreshMenu() {
+    if (!menuEl) return;
+    menuOptions = [];
+    menuEl.textContent = "";
+    menuEl.classList.remove("has-opts");
+    try {
+      chrome.runtime.sendMessage({ type: "video-sources" }, (resp) => {
+        if (chrome.runtime.lastError || !resp || !resp.ok || !Array.isArray(resp.items)) return;
+        const opts = [];
+        for (const it of resp.items) {
+          if (Array.isArray(it.variants) && it.variants.length > 1) {
+            for (const v of it.variants.slice(0, 5)) {
+              opts.push({
+                label: v.label || v.resolution || "画质",
+                sub: v.bandwidth ? `${Math.round(v.bandwidth / 1000)}k` : "",
+                variantUrl: v.url,
+                parentUrl: it.url,
+              });
+            }
+            break;
+          }
+        }
+        if (!opts.length && resp.items.length > 1) {
+          for (const it of resp.items.slice(0, 4)) {
+            const sub = it.bytes ? `${(it.bytes / 1048576).toFixed(1)}M` : it.type.toUpperCase();
+            opts.push({
+              label: (it.filename || "视频流").slice(0, 18),
+              sub,
+              variantUrl: it.url,
+              parentUrl: it.url,
+            });
+          }
+        }
+        menuOptions = opts;
+        menuEl.textContent = "";
+        if (!opts.length) {
+          menuEl.classList.remove("has-opts");
+          return;
+        }
+        for (const opt of opts) {
+          const item = document.createElement("button");
+          item.type = "button";
+          item.className = "menu-item";
+          const l = document.createElement("span");
+          l.textContent = opt.label;
+          item.append(l);
+          if (opt.sub) {
+            const s = document.createElement("span");
+            s.className = "menu-sub";
+            s.textContent = opt.sub;
+            item.append(s);
+          }
+          item.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            void onClick(opt);
+          });
+          menuEl.append(item);
+        }
+        menuEl.classList.add("has-opts");
+      });
+    } catch (_) {}
+  }
+
   function showFor(video) {
+    const changed = active !== video;
     active = video;
     ensureUi();
     setState("idle"); // 上一次点击的 ok/err 残留状态复位
     hideToast();
     place();
+    if (changed) refreshMenu();
     if (!rafId) rafId = requestAnimationFrame(track);
   }
 
@@ -289,7 +393,7 @@
     if (toastEl) toastEl.classList.remove("on");
   }
 
-  async function onClick() {
+  async function onClick(picked) {
     const v = active;
     if (!v || busy) return;
     busy = true;
@@ -305,6 +409,9 @@
             duration: isFinite(v.duration) ? v.duration : 0,
             vw: v.videoWidth || 0,
             vh: v.videoHeight || 0,
+            variantUrl: picked && picked.variantUrl ? picked.variantUrl : undefined,
+            variantLabel: picked && picked.label ? picked.label : undefined,
+            parentUrl: picked && picked.parentUrl ? picked.parentUrl : undefined,
           },
           (r) => {
             if (chrome.runtime.lastError) resolve(null);

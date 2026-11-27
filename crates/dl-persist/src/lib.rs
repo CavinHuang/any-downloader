@@ -155,6 +155,21 @@ fn migrate(conn: &Connection) -> Result<(), DownloadError> {
         conn.execute("ALTER TABLE tasks ADD COLUMN proxy TEXT", [])
             .map_err(sql_err)?;
     }
+    if conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='queue_order'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(sql_err)?
+        == 0
+    {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(sql_err)?;
+    }
     // 文章正文全文索引（收藏室全文搜索；kind=content 任务建索引，删任务同删）
     conn.execute(
         "CREATE TABLE IF NOT EXISTS content_index (task_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '')",
@@ -172,7 +187,7 @@ pub struct TaskSnapshot {
     pub deleted: Vec<String>,
 }
 
-const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size";
+const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,queue_order,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size";
 
 /// 全文检索命中：(task_id, filename)。
 pub type ContentHit = (String, Option<String>);
@@ -201,6 +216,11 @@ enum Op {
     Rename {
         id: String,
         filename: String,
+        tx: oneshot::Sender<Res<()>>,
+    },
+    UpdateUrl {
+        id: String,
+        url: String,
         tx: oneshot::Sender<Res<()>>,
     },
     UpdateDownloaded {
@@ -235,6 +255,11 @@ enum Op {
     SetPriority {
         id: String,
         priority: i32,
+        tx: oneshot::Sender<Res<()>>,
+    },
+    SetQueueOrder {
+        id: String,
+        queue_order: i64,
         tx: oneshot::Sender<Res<()>>,
     },
     Insert(Box<Task>, oneshot::Sender<Res<()>>),
@@ -376,6 +401,21 @@ impl Db {
         }
     }
 
+    pub async fn set_queue_order(&self, id: &str, queue_order: i64) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::SetQueueOrder {
+                id: id.to_string(),
+                queue_order,
+                tx,
+            })
+            .map_err(|_| writer_gone())?;
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(writer_gone()),
+        }
+    }
+
     pub async fn find_active_by_url(&self, url: &str) -> Res<Option<Task>> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -474,6 +514,22 @@ impl Db {
             .send(Op::Rename {
                 id: id.to_string(),
                 filename: filename.to_string(),
+                tx,
+            })
+            .map_err(|_| writer_gone())?;
+        match rx.await {
+            Ok(res) => res,
+            Err(_) => Err(writer_gone()),
+        }
+    }
+
+    /// 热替换任务 URL（清理 final_url 与 error，保留已下载断点文件续传）。
+    pub async fn update_url(&self, id: &str, url: &str) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Op::UpdateUrl {
+                id: id.to_string(),
+                url: url.to_string(),
                 tx,
             })
             .map_err(|_| writer_gone())?;
@@ -637,6 +693,20 @@ fn writer_loop(conn: Connection, rx: Receiver<Op>) {
                     .map_err(sql_err);
                 let _ = tx.send(res);
             }
+            Op::SetQueueOrder {
+                id,
+                queue_order,
+                tx,
+            } => {
+                let res = conn
+                    .execute(
+                        "UPDATE tasks SET queue_order = ?1, updated_at = ?2 WHERE id = ?3",
+                        rusqlite::params![queue_order, now_ms(), &id],
+                    )
+                    .map(|_| ())
+                    .map_err(sql_err);
+                let _ = tx.send(res);
+            }
             Op::FindActiveByUrl { url, tx } => {
                 let sql = format!(
                     "SELECT {COLS} FROM tasks WHERE url = ?1 AND status NOT IN ('done', 'canceled', 'failed') LIMIT 1"
@@ -716,6 +786,20 @@ fn writer_loop(conn: Connection, rx: Receiver<Op>) {
                 let res = match conn.execute(
                     "UPDATE tasks SET filename = ?1, updated_at = ?2 WHERE id = ?3",
                     rusqlite::params![&filename, now_ms(), &id],
+                ) {
+                    Ok(0) => Err(DownloadError::new(
+                        ErrorKind::NotFound,
+                        format!("task {id} not found"),
+                    )),
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(sql_err(e)),
+                };
+                let _ = tx.send(res);
+            }
+            Op::UpdateUrl { id, url, tx } => {
+                let res = match conn.execute(
+                    "UPDATE tasks SET url = ?1, final_url = NULL, error = NULL, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![&url, now_ms(), &id],
                 ) {
                     Ok(0) => Err(DownloadError::new(
                         ErrorKind::NotFound,
@@ -881,8 +965,8 @@ fn snapshot(conn: &Connection, since: Option<u64>) -> Res<TaskSnapshot> {
 fn insert(conn: &Connection, t: &Task) -> Res<()> {
     let error_json = t.error.as_ref().and_then(|e| serde_json::to_string(e).ok());
     conn.execute(
-        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,queue_order,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         rusqlite::params![
             &t.id,
             &t.url,
@@ -896,6 +980,7 @@ fn insert(conn: &Connection, t: &Task) -> Res<()> {
             t.kind.as_str(),
             t.status.as_str(),
             t.priority,
+            t.queue_order,
             &t.headers_ref,
             &t.headers_json,
             t.downloaded_bytes as i64,
@@ -932,7 +1017,7 @@ fn list(conn: &Connection, status: Option<TaskStatus>) -> Res<Vec<Task>> {
     match status {
         Some(s) => {
             let sql = format!(
-                "SELECT {COLS} FROM tasks WHERE status = ?1 ORDER BY priority DESC, created_at ASC, id"
+                "SELECT {COLS} FROM tasks WHERE status = ?1 ORDER BY priority DESC, CASE WHEN queue_order > 0 THEN queue_order ELSE created_at END ASC, id"
             );
             let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
             let rows = stmt.query_map([s.as_str()], row_to_task).map_err(sql_err)?;
@@ -941,8 +1026,9 @@ fn list(conn: &Connection, status: Option<TaskStatus>) -> Res<Vec<Task>> {
             }
         }
         None => {
-            let sql =
-                format!("SELECT {COLS} FROM tasks ORDER BY priority DESC, created_at ASC, id");
+            let sql = format!(
+                "SELECT {COLS} FROM tasks ORDER BY priority DESC, CASE WHEN queue_order > 0 THEN queue_order ELSE created_at END ASC, id"
+            );
             let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
             let rows = stmt.query_map([], row_to_task).map_err(sql_err)?;
             for row in rows {
@@ -957,6 +1043,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let kind_str: String = row.get("kind")?;
     let status_str: String = row.get("status")?;
     let error_json: Option<String> = row.get("error")?;
+    let created_at: i64 = row.get("created_at")?;
+    let qo: i64 = row.get("queue_order").unwrap_or(0);
     Ok(Task {
         id: row.get("id")?,
         url: row.get("url")?,
@@ -970,6 +1058,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         kind: TaskKind::parse(&kind_str).unwrap_or(TaskKind::Http),
         status: TaskStatus::parse(&status_str).unwrap_or(dl_model::TaskStatus::Queued),
         priority: row.get("priority")?,
+        queue_order: if qo > 0 { qo } else { created_at },
         headers_ref: row.get("headers_ref")?,
         headers_json: row.get("headers_json")?,
         downloaded_bytes: row.get::<_, Option<i64>>("downloaded_bytes")?.unwrap_or(0) as u64,
@@ -979,7 +1068,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         postprocess_json: row.get("postprocess_json")?,
         proxy: row.get("proxy")?,
         error: error_json.and_then(|s| serde_json::from_str(&s).ok()),
-        created_at: row.get("created_at")?,
+        created_at,
         updated_at: row.get("updated_at")?,
         file_size: row.get("file_size")?,
     })
@@ -1005,6 +1094,7 @@ mod tests {
             kind: TaskKind::Http,
             status: TaskStatus::Queued,
             priority: 0,
+            queue_order: 1000,
             headers_ref: None,
             headers_json: None,
             downloaded_bytes: 0,

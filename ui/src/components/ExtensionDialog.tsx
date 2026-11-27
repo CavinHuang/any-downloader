@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, ExtensionBridgeStatus } from "../api";
 import { t } from "../i18n";
 import { useOverlay } from "../useOverlay";
 import { Icon } from "./Icon";
@@ -9,15 +9,17 @@ interface BundleInfo {
   present: boolean;
 }
 
-/** 「安装浏览器扩展」弹窗：引导把随桌面端安装的扩展加载进 Chrome / Edge。 */
+/** 「安装浏览器扩展」弹窗：引导把随桌面端安装的扩展加载进 Chrome / Edge，并展示双通道连接状态。 */
 export function ExtensionDialog({ onClose }: { onClose: () => void }) {
   const [info, setInfo] = useState<BundleInfo | null>(null);
+  const [bridge, setBridge] = useState<ExtensionBridgeStatus | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { ref, onKeyDown } = useOverlay(onClose);
 
   useEffect(() => {
     api.extensionBundle().then(setInfo).catch((e) => setError(String(e)));
+    api.extensionBridgeStatus().then(setBridge).catch(() => {});
   }, []);
 
   const copyPath = async () => {
@@ -61,6 +63,24 @@ export function ExtensionDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <p className="dialog-description">{t("extInstallIntro")}</p>
+        {bridge && (
+          <div className="sniff-controls" style={{ marginBottom: 12 }}>
+            <div className="sniff-status" style={{ marginBottom: 4 }}>
+              <span className={"sniff-dot" + (bridge.running ? "" : " off")} aria-hidden="true" />
+              <span>
+                {t("extHttpBridgeLabel")} ·{" "}
+                {bridge.running
+                  ? t("sniffBridgeListen").replace("{port}", String(bridge.port))
+                  : t("sniffBridgeDown")}
+              </span>
+            </div>
+            <div className="meta">
+              <span className="sniff-tag">
+                {bridge.nmRegistered ? t("sniffNmOk") : t("sniffNmMissing")}
+              </span>
+            </div>
+          </div>
+        )}
         <ol className="ext-steps">
           <li>{t("extStep1")}</li>
           <li>{t("extStep2")}</li>

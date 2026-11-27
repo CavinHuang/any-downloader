@@ -1296,11 +1296,17 @@ dependencies = [
 name = "dl-net"
 version = "0.2.7"
 dependencies = [
+ "brotli",
  "dl-error",
  "dl-filename",
  "dl-model",
+ "flate2",
  "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1358,6 +1364,8 @@ name = "dl-sniff"
 version = "0.2.7"
 dependencies = [
  "anyhow",
+ "brotli",
+ "flate2",
  "futures-util",
  "httparse",
  "rcgen",

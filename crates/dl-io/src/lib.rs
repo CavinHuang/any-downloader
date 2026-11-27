@@ -1,37 +1,41 @@
 //! 单写者线程（DESIGN §5.3）。
 //!
-//! 所有落盘经由一个专用 OS 线程顺序定位写。为什么不做多 worker 并发定位写：
-//! Windows 的 `seek_write` 移动的是每 handle 共享的文件指针（官方文档明示），并发写
-//! 同一 handle 会互相覆盖偏移——静默损坏；且内核对缓冲写按 inode 串行化，并发定位写
-//! 本无并行收益。单写者还让 journal 推进天然串行化。
+//! 所有落盘经由一个专用 OS 线程顺序定位写，使用有界异步通道（tokio::sync::mpsc）
+//! 提供背压，防止高速下载时内存无限膨胀。
 //!
 //! 检查点顺序（崩溃安全不变量「journal ⊆ 已落盘数据」）：
 //! `sync_data(数据文件) → 覆盖写 journal → sync_data(journal)`。
-//! 绝不分块 fsync（机械盘 fsync 上限 ~200 次/s 会打死吞吐）；数据 sync 周期 2s/256MB。
 
+#[cfg(unix)]
+use std::io;
+#[cfg(not(unix))]
 use std::io::{self, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use dl_journal::{Data as JournalData, Entry as JournalEntry, Journal};
 use dl_segment::Segment;
 
+/// 有界写队列深度（256 * ~64KB..256KB ≈ 16–64MB 内存上限）。
+const WRITER_QUEUE_CAP: usize = 256;
 /// 数据文件强制落盘周期：时间或字节任一达到即检查点。
-const CHECKPOINT_SECS: u64 = 2;
-const CHECKPOINT_BYTES: u64 = 256 * 1024 * 1024;
+const CHECKPOINT_SECS: u64 = 5;
+const CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+/// 进度快照推送节流间隔（避免每个 chunk 都 clone 整个 Vec<Segment>）。
+const SNAP_INTERVAL: Duration = Duration::from_millis(80);
 /// 超过此大小的文件跳过 set_len 预分配（exFAT 等不支持稀疏的盘会真实分配并清零）。
 const PREALLOC_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 
 pub enum Msg {
     /// 定位写一块。offset 为绝对文件偏移；同段内严格递增（worker 顺序流式）。
     Chunk { offset: u64, data: Vec<u8> },
-    /// 慢段分裂：包含 at 的段在其 at 处被中止，剩余部分切为
-    /// [at, mid) 与 [mid, old_end)。必须先于任何新段的 Chunk 入队（mpsc 全序保证）。
-    /// 段以「包含 at」定位而非起点匹配：续传恢复后 claimed 区间起点 ≠ journal 段起点。
-    Split { old_end: u64, at: u64, mid: u64 },
+    /// 动态分段窃取：把 end == old_end 的活跃段在 split_at 处缩段，
+    /// 拆分为 [start, split_at) 与 [split_at, old_end)。必须先于新段的 Chunk 入队。
+    SplitAt { old_end: u64, split_at: u64 },
     /// Sequential 模式：响应体正常结束。
     Eof,
     /// 立即检查点（暂停/取消路径）。
@@ -65,7 +69,7 @@ pub struct WriterProgress {
 
 #[derive(Clone)]
 pub struct Writer {
-    tx: Sender<Msg>,
+    tx: mpsc::Sender<Msg>,
     progress: watch::Receiver<WriterProgress>,
 }
 
@@ -75,13 +79,14 @@ impl Writer {
         self.progress.clone()
     }
 
-    pub fn tx(&self) -> Sender<Msg> {
+    pub fn tx(&self) -> mpsc::Sender<Msg> {
         self.tx.clone()
     }
 
     pub async fn send(&self, msg: Msg) -> io::Result<()> {
         self.tx
             .send(msg)
+            .await
             .map_err(|_| io::Error::other("writer thread died"))
     }
 
@@ -103,7 +108,7 @@ pub async fn spawn(
 ) -> io::Result<(Writer, oneshot::Receiver<io::Result<Vec<Segment>>>)> {
     let (ready_tx, ready_rx) = oneshot::channel();
     let (all_tx, all_rx) = oneshot::channel();
-    let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+    let (tx, rx) = mpsc::channel::<Msg>(WRITER_QUEUE_CAP);
     let (progress_tx, progress_rx) = watch::channel(WriterProgress::default());
 
     std::thread::Builder::new()
@@ -131,12 +136,11 @@ pub async fn spawn(
 
 fn writer_loop(
     params: SpawnParams,
-    rx: Receiver<Msg>,
+    mut rx: mpsc::Receiver<Msg>,
     progress_tx: watch::Sender<WriterProgress>,
     all_tx: oneshot::Sender<io::Result<Vec<Segment>>>,
     ready_tx: oneshot::Sender<io::Result<()>>,
 ) -> io::Result<()> {
-    // 初始化
     let setup = (|| -> io::Result<(std::fs::File, Option<u64>, Option<u64>)> {
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -148,7 +152,6 @@ fn writer_loop(
                 total,
                 validator_hash,
             } => {
-                // exFAT 等非稀疏盘上 set_len 会真实分配；超大文件跳过预分配。
                 if total > 0 && total <= PREALLOC_LIMIT {
                     file.set_len(total)?;
                 }
@@ -174,27 +177,31 @@ fn writer_loop(
     let mut all_tx = Some(all_tx);
     let mut downloaded: u64 = segs.iter().map(|s| s.written).sum();
     let sequential = matches!(params.mode, Mode::Sequential);
-    let send_snap = |downloaded: u64, segs: &[Segment]| {
-        let _ = progress_tx.send(WriterProgress {
-            downloaded,
-            // Sequential 模式的伪段（0..u64::MAX）不外发
-            segs: if sequential {
-                Vec::new()
-            } else {
-                segs.to_vec()
-            },
-        });
+    let mut last_snap = Instant::now();
+    let send_snap = |downloaded: u64, segs: &[Segment], last_snap: &mut Instant, force: bool| {
+        if force || last_snap.elapsed() >= SNAP_INTERVAL {
+            let _ = progress_tx.send(WriterProgress {
+                downloaded,
+                segs: if sequential {
+                    Vec::new()
+                } else {
+                    segs.to_vec()
+                },
+            });
+            *last_snap = Instant::now();
+        }
     };
-    send_snap(downloaded, &segs);
+    send_snap(downloaded, &segs, &mut last_snap, true);
 
     let mut last_ckpt = Instant::now();
     let mut bytes_since_ckpt: u64 = 0;
+    #[cfg(not(unix))]
+    let mut last_pos: Option<u64> = None;
 
     macro_rules! checkpoint {
         () => {
             if let Some(j) = journal.as_mut() {
                 if let Err(e) = do_checkpoint(&mut file, j, &segs, total, validator_hash) {
-                    // journal 写失败不致命：保守下界保持旧值，下次检查点重试
                     tracing::warn!(error = %e, "journal checkpoint failed");
                 }
             }
@@ -202,9 +209,9 @@ fn writer_loop(
     }
 
     loop {
-        // Segmented 全部写满 → 触发完成（只一次），随后仍等 Finish 做最终检查点
         if !all_fired && total.is_some() && segs.iter().all(|s| s.done()) {
             all_fired = true;
+            send_snap(downloaded, &segs, &mut last_snap, true);
             if let Some(tx) = all_tx.take() {
                 let _ = tx.send(Ok(segs.clone()));
             }
@@ -218,10 +225,9 @@ fn writer_loop(
             bytes_since_ckpt = 0;
         }
 
-        let msg = match rx.recv() {
-            Ok(m) => m,
-            Err(_) => {
-                // sender 全部关闭且无 Finish：尽力做一次检查点
+        let msg = match rx.blocking_recv() {
+            Some(m) => m,
+            None => {
                 checkpoint!();
                 break;
             }
@@ -233,49 +239,70 @@ fn writer_loop(
                     .iter()
                     .position(|s| offset >= s.start && offset < s.end)
                 else {
-                    // 被分裂替换掉的旧段残余块：内容与续传重写结果一致，忽略
                     continue;
                 };
-                if let Err(e) = file
-                    .seek(SeekFrom::Start(offset))
-                    .and_then(|_| file.write_all(&data))
-                {
+                // 只接受与段连续光标精确匹配的顺序块；跳过窃取/缩段产生的陈旧重叠块
+                let seg_cursor = segs[idx].cursor();
+                if offset != seg_cursor {
+                    continue;
+                }
+                let take = data.len().min((segs[idx].end - offset) as usize);
+                if take == 0 {
+                    continue;
+                }
+                #[cfg(unix)]
+                let write_res = file.write_all_at(&data[..take], offset);
+                #[cfg(not(unix))]
+                let write_res = {
+                    let seek_res = if last_pos != Some(offset) {
+                        file.seek(SeekFrom::Start(offset)).map(|_| ())
+                    } else {
+                        Ok(())
+                    };
+                    let res = seek_res.and_then(|_| file.write_all(&data[..take]));
+                    if res.is_ok() {
+                        last_pos = Some(offset + take as u64);
+                    } else {
+                        last_pos = None;
+                    }
+                    res
+                };
+                if let Err(e) = write_res {
                     if let Some(tx) = all_tx.take() {
                         let _ = tx.send(Err(e));
                     }
                     break;
                 }
                 let seg = &mut segs[idx];
-                if offset == seg.cursor() {
-                    seg.written += data.len() as u64;
-                    downloaded += data.len() as u64;
-                    bytes_since_ckpt += data.len() as u64;
-                    send_snap(downloaded, &segs);
-                }
-                // 非连续块（理论上不发生）：数据已写入但位图不推进；续传会重写该区段，安全。
+                seg.written += take as u64;
+                downloaded += take as u64;
+                bytes_since_ckpt += take as u64;
+                let seg_done = seg.done();
+                send_snap(downloaded, &segs, &mut last_snap, seg_done);
             }
-            Msg::Split { old_end, at, mid } => {
-                if let Some(idx) = segs.iter().position(|s| at >= s.start && at < s.end) {
-                    let old_start = segs[idx].start;
-                    segs[idx] = Segment {
-                        start: old_start,
-                        end: at,
-                        written: at - old_start,
-                    };
+            Msg::SplitAt { old_end, split_at } => {
+                if let Some(idx) = segs
+                    .iter()
+                    .position(|s| s.end == old_end && split_at > s.start && split_at < s.end)
+                {
+                    let old_cursor = segs[idx].cursor();
+                    if old_cursor > split_at {
+                        // 原 worker 的最后一块已越过 split_at：回退多计的字节，新段将从 split_at 覆盖写入
+                        let excess = old_cursor - split_at;
+                        downloaded = downloaded.saturating_sub(excess);
+                        segs[idx].written = split_at - segs[idx].start;
+                    }
+                    segs[idx].end = split_at;
                     segs.push(Segment {
-                        start: at,
-                        end: mid,
-                        written: 0,
-                    });
-                    segs.push(Segment {
-                        start: mid,
+                        start: split_at,
                         end: old_end,
                         written: 0,
                     });
-                    send_snap(downloaded, &segs);
+                    send_snap(downloaded, &segs, &mut last_snap, true);
                 }
             }
             Msg::Eof => {
+                send_snap(downloaded, &segs, &mut last_snap, true);
                 if let Some(tx) = all_tx.take() {
                     let _ = tx.send(Ok(segs.clone()));
                 }
@@ -307,7 +334,6 @@ fn do_checkpoint(
     total: Option<u64>,
     validator_hash: Option<u64>,
 ) -> io::Result<()> {
-    // 顺序即崩溃安全：先让数据落盘，journal 才允许推进。
     file.sync_data()?;
     let data = JournalData {
         total_len: total.unwrap_or(0),

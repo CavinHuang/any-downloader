@@ -27,6 +27,7 @@ const SAVE_KEYS = [
   "yt_dlp_path",
   "max_concurrent",
   "max_auto_retry",
+  "auto_speed_up",
   "auto_categorize",
   "ytdlp_auto_update",
   "schedule_enabled",
@@ -210,6 +211,47 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     </div>
   );
 
+  // 友好速度输入：存储为 B/s，界面以 KB/s 或 MB/s 编辑
+  const speedInput = (key: "task_bps" | "global_bps" | "schedule_outside_bps") => {
+    const rawBps = Number(field(key) || "0");
+    const useMb = rawBps >= 1024 * 1024 && rawBps % (1024 * 1024) === 0;
+    const unit = useMb ? 1024 * 1024 : 1024;
+    const displayVal = rawBps > 0 ? String(Math.round((rawBps / unit) * 100) / 100) : "";
+    return (
+      <div className="speed-unit-input">
+        <input
+          type="number"
+          min={0}
+          step="any"
+          value={displayVal}
+          placeholder={t("speedUnlimited")}
+          onChange={(e) => {
+            const val = e.target.value.trim();
+            if (val === "" || Number(val) <= 0) {
+              set(key, "");
+            } else if (Number.isFinite(Number(val))) {
+              set(key, String(Math.round(Number(val) * unit)));
+            }
+          }}
+        />
+        <select
+          aria-label={t("speed")}
+          value={String(unit)}
+          onChange={(e) => {
+            const nextUnit = Number(e.target.value);
+            if (rawBps > 0) {
+              const curNum = rawBps / unit;
+              set(key, String(Math.round(curNum * nextUnit)));
+            }
+          }}
+        >
+          <option value="1024">{t("speedUnitKB")}</option>
+          <option value="1048576">{t("speedUnitMB")}</option>
+        </select>
+      </div>
+    );
+  };
+
   return (
     <>
     <div className="modal-mask" onClick={requestClose}>
@@ -228,7 +270,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className="settings-content">
         {!s ? !saveError && <div className="hint">{t("probing")}</div> : <>
-        <div className="form-section-title">01 / {t("saveLocation")}</div>
+        <div className="form-section-title">{t("saveLocation")}</div>
         <label>{t("defaultDir")}</label>
         <div style={{ display: "flex", gap: 6 }}>
           <input
@@ -266,28 +308,37 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </select>
           </div>
         </div>
-        <div className="form-section-title">02 / {t("transferPreferences")}</div>
+        <div className="form-section-title">{t("transferPreferences")}</div>
         <div className="grid2">
           <div>
             <label>{t("taskSpeed")}</label>
-            {numInput("task_bps", "0")}
+            {speedInput("task_bps")}
           </div>
           <div>
             <label>{t("globalSpeed")}</label>
-            {numInput("global_bps", "0")}
+            {speedInput("global_bps")}
           </div>
         </div>
         <div className="grid2">
           <div>
             <label>{t("maxConcurrent")}</label>
-            {numInput("max_concurrent", "0")}
+            {numInput("max_concurrent", "3")}
           </div>
           <div>
             <label>{t("maxAutoRetry")}</label>
             {numInput("max_auto_retry", "3")}
           </div>
         </div>
-        <div className="form-section-title">03 / {t("toolPreferences")}</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={field("auto_speed_up") !== "off"}
+            onChange={(e) => set("auto_speed_up", e.target.checked ? "on" : "off")}
+          />
+          {t("autoSpeedUp")}
+        </label>
+        <div className="form-section-title">{t("toolPreferences")}</div>
         <label>{t("proxy")}</label>
         <input
           value={field("proxy")}
@@ -342,7 +393,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           placeholder={t("ytdlpCookiesPlaceholder")}
           onChange={(e) => set("yt_dlp_cookies", e.target.value)}
         />
-        <div className="form-section-title">04 / {t("behaviorPreferences")}</div>
+        <div className="form-section-title">{t("behaviorPreferences")}</div>
         <label>{t("afterDone")}</label>
         <select
           value={afterDone}
@@ -354,9 +405,20 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <option value="none">{t("afterDoneNone")}</option>
           <option value="open_file">{t("afterDoneOpenFile")}</option>
           <option value="open_folder">{t("afterDoneOpenFolder")}</option>
+          <option value="run_command">{t("afterDoneRun")}</option>
           <option value="shutdown">{t("afterDoneShutdown")}</option>
           <option value="sleep">{t("afterDoneSleep")}</option>
         </select>
+        {afterDone === "run_command" && (
+          <>
+            <label>{t("runCommandLabel")}</label>
+            <input
+              value={field("run_command")}
+              placeholder={t("runCommandPlaceholder")}
+              onChange={(e) => set("run_command", e.target.value)}
+            />
+          </>
+        )}
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
             type="checkbox"
@@ -420,7 +482,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {field("schedule_outside") === "limit" && (
               <>
                 <label>{t("scheduleOutsideBps")}</label>
-                {numInput("schedule_outside_bps", "1048576")}
+                {speedInput("schedule_outside_bps")}
               </>
             )}
           </>
@@ -478,7 +540,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {t("extInstallBtn")}
           </button>
         </div>
-        <div className="form-section-title">05 / {t("sniffSection")}</div>
+        <div className="form-section-title">{t("sniffSection")}</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
             type="checkbox"
@@ -550,7 +612,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           )}
         </div>
         {sniffErr && <div className="error">{sniffErr}</div>}
-        <div className="form-section-title">06 / {t("updateSection")}</div>
+        <div className="form-section-title">{t("updateSection")}</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <input
             type="checkbox"

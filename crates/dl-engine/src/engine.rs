@@ -1,14 +1,27 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::driver::DownloadOptions;
 use dl_error::{DownloadError, ErrorKind, Res};
 use dl_model::{new_task_id, now_ms, CreateContentTask, CreateTask, Task, TaskKind, TaskStatus};
 use dl_persist::Db;
+
+/// 默认最大同时下载任务数（支持队列下载；0 = 不限并发）。
+pub const DEFAULT_MAX_CONCURRENT: usize = 3;
+
+/// 队列状态快照（GUI 队列控制栏用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueueStatus {
+    pub paused: bool,
+    pub max_concurrent: usize,
+    pub active: usize,
+    pub queued: usize,
+}
 
 /// 引擎事件（100ms 聚合节流见 http.rs 的 emit_progress）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -33,16 +46,17 @@ pub enum EngineEvent {
 #[derive(Clone)]
 struct RunControl {
     token: CancellationToken,
-    cancel_requested: Arc<std::sync::atomic::AtomicBool>,
-    done: Arc<tokio::sync::Notify>,
-    active: Arc<std::sync::atomic::AtomicBool>,
-    ready: Arc<std::sync::atomic::AtomicBool>,
-    priority: Arc<std::sync::atomic::AtomicI32>,
+    cancel_requested: Arc<AtomicBool>,
+    done: Arc<Notify>,
+    active: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    priority: Arc<AtomicI32>,
+    queue_order: Arc<AtomicI64>,
     order: u64,
-    external: Arc<std::sync::atomic::AtomicBool>,
+    external: Arc<AtomicBool>,
 }
 
-/// 引擎句柄：任务生命周期 + 下载驱动 + 事件流。
+/// 引擎句柄：任务生命周期 + 下载驱动 + 队列调度 + 事件流。
 /// 状态迁移全部经 transition()（迁移表校验 + 落库 + 事件）。
 #[derive(Clone)]
 pub struct Engine {
@@ -51,10 +65,18 @@ pub struct Engine {
     runs: Arc<Mutex<HashMap<String, RunControl>>>,
     limiter: dl_throttle::Limiter,
     /// 全局限速实时覆盖（B/s，0 = 不覆盖；错峰时段外限速用，设置值之上的临时值）。
-    global_override: Arc<std::sync::atomic::AtomicU64>,
-    sequence: Arc<std::sync::atomic::AtomicU64>,
+    global_override: Arc<AtomicU64>,
+    sequence: Arc<AtomicU64>,
+    /// 内存缓存的并发上限（避免准入循环高频轮询 SQLite）。
+    max_concurrent: Arc<AtomicUsize>,
+    /// 队列暂停标记：为 true 时已注册但未获准入的排队任务等待队列恢复。
+    queue_paused: Arc<AtomicBool>,
+    /// 队列状态变更通知（任务结束 / 并发数变更 / 优先级或顺序调整 / 队列恢复）。
+    queue_notify: Arc<Notify>,
     /// 数据根目录（db 所在目录）；journal 等工作文件放在其下。
     root: std::path::PathBuf,
+    /// 按主机自学习的并发连接上限（参照 MDM HostLimits）。
+    host_limits: Arc<crate::hosts::HostLimits>,
 }
 
 /// 任务级代理规范化：空 → None（跟随全局）；仅接受 reqwest 支持的
@@ -84,15 +106,35 @@ impl Engine {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let db = Db::open(db_path)?;
+        let initial_max = db
+            .get_setting("max_concurrent")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_CONCURRENT);
         Ok(Engine {
-            db: Db::open(db_path)?,
+            db,
             events,
             runs: Arc::new(Mutex::new(HashMap::new())),
             limiter: dl_throttle::Limiter::unlimited(),
-            global_override: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            global_override: Arc::new(AtomicU64::new(0)),
+            sequence: Arc::new(AtomicU64::new(0)),
+            max_concurrent: Arc::new(AtomicUsize::new(initial_max)),
+            queue_paused: Arc::new(AtomicBool::new(false)),
+            queue_notify: Arc::new(Notify::new()),
             root,
+            host_limits: Arc::new(crate::hosts::HostLimits::default()),
         })
+    }
+
+    pub fn host_limits(&self) -> Arc<crate::hosts::HostLimits> {
+        self.host_limits.clone()
+    }
+
+    pub fn has_global_rate_override(&self) -> bool {
+        self.global_override.load(Ordering::Relaxed) > 0
     }
 
     pub(crate) fn journal_dir(&self) -> std::path::PathBuf {
@@ -287,14 +329,17 @@ impl Engine {
                         let c = RunControl {
                             token: CancellationToken::new(),
                             cancel_requested: Arc::new(AtomicBool::new(false)),
-                            done: Arc::new(tokio::sync::Notify::new()),
+                            done: Arc::new(Notify::new()),
                             active: Arc::new(AtomicBool::new(false)),
                             ready: Arc::new(AtomicBool::new(true)),
                             priority: Arc::new(AtomicI32::new(task.priority)),
+                            queue_order: Arc::new(AtomicI64::new(if task.queue_order > 0 {
+                                task.queue_order
+                            } else {
+                                task.created_at
+                            })),
                             order: self.sequence.fetch_add(1, Ordering::Relaxed),
-                            external: Arc::new(std::sync::atomic::AtomicBool::new(
-                                task.kind == TaskKind::Ytdlp,
-                            )),
+                            external: Arc::new(AtomicBool::new(task.kind == TaskKind::Ytdlp)),
                         };
                         runs.insert(id.to_string(), c.clone());
                         Some(c)
@@ -305,9 +350,11 @@ impl Engine {
                 if task.status == TaskStatus::Paused {
                     if let Err(e) = self.transition(id, TaskStatus::Queued, None).await {
                         self.runs.lock().unwrap().remove(id);
+                        self.queue_notify.notify_waiters();
                         return Err(e);
                     }
                 }
+                self.queue_notify.notify_waiters();
                 return Ok(c);
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -323,11 +370,11 @@ impl Engine {
         let result = self.drive_attempts(id, opts, &control).await;
         self.runs.lock().unwrap().remove(id);
         control.done.notify_waiters();
+        self.queue_notify.notify_waiters();
         result
     }
 
     async fn drive_attempts(&self, id: &str, opts: DownloadOptions, c: &RunControl) -> Res<Task> {
-        use std::sync::atomic::Ordering;
         let retries = self
             .get_setting("max_auto_retry")
             .await?
@@ -339,17 +386,17 @@ impl Engine {
                 if c.token.is_cancelled() {
                     return self.finish_waiting(id, c).await;
                 }
-                let max = self
-                    .get_setting("max_concurrent")
-                    .await?
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(0);
-                let admitted = {
+                let max = self.max_concurrent.load(Ordering::Relaxed);
+                let q_paused = self.queue_paused.load(Ordering::Relaxed);
+                let admitted = if q_paused {
+                    false
+                } else {
                     let runs = self.runs.lock().unwrap();
                     let active = runs
                         .values()
                         .filter(|r| r.active.load(Ordering::Relaxed))
                         .count();
+                    // 优先级高者优先；同优先级按 queue_order 升序（越小越先），再按入队序
                     let first = runs
                         .iter()
                         .filter(|(_, r)| {
@@ -360,13 +407,11 @@ impl Engine {
                         .max_by_key(|(_, r)| {
                             (
                                 r.priority.load(Ordering::Relaxed),
+                                std::cmp::Reverse(r.queue_order.load(Ordering::Relaxed)),
                                 std::cmp::Reverse(r.order),
                             )
                         })
                         .map(|(id, _)| id.as_str());
-                    // A managed subprocess cannot share a byte-level bucket. With
-                    // a global cap it owns a transfer slot exclusively and gets
-                    // that cap via --limit-rate.
                     let exclusive = opts.global_bps.filter(|v| *v > 0).is_some()
                         && ((c.external.load(Ordering::Relaxed) && active > 0)
                             || runs.values().any(|r| {
@@ -383,7 +428,11 @@ impl Engine {
                 if admitted {
                     break;
                 }
-                tokio::select! { _=c.token.cancelled()=>{}, _=tokio::time::sleep(std::time::Duration::from_millis(50))=>{} }
+                tokio::select! {
+                    _ = c.token.cancelled() => {},
+                    _ = self.queue_notify.notified() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {},
+                }
             }
             let result = crate::driver::run(
                 self,
@@ -394,6 +443,7 @@ impl Engine {
             )
             .await;
             c.active.store(false, Ordering::Relaxed);
+            self.queue_notify.notify_waiters();
             match result {
                 // 直播 HLS（无 #EXT-X-ENDLIST）HTTP 驱动不支持 → 自动转 yt-dlp
                 // 托管录制（yt-dlp 原生支持直播/回放）。一次性重路由，不计重试。
@@ -485,6 +535,10 @@ impl Engine {
     }
 
     pub async fn create_task(&self, mut c: CreateTask) -> Res<Task> {
+        // 迅雷 / 快车 / QQ 旋风链接透明解包（参照 Ghost-Downloader-3 WrappedLinkPack）
+        if let Some(unwrapped) = dl_net::interstitial::unwrap_wrapped_link(&c.url) {
+            c.url = unwrapped;
+        }
         // scheme 白名单是安全不变量（DESIGN §9）：重定向跟随层同样只允许 http/https。
         let parsed = url::Url::parse(&c.url)
             .map_err(|e| DownloadError::new(ErrorKind::InvalidUrl, format!("invalid url: {e}")))?;
@@ -642,6 +696,7 @@ impl Engine {
             kind: kind.unwrap_or(TaskKind::Http),
             status: TaskStatus::Queued,
             priority: c.priority.unwrap_or(0),
+            queue_order: now,
             headers_ref: None,
             headers_json,
             downloaded_bytes: 0,
@@ -787,6 +842,7 @@ impl Engine {
             kind: TaskKind::Content,
             status: TaskStatus::Done,
             priority: 0,
+            queue_order: now,
             headers_ref: None,
             headers_json: None,
             downloaded_bytes: bytes.len() as u64,
@@ -858,11 +914,176 @@ impl Engine {
 
     /// 设置 KV（GUI/CLI 共享；值为 JSON 字符串）。
     pub async fn set_setting(&self, key: &str, value: &str) -> Res<()> {
-        self.db.set_setting(key, value).await
+        self.db.set_setting(key, value).await?;
+        if key == "max_concurrent" {
+            let v = value
+                .trim()
+                .parse::<usize>()
+                .unwrap_or(DEFAULT_MAX_CONCURRENT);
+            self.max_concurrent.store(v, Ordering::Relaxed);
+            self.queue_notify.notify_waiters();
+        }
+        Ok(())
     }
 
     pub async fn get_setting(&self, key: &str) -> Res<Option<String>> {
         self.db.get_setting(key).await
+    }
+
+    /// 队列状态快照。
+    pub async fn queue_status(&self) -> Res<QueueStatus> {
+        let tasks = self.list_tasks(None).await?;
+        let queued = tasks
+            .iter()
+            .filter(|t| matches!(t.status, TaskStatus::Queued | TaskStatus::WaitingRetry))
+            .count();
+        Ok(QueueStatus {
+            paused: self.queue_paused.load(Ordering::Relaxed),
+            max_concurrent: self.max_concurrent.load(Ordering::Relaxed),
+            active: self.running_count(),
+            queued,
+        })
+    }
+
+    /// 开始/恢复队列下载：解除队列暂停并调度所有处于 Queued 的任务。
+    pub async fn start_queue(&self) -> Res<usize> {
+        self.queue_paused.store(false, Ordering::Relaxed);
+        let queued = self.list_tasks(Some(TaskStatus::Queued)).await?;
+        let mut started = 0;
+        for t in queued {
+            let already = self.runs.lock().unwrap().contains_key(&t.id);
+            if !already && self.start(&t.id).await.is_ok() {
+                started += 1;
+            }
+        }
+        self.queue_notify.notify_waiters();
+        Ok(started)
+    }
+
+    /// 暂停队列准入：阻止新的排队任务启动（已在传输的任务自然完成或由用户单独暂停）。
+    pub async fn pause_queue(&self) -> Res<usize> {
+        self.queue_paused.store(true, Ordering::Relaxed);
+        self.queue_notify.notify_waiters();
+        let queued = self.list_tasks(Some(TaskStatus::Queued)).await?;
+        Ok(queued.len())
+    }
+
+    /// 调整排队任务在同优先级组内的队列顺序（direction: "top" | "up" | "down"）。
+    pub async fn reorder_queue(&self, id: &str, direction: &str) -> Res<()> {
+        let mut queued = self.list_tasks(Some(TaskStatus::Queued)).await?;
+        let Some(idx) = queued.iter().position(|t| t.id == id) else {
+            return Err(DownloadError::new(
+                ErrorKind::NotFound,
+                "only queued tasks can be reordered",
+            ));
+        };
+        let target_prio = queued[idx].priority;
+        match direction {
+            "top" => {
+                let min_order = queued
+                    .iter()
+                    .filter(|t| t.priority == target_prio)
+                    .map(|t| t.queue_order)
+                    .min()
+                    .unwrap_or(1);
+                let next = min_order.saturating_sub(1).max(1);
+                if next == min_order {
+                    // 所有同优先级项顺序重编号，留出头部空间
+                    let mut seq = 10i64;
+                    for t in queued.iter().filter(|t| t.priority == target_prio) {
+                        let o = if t.id == id { 1 } else { seq };
+                        if t.id != id {
+                            seq += 10;
+                        }
+                        self.db.set_queue_order(&t.id, o).await?;
+                        if let Some(c) = self.runs.lock().unwrap().get(&t.id) {
+                            c.queue_order.store(o, Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    self.db.set_queue_order(id, next).await?;
+                    if let Some(c) = self.runs.lock().unwrap().get(id) {
+                        c.queue_order.store(next, Ordering::Relaxed);
+                    }
+                }
+            }
+            "up" if idx > 0 && queued[idx - 1].priority == target_prio => {
+                let a = &queued[idx - 1];
+                let b = &queued[idx];
+                let (oa, ob) = if a.queue_order == b.queue_order {
+                    (a.queue_order.saturating_sub(1), b.queue_order)
+                } else {
+                    (b.queue_order, a.queue_order)
+                };
+                self.db.set_queue_order(&a.id, ob).await?;
+                self.db.set_queue_order(&b.id, oa).await?;
+                let runs = self.runs.lock().unwrap();
+                if let Some(c) = runs.get(&a.id) {
+                    c.queue_order.store(ob, Ordering::Relaxed);
+                }
+                if let Some(c) = runs.get(&b.id) {
+                    c.queue_order.store(oa, Ordering::Relaxed);
+                }
+            }
+            "down" if idx + 1 < queued.len() && queued[idx + 1].priority == target_prio => {
+                let a = &queued[idx];
+                let b = &queued[idx + 1];
+                let (oa, ob) = if a.queue_order == b.queue_order {
+                    (a.queue_order, b.queue_order.saturating_add(1))
+                } else {
+                    (b.queue_order, a.queue_order)
+                };
+                self.db.set_queue_order(&a.id, ob).await?;
+                self.db.set_queue_order(&b.id, oa).await?;
+                let runs = self.runs.lock().unwrap();
+                if let Some(c) = runs.get(&a.id) {
+                    c.queue_order.store(ob, Ordering::Relaxed);
+                }
+                if let Some(c) = runs.get(&b.id) {
+                    c.queue_order.store(oa, Ordering::Relaxed);
+                }
+            }
+            "up" | "down" => {}
+            other => {
+                return Err(DownloadError::new(
+                    ErrorKind::InvalidParams,
+                    format!("unknown reorder direction: {other}"),
+                ));
+            }
+        }
+        queued.clear();
+        self.queue_notify.notify_waiters();
+        self.emit(EngineEvent::StateChanged {
+            task_id: id.to_string(),
+            status: TaskStatus::Queued,
+        });
+        Ok(())
+    }
+
+    /// 进程重启恢复：将崩溃残留的活跃状态任务温和置回 Paused（journal 完整保留可续传）。
+    pub async fn recover_stale_active_tasks(&self) -> usize {
+        let Ok(list) = self.list_tasks(None).await else {
+            return 0;
+        };
+        let mut recovered = 0;
+        for t in list {
+            if t.status.is_active() && !self.runs.lock().unwrap().contains_key(&t.id) {
+                let target = if matches!(t.status, TaskStatus::Probing | TaskStatus::Downloading) {
+                    TaskStatus::Paused
+                } else {
+                    TaskStatus::Failed
+                };
+                let err = if target == TaskStatus::Failed {
+                    Some(ErrorKind::Internal)
+                } else {
+                    None
+                };
+                if self.transition(&t.id, target, err).await.is_ok() {
+                    recovered += 1;
+                }
+            }
+        }
+        recovered
     }
 
     pub async fn get_task(&self, id: &str) -> Res<Option<Task>> {
@@ -920,13 +1141,12 @@ impl Engine {
         self.transition(id, TaskStatus::Queued, None).await
     }
 
-    /// 设置队列优先级（run_queued / 未来调度器按此排序；数值越大越先）。
     pub async fn set_priority(&self, id: &str, priority: i32) -> Res<Task> {
         self.db.set_priority(id, priority).await?;
         if let Some(c) = self.runs.lock().unwrap().get(id) {
-            c.priority
-                .store(priority, std::sync::atomic::Ordering::Relaxed);
+            c.priority.store(priority, Ordering::Relaxed);
         }
+        self.queue_notify.notify_waiters();
         self.emit(EngineEvent::StateChanged {
             task_id: id.to_string(),
             status: self.require(id).await?.status,
@@ -960,6 +1180,64 @@ impl Engine {
             status: task.status,
         });
         self.require(id).await
+    }
+
+    /// 热更换下载链接（链接失效 403/404/410 时更换新直链并保留已下载断点文件继续续传）。
+    pub async fn update_task_url(&self, id: &str, new_url: &str) -> Res<Task> {
+        let task = self.require(id).await?;
+        if task.status.is_active() {
+            return Err(DownloadError::new(
+                ErrorKind::InvalidTransition {
+                    from: task.status.as_str().into(),
+                    to: "relinked".into(),
+                },
+                "pause the task before updating its URL",
+            ));
+        }
+        let clean_url = dl_net::interstitial::unwrap_wrapped_link(new_url)
+            .unwrap_or_else(|| new_url.trim().to_string());
+        let parsed = url::Url::parse(&clean_url)
+            .map_err(|e| DownloadError::new(ErrorKind::InvalidUrl, format!("invalid url: {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(DownloadError::new(
+                ErrorKind::InvalidUrl,
+                format!("unsupported scheme {:?}, only http/https", parsed.scheme()),
+            ));
+        }
+        self.db.update_url(id, &clean_url).await?;
+        if matches!(task.status, TaskStatus::Failed | TaskStatus::Canceled) {
+            return self.transition(id, TaskStatus::Queued, None).await;
+        }
+        self.emit(EngineEvent::StateChanged {
+            task_id: id.to_string(),
+            status: task.status,
+        });
+        self.require(id).await
+    }
+
+    /// 计算已完成任务的本地文件校验和（在阻塞线程池执行，不卡异步调度器）。
+    pub async fn compute_task_checksum(&self, id: &str, algo: &str) -> Res<String> {
+        let task = self.require(id).await?;
+        if task.status != TaskStatus::Done {
+            return Err(DownloadError::new(
+                ErrorKind::InvalidTransition {
+                    from: task.status.as_str().into(),
+                    to: "verified".into(),
+                },
+                "task must be completed before computing checksum",
+            ));
+        }
+        let dir = task.dir.ok_or_else(|| {
+            DownloadError::new(ErrorKind::NotFound, "task output directory is missing")
+        })?;
+        let filename = task
+            .filename
+            .ok_or_else(|| DownloadError::new(ErrorKind::NotFound, "task filename is missing"))?;
+        let path = std::path::PathBuf::from(dir).join(filename);
+        let algo = algo.to_string();
+        tokio::task::spawn_blocking(move || crate::checksum::compute_file_hash(&path, &algo))
+            .await
+            .map_err(|e| DownloadError::new(ErrorKind::Internal, format!("checksum join: {e}")))?
     }
 
     pub async fn remove(&self, id: &str) -> Res<bool> {
@@ -1392,6 +1670,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t.kind, TaskKind::Http);
+    }
+
+    #[tokio::test]
+    async fn thunder_wrapped_link_unwraps_into_http_task() {
+        let env = test_engine().await;
+        // thunder://QUFodHRwczovL2V4YW1wbGUuY29tL2ZpbGUuemlwWlo= -> https://example.com/file.zip
+        let t = env
+            .engine
+            .create_task(CreateTask::of(
+                "thunder://QUFodHRwczovL2V4YW1wbGUuY29tL2ZpbGUuemlwWlo=",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(t.url, "https://example.com/file.zip");
+        assert_eq!(t.kind, TaskKind::Http);
+    }
+
+    #[tokio::test]
+    async fn update_task_url_relinks_and_clears_error() {
+        let env = test_engine().await;
+        let t = env
+            .engine
+            .create_task(CreateTask::of("https://old.example.com/a.zip"))
+            .await
+            .unwrap();
+        env.engine
+            .transition(&t.id, TaskStatus::Probing, None)
+            .await
+            .unwrap();
+        env.engine
+            .transition(&t.id, TaskStatus::Failed, Some(ErrorKind::UrlExpired))
+            .await
+            .unwrap();
+
+        let updated = env
+            .engine
+            .update_task_url(
+                &t.id,
+                "thunder://QUFodHRwczovL25ldy5leGFtcGxlLmNvbS9hLnppcFpa",
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.url, "https://new.example.com/a.zip");
+        assert_eq!(updated.status, TaskStatus::Queued);
+        assert!(updated.error.is_none());
+
+        // 活跃态不允许更换链接
+        env.engine
+            .transition(&t.id, TaskStatus::Probing, None)
+            .await
+            .unwrap();
+        env.engine
+            .transition(&t.id, TaskStatus::Downloading, None)
+            .await
+            .unwrap();
+        let err = env
+            .engine
+            .update_task_url(&t.id, "https://another.example.com/a.zip")
+            .await
+            .unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidTransition { .. }));
     }
 
     #[tokio::test]

@@ -565,3 +565,985 @@ async fn paused_resume_with_dead_source_turns_failed() {
     );
     assert!(cur.error.is_some(), "失败原因必须入库供详情查看");
 }
+
+/// 问题 1 & 4：16 线程真 HTTP/1.1 + 动态窃取完成大文件下载且字节完全一致。
+#[tokio::test]
+async fn dynamic_steal_multithread_16_workers_matches_source() {
+    let data = make_data(16 * 1024 * 1024, 17);
+    let server = Server::start(Source::mem(data.clone()), ServerOptions::default()).unwrap();
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &server.url()).await;
+
+    let done = engine.download(&t.id, out_opts(&out, 16)).await.unwrap();
+    assert_eq!(done.status, TaskStatus::Done);
+    assert_eq!(done.total_bytes, Some(data.len() as u64));
+    let got = std::fs::read(out.path().join("file")).unwrap();
+    assert!(got == data);
+}
+
+/// 问题 6：中转页（meta-refresh HTML）自动穿透到真实二进制直链，绝不把 HTML 当成品。
+#[tokio::test]
+async fn interstitial_meta_refresh_bypasses_to_real_file() {
+    use std::io::{Read, Write};
+    let payload = make_data(2 * 1024 * 1024, 29);
+    let data_server =
+        Server::start(Source::mem(payload.clone()), ServerOptions::default()).unwrap();
+    let target_url = data_server.url();
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let u = target_url.clone();
+                    std::thread::spawn(move || {
+                        s.set_nonblocking(false).ok();
+                        let mut buf = [0u8; 2048];
+                        let _ = s.read(&mut buf);
+                        let html = format!(
+                            "<html><head><title>Redirecting</title><meta http-equiv=\"refresh\" content=\"1; url={u}\"></head><body>Please wait</body></html>"
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            html.len(),
+                            html
+                        );
+                        let _ = s.write_all(resp.as_bytes());
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/download-page")).await;
+
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(done.status, TaskStatus::Done);
+    let got = std::fs::read(out.path().join("file")).unwrap();
+    assert!(got == payload, "必须穿透中转页下到真实二进制文件");
+}
+
+/// 问题 6：无法穿透的 HTML 登录/拦截页必须报错 InterstitialPage，不能落盘为 Done。
+#[tokio::test]
+async fn interstitial_html_wall_fails_instead_of_saving_html() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        while !stop_srv.load(std::sync::atomic::Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    std::thread::spawn(move || {
+                        s.set_nonblocking(false).ok();
+                        let mut buf = [0u8; 2048];
+                        let _ = s.read(&mut buf);
+                        let html = "<html><head><title>Login Required</title></head><body>Please sign in</body></html>";
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            html.len(),
+                            html
+                        );
+                        let _ = s.write_all(resp.as_bytes());
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/sdk.zip")).await;
+
+    let err = engine.download(&t.id, out_opts(&out, 4)).await.unwrap_err();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(err.kind.code(), "interstitial_page");
+    let cur = engine.get_task(&t.id).await.unwrap().unwrap();
+    assert_eq!(cur.status, TaskStatus::Failed);
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+/// 问题 3：队列并发控制 + start_queue / reorder_queue。
+#[tokio::test]
+async fn queue_respects_max_concurrent_and_reorders() {
+    let data = make_data(512 * 1024, 13);
+    let servers: Vec<_> = (0..4)
+        .map(|_| Server::start(Source::mem(data.clone()), ServerOptions::default()).unwrap())
+        .collect();
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    engine
+        .set_setting("default_dir", out.path().to_str().unwrap())
+        .await
+        .unwrap();
+    engine.set_setting("max_concurrent", "2").await.unwrap();
+
+    let mut ids = Vec::new();
+    for (i, srv) in servers.iter().enumerate() {
+        let t = engine
+            .create_task(CreateTask {
+                filename: Some(format!("q_{i}.bin")),
+                ..CreateTask::of(srv.url())
+            })
+            .await
+            .unwrap();
+        ids.push(t.id);
+    }
+
+    // 置顶第 4 个任务
+    engine.reorder_queue(&ids[3], "top").await.unwrap();
+    let queued = engine.list_tasks(Some(TaskStatus::Queued)).await.unwrap();
+    assert_eq!(queued[0].id, ids[3]);
+
+    let started = engine.start_queue().await.unwrap();
+    assert_eq!(started, 4);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(engine.running_count() <= 2, "并发不得超过 max_concurrent=2");
+        let list = engine.list_tasks(None).await.unwrap();
+        if let Some(failed) = list.iter().find(|t| t.status == TaskStatus::Failed) {
+            panic!("queued task unexpectedly failed: {:?}", failed.error);
+        }
+        if list.iter().all(|t| t.status == TaskStatus::Done) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "queue timed out");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    for i in 0..4 {
+        let got = std::fs::read(out.path().join(format!("q_{i}.bin"))).unwrap();
+        assert_eq!(got.len(), data.len());
+    }
+}
+
+/// MDM 优化 1：主机并发连接上限自学习（额外连接被 429 拒绝时收敛并发并由存活连接优雅接管完成）。
+#[tokio::test]
+async fn host_limit_refusal_retires_extra_workers_and_completes() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let data = make_data(4 * 1024 * 1024, 31);
+    let data_srv = Arc::new(data.clone());
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let active_range = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let payload = data_srv.clone();
+                    let active = active_range.clone();
+                    std::thread::spawn(move || {
+                        struct ConnGuard(Arc<AtomicUsize>);
+                        impl Drop for ConnGuard {
+                            fn drop(&mut self) {
+                                self.0.fetch_sub(1, Ordering::SeqCst);
+                            }
+                        }
+                        s.set_nonblocking(false).ok();
+                        let mut buf = [0u8; 4096];
+                        let Ok(n) = s.read(&mut buf) else { return };
+                        let head = String::from_utf8_lossy(&buf[..n]);
+                        let mut range: Option<(u64, u64)> = None;
+                        for line in head.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("range") {
+                                    if let Some(spec) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, b)) = spec.split_once('-') {
+                                            if let (Ok(sa), Ok(sb)) =
+                                                (a.parse::<u64>(), b.parse::<u64>())
+                                            {
+                                                range = Some((sa, sb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let Some((a, b)) = range else { return };
+                        let is_probe = a == 0 && b == 0;
+                        let _guard = if !is_probe {
+                            let prev = active.fetch_add(1, Ordering::SeqCst);
+                            if prev >= 2 {
+                                active.fetch_sub(1, Ordering::SeqCst);
+                                let resp = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = s.write_all(resp.as_bytes());
+                                return;
+                            }
+                            Some(ConnGuard(active))
+                        } else {
+                            None
+                        };
+                        let end = b.min((payload.len() - 1) as u64);
+                        let slice_len = end - a + 1;
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nETag: \"hostcap-v1\"\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {slice_len}\r\nConnection: close\r\n\r\n",
+                            payload.len()
+                        );
+                        if s.write_all(hdr.as_bytes()).is_err() {
+                            return;
+                        }
+                        let mut off = a as usize;
+                        let stop_at = (end + 1) as usize;
+                        while off < stop_at {
+                            let step = (stop_at - off).min(64 * 1024);
+                            if s.write_all(&payload[off..off + step]).is_err() {
+                                break;
+                            }
+                            off += step;
+                            if !is_probe {
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/limited.bin")).await;
+
+    let done = engine.download(&t.id, out_opts(&out, 8)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(done.status, TaskStatus::Done);
+    let got = std::fs::read(out.path().join("limited.bin")).unwrap();
+    assert!(got == data);
+    let cap = engine.host_limits().cap("127.0.0.1");
+    assert!(
+        cap.is_some_and(|c| c <= 3),
+        "expected learned host cap <= 3, got {cap:?}"
+    );
+}
+
+/// MDM 优化 2：CDN 节点 ETag 不一致时自动降级为 Last-Modified 续传（不误判为不支持分段或文件变更）。
+#[tokio::test]
+async fn per_node_etag_fallback_keeps_multithread() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let data = make_data(2 * 1024 * 1024, 41);
+    let data_srv = Arc::new(data.clone());
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let node_seq = Arc::new(AtomicUsize::new(1));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        let lm = "Wed, 21 Oct 2015 07:28:00 GMT";
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let payload = data_srv.clone();
+                    let seq = node_seq.clone();
+                    std::thread::spawn(move || {
+                        s.set_nonblocking(false).ok();
+                        let mut buf = [0u8; 4096];
+                        let Ok(n) = s.read(&mut buf) else { return };
+                        let head = String::from_utf8_lossy(&buf[..n]);
+                        let mut range: Option<(u64, u64)> = None;
+                        let mut if_range: Option<String> = None;
+                        for line in head.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                let kl = k.trim().to_ascii_lowercase();
+                                if kl == "range" {
+                                    if let Some(spec) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, b)) = spec.split_once('-') {
+                                            if let (Ok(sa), Ok(sb)) =
+                                                (a.parse::<u64>(), b.parse::<u64>())
+                                            {
+                                                range = Some((sa, sb));
+                                            }
+                                        }
+                                    }
+                                } else if kl == "if-range" {
+                                    if_range = Some(v.trim().to_string());
+                                }
+                            }
+                        }
+                        let id = seq.fetch_add(1, Ordering::Relaxed);
+                        let etag = format!("\"cdn-node-{id}\"");
+                        // 强 ETag If-Range 永不匹配（模拟 CDN 多节点不同 ETag）；Last-Modified 匹配
+                        let if_range_ok = match if_range.as_deref() {
+                            None => true,
+                            Some(v) => v == lm,
+                        };
+                        match (range, if_range_ok) {
+                            (Some((a, b)), true) => {
+                                let end = b.min((payload.len() - 1) as u64);
+                                let slice_len = end - a + 1;
+                                let hdr = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nETag: {etag}\r\nLast-Modified: {lm}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {slice_len}\r\nConnection: close\r\n\r\n",
+                                    payload.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&payload[a as usize..=end as usize]);
+                                }
+                            }
+                            _ => {
+                                let hdr = format!(
+                                    "HTTP/1.1 200 OK\r\nETag: {etag}\r\nLast-Modified: {lm}\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    payload.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&payload);
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/cdn.bin")).await;
+
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(done.status, TaskStatus::Done);
+    let got = std::fs::read(out.path().join("cdn.bin")).unwrap();
+    assert!(got == data);
+}
+
+/// MDM 优化 3：无 ETag/Last-Modified 校验器时，续传通过 4KiB 盘尾重叠采样检测服务端内容暗中变更并重下。
+#[tokio::test]
+async fn resume_without_validators_detects_changed_file_via_overlap() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, RwLock};
+
+    let data_v1 = make_data(2 * 1024 * 1024, 53);
+    let data_v2 = make_data(2 * 1024 * 1024, 99);
+    let current = Arc::new(RwLock::new(data_v1.clone()));
+    let current_srv = current.clone();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let payload_lock = current_srv.clone();
+                    std::thread::spawn(move || {
+                        s.set_nonblocking(false).ok();
+                        let mut buf = [0u8; 4096];
+                        let Ok(n) = s.read(&mut buf) else { return };
+                        let head = String::from_utf8_lossy(&buf[..n]);
+                        let mut range: Option<(u64, u64)> = None;
+                        for line in head.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("range") {
+                                    if let Some(spec) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, b)) = spec.split_once('-') {
+                                            if let (Ok(sa), Ok(sb)) =
+                                                (a.parse::<u64>(), b.parse::<u64>())
+                                            {
+                                                range = Some((sa, sb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let payload = payload_lock.read().unwrap().clone();
+                        match range {
+                            Some((a, b)) => {
+                                let end = b.min((payload.len() - 1) as u64);
+                                let slice_len = end - a + 1;
+                                // 故意不返回 ETag / Last-Modified
+                                let hdr = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {slice_len}\r\nConnection: close\r\n\r\n",
+                                    payload.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&payload[a as usize..=end as usize]);
+                                }
+                            }
+                            None => {
+                                let hdr = format!(
+                                    "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    payload.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&payload);
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/mutable.bin")).await;
+
+    let slow = DownloadOptions {
+        task_bps: Some(512 * 1024),
+        ..out_opts(&out, 4)
+    };
+    let id = t.id.clone();
+    let e2 = engine.clone();
+    let handle = tokio::spawn(async move { e2.download(&id, slow).await });
+    wait_progress(&engine, &t.id, 300 * 1024).await;
+    let _ = engine.pause(&t.id).await;
+    wait_status(&engine, &t.id, TaskStatus::Paused).await;
+    let _ = handle.await.unwrap();
+
+    // 无 ETag/Last-Modified 下替换服务端文件内容（同长度）
+    *current.write().unwrap() = data_v2.clone();
+
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(done.status, TaskStatus::Done);
+    let got = std::fs::read(out.path().join("mutable.bin")).unwrap();
+    assert!(got == data_v2, "必须检测到盘尾 4KiB 变更并完整重下新版本");
+}
+
+fn b64_encode(input: &[u8]) -> String {
+    const LUT: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let v = (b0 << 16) | (b1 << 8) | b2;
+        out.push(LUT[((v >> 18) & 0x3f) as usize] as char);
+        out.push(LUT[((v >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            LUT[((v >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            LUT[(v & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[tokio::test]
+async fn server_repr_digest_auto_verifies_and_catches_corruption() {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    init_log();
+    let payload = make_data(64 * 1024, 0x3C);
+    let real_digest = Sha256::digest(&payload);
+    let good_b64 = b64_encode(&real_digest);
+    let mut bad_digest = real_digest;
+    bad_digest[0] ^= 0xFF;
+    let bad_b64 = b64_encode(&bad_digest);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+
+    std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let data = payload.clone();
+                    let good = good_b64.clone();
+                    let bad = bad_b64.clone();
+                    std::thread::spawn(move || {
+                        let _ = s.set_nonblocking(false);
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let is_bad = req.contains("GET /bad.bin ");
+                        let digest_b64 = if is_bad { bad } else { good };
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nRepr-Digest: sha-256=:{digest_b64}:\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        );
+                        if s.write_all(hdr.as_bytes()).is_ok() {
+                            let _ = s.write_all(&data);
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+
+    let ok_task = add_task(&engine, &format!("http://{addr}/good.bin")).await;
+    let done = engine
+        .download(&ok_task.id, out_opts(&out, 4))
+        .await
+        .unwrap();
+    assert_eq!(done.status, TaskStatus::Done);
+
+    let bad_task = add_task(&engine, &format!("http://{addr}/bad.bin")).await;
+    let err = engine
+        .download(&bad_task.id, out_opts(&out, 4))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, dl_error::ErrorKind::ChecksumMismatch);
+
+    stop.store(true, Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn relink_expired_url_resumes_from_existing_progress() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    init_log();
+    let payload = Arc::new(make_data(2 * 1024 * 1024, 0x5A));
+    let bytes_served_b = Arc::new(AtomicUsize::new(0));
+
+    let spawn_srv = |etag: &'static str, counter: Option<Arc<AtomicUsize>>| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_srv = stop.clone();
+        let payload = payload.clone();
+        std::thread::spawn(move || {
+            while !stop_srv.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        let data = payload.clone();
+                        let cnt = counter.clone();
+                        std::thread::spawn(move || {
+                            let _ = s.set_nonblocking(false);
+                            let mut buf = [0u8; 4096];
+                            let n = s.read(&mut buf).unwrap_or(0);
+                            let req = String::from_utf8_lossy(&buf[..n]);
+                            let mut range: Option<(u64, u64)> = None;
+                            for line in req.lines() {
+                                if let Some((k, v)) = line.split_once(':') {
+                                    if k.eq_ignore_ascii_case("range") {
+                                        if let Some(r) = v.trim().strip_prefix("bytes=") {
+                                            if let Some((a, b)) = r.split_once('-') {
+                                                let sa = a.parse::<u64>().ok();
+                                                let sb = if b.is_empty() {
+                                                    Some((data.len() - 1) as u64)
+                                                } else {
+                                                    b.parse::<u64>().ok()
+                                                };
+                                                if let (Some(sa), Some(sb)) = (sa, sb) {
+                                                    range = Some((sa, sb));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            match range {
+                                Some((a, b)) => {
+                                    let end = b.min((data.len() - 1) as u64);
+                                    let slice = &data[a as usize..=end as usize];
+                                    if let Some(c) = &cnt {
+                                        c.fetch_add(slice.len(), Ordering::Relaxed);
+                                    }
+                                    let hdr = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        data.len(),
+                                        slice.len()
+                                    );
+                                    if s.write_all(hdr.as_bytes()).is_ok() {
+                                        let _ = s.write_all(slice);
+                                    }
+                                }
+                                None => {
+                                    if let Some(c) = &cnt {
+                                        c.fetch_add(data.len(), Ordering::Relaxed);
+                                    }
+                                    let hdr = format!(
+                                        "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                        data.len()
+                                    );
+                                    if s.write_all(hdr.as_bytes()).is_ok() {
+                                        let _ = s.write_all(&data);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(2)),
+                }
+            }
+        });
+        (addr, stop)
+    };
+
+    let (addr_a, stop_a) = spawn_srv("\"etag-old\"", None);
+    let (addr_b, stop_b) = spawn_srv("\"etag-new\"", Some(bytes_served_b.clone()));
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr_a}/archive.bin")).await;
+
+    let slow = DownloadOptions {
+        task_bps: Some(512 * 1024),
+        ..out_opts(&out, 4)
+    };
+    let id = t.id.clone();
+    let e2 = engine.clone();
+    let handle = tokio::spawn(async move { e2.download(&id, slow).await });
+    wait_progress(&engine, &t.id, 400 * 1024).await;
+    let _ = engine.pause(&t.id).await;
+    wait_status(&engine, &t.id, TaskStatus::Paused).await;
+    let _ = handle.await.unwrap();
+    stop_a.store(true, Ordering::Relaxed);
+
+    let new_url = format!("http://{addr_b}/archive.bin");
+    let relinked = engine.update_task_url(&t.id, &new_url).await.unwrap();
+    assert_eq!(relinked.url, new_url);
+
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop_b.store(true, Ordering::Relaxed);
+    assert_eq!(done.status, TaskStatus::Done);
+    let got = std::fs::read(out.path().join("archive.bin")).unwrap();
+    assert_eq!(got, *payload);
+    let served_b = bytes_served_b.load(Ordering::Relaxed);
+    assert!(
+        served_b < payload.len() - 256 * 1024,
+        "expected hot-relink to resume from .dlpart instead of full redownload, served_b={served_b}"
+    );
+}
+
+#[tokio::test]
+async fn antibot_403_retries_with_own_user_agent_and_succeeds() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    init_log();
+    let payload = Arc::new(make_data(256 * 1024, 0x77));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    let srv_payload = payload.clone();
+
+    std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let data = srv_payload.clone();
+                    std::thread::spawn(move || {
+                        let _ = s.set_nonblocking(false);
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let mut ua = String::new();
+                        let mut range: Option<(u64, u64)> = None;
+                        for line in req.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.eq_ignore_ascii_case("user-agent") {
+                                    ua = v.trim().to_string();
+                                } else if k.eq_ignore_ascii_case("range") {
+                                    if let Some(r) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, b)) = r.split_once('-') {
+                                            let sa = a.parse::<u64>().ok();
+                                            let sb = if b.is_empty() {
+                                                Some((data.len() - 1) as u64)
+                                            } else {
+                                                b.parse::<u64>().ok()
+                                            };
+                                            if let (Some(sa), Some(sb)) = (sa, sb) {
+                                                range = Some((sa, sb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !ua.contains("AnythingDownloader/") {
+                            let body = b"blocked browser spoof";
+                            let hdr = format!(
+                                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            if s.write_all(hdr.as_bytes()).is_ok() {
+                                let _ = s.write_all(body);
+                            }
+                            return;
+                        }
+                        match range {
+                            Some((a, b)) => {
+                                let end = b.min((data.len() - 1) as u64);
+                                let slice = &data[a as usize..=end as usize];
+                                let hdr = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len(),
+                                    slice.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(slice);
+                                }
+                            }
+                            None => {
+                                let hdr = format!(
+                                    "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&data);
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/ua.bin")).await;
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+
+    assert_eq!(done.status, TaskStatus::Done);
+    let got = std::fs::read(out.path().join("ua.bin")).unwrap();
+    assert_eq!(got, *payload);
+}
+
+#[tokio::test]
+async fn sequential_premature_eof_retries_to_complete_file() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    init_log();
+    let payload = Arc::new(make_data(128 * 1024, 0x2B));
+    let conn_num = Arc::new(AtomicUsize::new(0));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    let srv_payload = payload.clone();
+    let srv_conn = conn_num.clone();
+
+    std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let data = srv_payload.clone();
+                    let n_conn = srv_conn.fetch_add(1, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let _ = s.set_nonblocking(false);
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let mut start = None;
+                        for line in req.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.eq_ignore_ascii_case("range") {
+                                    if let Some(r) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, _)) = r.split_once('-') {
+                                            start = a.parse::<u64>().ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // 第 1 次（探测）：返回 200（禁用分段，进入 download_sequential）
+                        // 第 2 次（顺序下载首包）：声明总长 128KiB，但故意只发一半即 EOF
+                        // 第 3 次（Range 断点续传）：补发剩余字节
+                        if n_conn == 0 {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                data.len()
+                            );
+                            if s.write_all(hdr.as_bytes()).is_ok() {
+                                let _ = s.write_all(&data);
+                            }
+                        } else if n_conn == 1 && start.is_none() {
+                            let half = data.len() / 2;
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                data.len()
+                            );
+                            if s.write_all(hdr.as_bytes()).is_ok() {
+                                let _ = s.write_all(&data[..half]);
+                            }
+                        } else {
+                            let a = start.unwrap_or(0) as usize;
+                            let end = data.len() - 1;
+                            let slice = &data[a..];
+                            let hdr = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                data.len(),
+                                slice.len()
+                            );
+                            if s.write_all(hdr.as_bytes()).is_ok() {
+                                let _ = s.write_all(slice);
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/seq.bin")).await;
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+
+    assert_eq!(done.status, TaskStatus::Done);
+    assert!(conn_num.load(Ordering::Relaxed) >= 3);
+    let got = std::fs::read(out.path().join("seq.bin")).unwrap();
+    assert_eq!(got, *payload);
+}
+
+#[tokio::test]
+async fn probe_retries_transient_503_and_succeeds() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    init_log();
+    let payload = Arc::new(make_data(128 * 1024, 0x4E));
+    let req_num = Arc::new(AtomicUsize::new(0));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    let srv_payload = payload.clone();
+    let srv_req = req_num.clone();
+
+    std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let data = srv_payload.clone();
+                    let n_req = srv_req.fetch_add(1, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let _ = s.set_nonblocking(false);
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if n_req == 0 {
+                            let hdr = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy";
+                            let _ = s.write_all(hdr.as_bytes());
+                            return;
+                        }
+                        let mut range: Option<(u64, u64)> = None;
+                        for line in req.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.eq_ignore_ascii_case("range") {
+                                    if let Some(r) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, b)) = r.split_once('-') {
+                                            if let (Ok(sa), Ok(sb)) =
+                                                (a.parse::<u64>(), b.parse::<u64>())
+                                            {
+                                                range = Some((sa, sb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        match range {
+                            Some((a, b)) => {
+                                let end = b.min((data.len() - 1) as u64);
+                                let slice = &data[a as usize..=end as usize];
+                                let hdr = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len(),
+                                    slice.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(slice);
+                                }
+                            }
+                            None => {
+                                let hdr = format!(
+                                    "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&data);
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    let t = add_task(&engine, &format!("http://{addr}/retry503.bin")).await;
+    let done = engine.download(&t.id, out_opts(&out, 4)).await.unwrap();
+    stop.store(true, Ordering::Relaxed);
+
+    assert_eq!(done.status, TaskStatus::Done);
+    assert!(req_num.load(Ordering::Relaxed) >= 2);
+    let got = std::fs::read(out.path().join("retry503.bin")).unwrap();
+    assert_eq!(got, *payload);
+}

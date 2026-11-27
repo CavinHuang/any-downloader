@@ -49,6 +49,7 @@ pub async fn get_task(state: State<'_, AppState>, id: String) -> Result<Option<T
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn add_task(
     state: State<'_, AppState>,
     url: String,
@@ -57,6 +58,7 @@ pub async fn add_task(
     headers: Option<HashMap<String, String>>,
     checksum: Option<String>,
     mirrors: Option<Vec<String>>,
+    proxy: Option<String>,
 ) -> Result<Task, String> {
     let mut c = dl_model::CreateTask::of(url);
     c.dir = dir.filter(|s| !s.is_empty());
@@ -64,6 +66,7 @@ pub async fn add_task(
     c.headers = headers.filter(|h| !h.is_empty());
     c.checksum = checksum.filter(|s| !s.is_empty());
     c.mirrors = mirrors.filter(|m| !m.is_empty());
+    c.proxy = proxy.filter(|s| !s.trim().is_empty());
     state.engine.create_task(c).await.map_err(str_err)
 }
 
@@ -128,6 +131,32 @@ pub async fn rename_task(
         .map_err(str_err)
 }
 
+#[tauri::command]
+pub async fn update_task_url(
+    state: State<'_, AppState>,
+    id: String,
+    url: String,
+) -> Result<Task, String> {
+    state
+        .engine
+        .update_task_url(&id, &url)
+        .await
+        .map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn compute_task_checksum(
+    state: State<'_, AppState>,
+    id: String,
+    algo: String,
+) -> Result<String, String> {
+    state
+        .engine
+        .compute_task_checksum(&id, &algo)
+        .await
+        .map_err(str_err)
+}
+
 /// 暂停：运行中走协作取消（checkpoint 后落 Paused）；非运行态直接状态迁移。
 #[tauri::command]
 pub async fn pause_task(state: State<'_, AppState>, id: String) -> Result<Task, String> {
@@ -165,6 +194,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "yt_dlp_cookies",
         "max_concurrent",
         "max_auto_retry",
+        "auto_speed_up",
         "auto_categorize",
         "after_done",
         "clipboard_monitor",
@@ -209,19 +239,134 @@ pub fn default_download_dir() -> String {
     default_download_dir_impl()
 }
 
-/// URL 探测（新建任务对话框的「识别」按钮）。
+/// URL 探测（新建任务对话框的「识别」按钮，含中转页自动穿透/拦截提示）。
 #[tauri::command]
-pub async fn probe_url(url: String) -> Result<serde_json::Value, String> {
-    let client = dl_net::build_client(None).map_err(str_err)?;
-    let r = dl_net::probe::probe(&client, &url, &HashMap::new())
+pub async fn probe_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<serde_json::Value, String> {
+    let proxy = state
+        .engine
+        .get_setting("proxy")
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+    let client = dl_net::build_client(proxy.as_deref()).map_err(str_err)?;
+    match dl_net::probe::probe(&client, &url, &HashMap::new()).await {
+        Ok(r) => Ok(serde_json::json!({
+            "filename": r.filename,
+            "total_bytes": r.total_bytes,
+            "mime": r.mime,
+            "segmented": r.segmented,
+            "final_url": r.final_url,
+            "resolved_from_interstitial": r.resolved_from_interstitial,
+            "is_interstitial": false,
+            "interstitial_title": serde_json::Value::Null,
+        })),
+        Err(e) => match e.kind {
+            dl_error::ErrorKind::InterstitialPage {
+                url: final_url,
+                title,
+            } => Ok(serde_json::json!({
+                "filename": serde_json::Value::Null,
+                "total_bytes": serde_json::Value::Null,
+                "mime": "text/html",
+                "segmented": false,
+                "final_url": final_url,
+                "resolved_from_interstitial": false,
+                "is_interstitial": true,
+                "interstitial_title": title,
+            })),
+            _ => Err(str_err(e)),
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn queue_status(state: State<'_, AppState>) -> Result<dl_engine::QueueStatus, String> {
+    state.engine.queue_status().await.map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn start_queue(state: State<'_, AppState>) -> Result<usize, String> {
+    state.engine.start_queue().await.map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn pause_queue(state: State<'_, AppState>) -> Result<usize, String> {
+    state.engine.pause_queue().await.map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn reorder_queue(
+    state: State<'_, AppState>,
+    id: String,
+    direction: String,
+) -> Result<(), String> {
+    state
+        .engine
+        .reorder_queue(&id, &direction)
+        .await
+        .map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn set_max_concurrent(
+    state: State<'_, AppState>,
+    value: usize,
+) -> Result<dl_engine::QueueStatus, String> {
+    state
+        .engine
+        .set_setting("max_concurrent", &value.to_string())
         .await
         .map_err(str_err)?;
-    Ok(serde_json::json!({
-        "filename": r.filename,
-        "total_bytes": r.total_bytes,
-        "mime": r.mime,
-        "segmented": r.segmented,
-    }))
+    state.engine.queue_status().await.map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn sniff_page_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<Vec<dl_net::page_sniff::PageSniffItem>, String> {
+    let proxy = state
+        .engine
+        .get_setting("proxy")
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+    let client = dl_net::build_client(proxy.as_deref()).map_err(str_err)?;
+    let mut items = dl_net::page_sniff::sniff_page(&client, &url)
+        .await
+        .unwrap_or_default();
+
+    let is_ytdlp = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(dl_engine::is_ytdlp_host))
+        .unwrap_or(false);
+    if is_ytdlp && !items.iter().any(|it| it.url == url) {
+        items.insert(
+            0,
+            dl_net::page_sniff::PageSniffItem {
+                url: url.clone(),
+                filename: "video".to_string(),
+                kind: "ytdlp".to_string(),
+                mime: None,
+                bytes: None,
+                source: "platform".to_string(),
+            },
+        );
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("only http/https URLs can be opened".into());
+    }
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -307,7 +452,7 @@ pub async fn open_task(state: State<'_, AppState>, id: String) -> Result<(), Str
     }
 }
 
-/// 浏览器扩展 NM 通道是否已注册（Chrome/Edge 任一即视为已注册）。
+/// 浏览器扩展 NM 通道是否已注册（Chrome/Edge/Brave/Arc/Vivaldi/Chromium 任一即视为已注册）。
 #[tauri::command]
 pub fn nm_registered() -> bool {
     #[cfg(windows)]
@@ -318,6 +463,8 @@ pub fn nm_registered() -> bool {
         for sub in [
             r"Software\Google\Chrome\NativeMessagingHosts\anything_dl",
             r"Software\Microsoft\Edge\NativeMessagingHosts\anything_dl",
+            r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\anything_dl",
+            r"Software\Vivaldi\NativeMessagingHosts\anything_dl",
         ] {
             if hkcu.open_subkey(sub).is_ok() {
                 return true;
@@ -332,22 +479,32 @@ pub fn nm_registered() -> bool {
         };
         if cfg!(target_os = "macos") {
             let support = home.join("Library/Application Support");
-            support
-                .join("Google/Chrome/NativeMessagingHosts/anything_dl.json")
-                .exists()
-                || support
-                    .join("Microsoft Edge/NativeMessagingHosts/anything_dl.json")
-                    .exists()
+            [
+                "Google/Chrome/NativeMessagingHosts/anything_dl.json",
+                "Microsoft Edge/NativeMessagingHosts/anything_dl.json",
+                "BraveSoftware/Brave-Browser/NativeMessagingHosts/anything_dl.json",
+                "Arc/User Data/NativeMessagingHosts/anything_dl.json",
+                "Vivaldi/NativeMessagingHosts/anything_dl.json",
+                "Chromium/NativeMessagingHosts/anything_dl.json",
+            ]
+            .iter()
+            .any(|p| support.join(p).exists())
         } else {
             let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
-            ["google-chrome", "microsoft-edge", "chromium"]
-                .iter()
-                .any(|b| {
-                    config
-                        .join(b)
-                        .join("NativeMessagingHosts/anything_dl.json")
-                        .exists()
-                })
+            [
+                "google-chrome",
+                "microsoft-edge",
+                "chromium",
+                "BraveSoftware/Brave-Browser",
+                "vivaldi",
+            ]
+            .iter()
+            .any(|b| {
+                config
+                    .join(b)
+                    .join("NativeMessagingHosts/anything_dl.json")
+                    .exists()
+            })
         }
     }
 }
@@ -668,4 +825,80 @@ pub fn remote_autostart(engine: &Engine, state: &RemoteState) {
         }
         Err(e) => tracing::warn!(error = %e, "remote server autostart failed"),
     }
+}
+
+/// 浏览器扩展本地 HTTP 桥状态（与 Native Messaging 双通道并行）。
+#[derive(Default)]
+pub struct BridgeHandle {
+    pub state: std::sync::Mutex<Option<std::sync::Arc<dl_ipc::http_bridge::BridgeState>>>,
+}
+
+#[tauri::command]
+pub async fn extension_bridge_status(
+    bridge: State<'_, BridgeHandle>,
+) -> Result<serde_json::Value, String> {
+    let st = bridge.state.lock().unwrap().clone();
+    let nm = nm_registered();
+    if let Some(st) = st {
+        let has_token = st.has_token().await;
+        Ok(serde_json::json!({
+            "running": true,
+            "port": st.port,
+            "hasToken": has_token,
+            "nmRegistered": nm,
+            "lastSeenAt": st.last_seen_at(),
+            "items": st.items(),
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "running": false,
+            "port": dl_ipc::http_bridge::DEFAULT_BRIDGE_PORT,
+            "hasToken": false,
+            "nmRegistered": nm,
+            "lastSeenAt": null,
+            "items": [],
+        }))
+    }
+}
+
+#[tauri::command]
+pub async fn extension_bridge_clear(bridge: State<'_, BridgeHandle>) -> Result<(), String> {
+    let st = bridge.state.lock().unwrap().clone();
+    if let Some(st) = st {
+        st.clear();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn extension_bridge_download(
+    bridge: State<'_, BridgeHandle>,
+    app_state: State<'_, AppState>,
+    id: String,
+    variant_url: Option<String>,
+) -> Result<Task, String> {
+    let st = bridge
+        .state
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "extension bridge is not running".to_string())?;
+    let item = st
+        .get_item(&id)
+        .ok_or_else(|| format!("sniffed item {id} not found"))?;
+    let url = variant_url
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or(item.url);
+    let mut create = dl_model::CreateTask::of(url);
+    create.filename = item.filename.filter(|s| !s.trim().is_empty());
+    if !item.headers.is_empty() {
+        create.headers = Some(item.headers);
+    }
+    let task = app_state
+        .engine
+        .create_task(create)
+        .await
+        .map_err(str_err)?;
+    let _ = app_state.engine.start(&task.id).await;
+    Ok(task)
 }

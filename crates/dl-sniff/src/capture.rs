@@ -1,12 +1,11 @@
 //! 捕获规则与条目缓冲。
 //!
 //! 两类捕获源（对齐浏览器 channels 适配器的配对语义，docs/MEDIA-ADAPTERS.md §3.1）：
-//! - 解密域上的媒体请求：URL 命中 `.mp4`（finder CDN 形态）→ 记条目（url/headers/大小）；
-//! - 解密域上的 API 响应：JSON 含 `decode_key` → 记待配对 key（120s 有效），
-//!   与随后的最近一条媒体配对成 `postprocess: isaac64-xor` 种子；同一响应若
+//! - 解密域上的媒体请求：URL 命中常见媒体扩展名、微信视频号 `/stodownload` / `encfilekey=`
+//!   形态，或响应 `Content-Type` 为 `video/*`、`audio/*`、`mpegurl`、`dash+xml`；
+//! - 解密域上的 API 响应：JSON 含 `decode_key` / `title` → 记待配对元信息（120s 有效），
+//!   与随后的最近一条媒体配对成 `postprocess: isaac64-xor` 种子与标题；同一响应若
 //!   同时带媒体 URL 则直接成条。
-//!
-//! 条目环形缓冲（默认 50）+ broadcast 事件供宿主（Tauri）转发 UI。
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -61,6 +60,8 @@ impl SniffedItem {
 struct Keys {
     /// (decode_key, at) 环形
     pending: VecDeque<(String, i64)>,
+    /// (title, at) 环形
+    titles: VecDeque<(String, i64)>,
 }
 
 pub struct Capture {
@@ -98,11 +99,17 @@ impl Capture {
     }
 
     fn push(&self, mut item: SniffedItem) {
-        // 同 URL 重复捕获（Range 重读/多连接）：保最新（种子可能后来才配上）
+        // 同 URL 重复捕获（Range 重读/多连接）：保最新并保留已有非空字段
         let mut q = self.items.lock().unwrap();
         if let Some(old) = q.iter_mut().find(|i| i.url == item.url) {
             if item.seed.is_none() {
                 item.seed = old.seed.take();
+            }
+            if item.title.is_none() {
+                item.title = old.title.take();
+            }
+            if item.bytes.is_none() {
+                item.bytes = old.bytes;
             }
             *old = item.clone();
         } else {
@@ -126,6 +133,21 @@ impl Capture {
         }
     }
 
+    /// API 响应里发现视频标题（供随后媒体请求配对）
+    pub fn note_title(&self, title: String, at: i64) {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut k = self.keys.lock().unwrap();
+        if !k.titles.iter().any(|(x, _)| x == trimmed) {
+            k.titles.push_back((trimmed.to_string(), at));
+            while k.titles.len() > KEY_KEEP {
+                k.titles.pop_front();
+            }
+        }
+    }
+
     /// 媒体直链捕获；URL 不命中媒体形态返回 false。
     pub fn media(
         &self,
@@ -134,11 +156,25 @@ impl Capture {
         bytes: Option<u64>,
         at: i64,
     ) -> bool {
-        if !is_media_url(url) {
+        self.media_with_meta(url, headers, bytes, None, None, at)
+    }
+
+    /// 带 Content-Type 与显式标题的媒体捕获（支持无 `.mp4` 后缀的 CDN 直链）。
+    pub fn media_with_meta(
+        &self,
+        url: &str,
+        headers: std::collections::HashMap<String, String>,
+        bytes: Option<u64>,
+        content_type: Option<&str>,
+        explicit_title: Option<String>,
+        at: i64,
+    ) -> bool {
+        if !is_media_response(url, content_type) {
             return false;
         }
         let seed = self.take_key(at);
-        tracing::info!(url, ?seed, "sniff 捕获媒体");
+        let title = explicit_title.or_else(|| self.take_title(at));
+        tracing::info!(url, ?seed, ?title, "sniff 捕获媒体");
         self.push(SniffedItem {
             id: uuid::Uuid::new_v4().to_string(),
             url: url.to_string(),
@@ -146,7 +182,7 @@ impl Capture {
             headers,
             bytes,
             seed,
-            title: None,
+            title,
             at,
         });
         true
@@ -164,19 +200,58 @@ impl Capture {
         }
         None
     }
+
+    fn take_title(&self, at: i64) -> Option<String> {
+        let mut k = self.keys.lock().unwrap();
+        while let Some((title, t)) = k.titles.front().map(|(title, t)| (title.clone(), *t)) {
+            if at - t > KEY_TTL_MS {
+                k.titles.pop_front();
+                continue;
+            }
+            k.titles.pop_front();
+            return Some(title);
+        }
+        None
+    }
 }
 
-/// 媒体直链形态：finder CDN 的 .mp4（扩展名判断与浏览器嗅探 EXT_TYPE 一致；
-/// query 参数不影响）。
+/// 媒体直链形态（纯 URL）：扩展名 + 微信视频号 CDN 特征。
 pub fn is_media_url(url: &str) -> bool {
-    let path = url
-        .split('#')
+    let before_query = url.split('#').next().unwrap_or("");
+    let path = before_query.split('?').next().unwrap_or("");
+    let lower_path = path.to_ascii_lowercase();
+    const MEDIA_EXTS: &[&str] = &[
+        ".mp4", ".m3u8", ".mpd", ".flv", ".webm", ".mkv", ".mov", ".mp3", ".m4a", ".aac", ".flac",
+    ];
+    if MEDIA_EXTS.iter().any(|e| lower_path.ends_with(e)) {
+        return true;
+    }
+    let lower_url = before_query.to_ascii_lowercase();
+    if lower_url.contains("/stodownload") || lower_url.contains("encfilekey=") {
+        return true;
+    }
+    false
+}
+
+/// 结合 URL 形态与上游响应 Content-Type 判定是否为可下载媒体。
+pub fn is_media_response(url: &str, content_type: Option<&str>) -> bool {
+    if is_media_url(url) {
+        return true;
+    }
+    let Some(ct) = content_type else {
+        return false;
+    };
+    let mime = ct
+        .split(';')
         .next()
         .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("");
-    path.ends_with(".mp4") || path.ends_with(".m3u8")
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("video/")
+        || mime.starts_with("audio/")
+        || mime == "application/vnd.apple.mpegurl"
+        || mime == "application/x-mpegurl"
+        || mime == "application/dash+xml"
 }
 
 pub struct ApiScan {
@@ -248,8 +323,19 @@ mod tests {
         assert!(is_media_url(
             "https://finder.video.qq.com/302/20304/10004/1190000041/f02030xxx.mp4?zz=1"
         ));
+        assert!(is_media_url(
+            "https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc&token=xyz"
+        ));
         assert!(!is_media_url("https://finder.video.qq.com/api/feed"));
         assert!(is_media_url("https://x/a.m3u8?k=1"));
+        assert!(is_media_response(
+            "https://finder.video.qq.com/cdn/12345",
+            Some("video/mp4")
+        ));
+        assert!(!is_media_response(
+            "https://finder.video.qq.com/api/feed",
+            Some("application/json")
+        ));
     }
 
     #[test]
@@ -265,9 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn capture_pairs_key_with_later_media() {
+    fn capture_pairs_key_and_title_with_later_media() {
         let c = Capture::new(10);
         c.note_key("123456".into(), 1_000);
+        c.note_title("测试标题".into(), 1_000);
         assert!(c.media(
             "https://finder.video.qq.com/a.mp4",
             Default::default(),
@@ -276,7 +363,7 @@ mod tests {
         ));
         let it = c.latest().unwrap();
         assert_eq!(it.seed.as_deref(), Some("123456"));
-        // 无 key 时照常成条（未加密视频）
+        assert_eq!(it.title.as_deref(), Some("测试标题"));
         assert!(c.media(
             "https://finder.video.qq.com/b.mp4",
             Default::default(),
@@ -284,7 +371,6 @@ mod tests {
             3_000
         ));
         assert!(c.latest().unwrap().seed.is_none());
-        // 同 URL 更新保最新种子
         c.note_key("999".into(), 3_500);
         assert!(c.media(
             "https://finder.video.qq.com/b.mp4",

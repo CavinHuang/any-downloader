@@ -145,6 +145,7 @@ const selected = new Set(); // 选中资源 url 集合
 const CFG_DEFAULTS = {
   types: { video: true, hls: true, audio: true, archive: true, binary: true, doc: true, image: false, other: true },
   minSizeMB: 1,
+  prefixPageTitle: true,
   videoOverlay: true, // 视频悬浮下载按钮（video-overlays.js）
   videoOverlayHosts: [], // 站点黑名单（预留，暂无编辑 UI）
 };
@@ -156,6 +157,7 @@ async function loadCfg() {
       CFG = {
         types: { ...CFG_DEFAULTS.types, ...(sniffCfg.types || {}) },
         minSizeMB: sniffCfg.minSizeMB ?? 1,
+        prefixPageTitle: sniffCfg.prefixPageTitle !== false,
         videoOverlay: sniffCfg.videoOverlay !== false,
         videoOverlayHosts: Array.isArray(sniffCfg.videoOverlayHosts) ? sniffCfg.videoOverlayHosts : [],
       };
@@ -276,15 +278,26 @@ function renderResList() {
   updateBatchBar();
 }
 
+function fmtDuration(sec) {
+  if (sec == null || !isFinite(sec) || sec <= 0) return "";
+  const s = Math.round(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${p(m)}:${p(r)}` : `${p(m)}:${p(r)}`;
+}
+
 function renderResItem(item) {
   const div = document.createElement("div");
   div.className = "item" + (selected.has(item.url) ? " selected" : "");
+  const displayTitle = item.filename || displayNameOfUrl(item.url);
 
   if (item.type !== "dash") {
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = selected.has(item.url);
-    cb.setAttribute("aria-label", "选择 " + displayNameOfUrl(item.url));
+    cb.setAttribute("aria-label", "选择 " + displayTitle);
     cb.addEventListener("change", () => {
       if (cb.checked) selected.add(item.url);
       else selected.delete(item.url);
@@ -300,7 +313,7 @@ function renderResItem(item) {
 
   const name = document.createElement("div");
   name.className = "name";
-  name.textContent = displayNameOfUrl(item.url);
+  name.textContent = displayTitle;
   name.title = item.url;
 
   const url = document.createElement("div");
@@ -317,6 +330,19 @@ function renderResItem(item) {
   size.className = "size";
   size.textContent = item.bytes != null ? fmtBytes(item.bytes) : "大小未知";
   meta.append(tag, size);
+  const dur = fmtDuration(item.durationSec);
+  if (dur) {
+    const durEl = document.createElement("span");
+    durEl.className = "size";
+    durEl.textContent = dur;
+    meta.append(durEl);
+  }
+  if (Array.isArray(item.variants) && item.variants.length > 0 && item.variants[0].label) {
+    const vTag = document.createElement("span");
+    vTag.className = "tag";
+    vTag.textContent = item.variants[0].label;
+    meta.append(vTag);
+  }
   mid.append(name, url, meta);
 
   const actions = document.createElement("div");
@@ -335,7 +361,7 @@ function renderResItem(item) {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       btn.textContent = "…";
-      const resp = await pushTask(item.url, item.headers);
+      const resp = await pushTask(item.url, item.headers, item.filename);
       if (resp?.ok || resp?.error === "task_exists") downloadedResources.set(item.url, resp);
       applyPushResult(div, btn, resp);
     });
@@ -364,11 +390,13 @@ function renderResItem(item) {
     for (const v of item.variants) {
       const vb = document.createElement("button");
       vb.className = "copy";
-      vb.textContent = v.resolution || `${Math.round(v.bandwidth / 1000)}k`;
+      vb.textContent = v.label || v.resolution || `${Math.round(v.bandwidth / 1000)}k`;
       vb.title = v.url;
       vb.addEventListener("click", async () => {
         vb.disabled = true;
-        const resp = await pushTask(v.url, item.headers);
+        const vLabel = v.label || v.resolution || "";
+        const vFilename = item.filename && vLabel ? item.filename.replace(/\.mp4$/i, ` - ${vLabel}.mp4`) : item.filename;
+        const resp = await pushTask(v.url, item.headers, vFilename);
         const success = resp?.ok || resp?.error === "task_exists";
         vb.textContent = success ? "已添加" : "重试";
         vb.disabled = !!success;
@@ -439,7 +467,7 @@ async function downloadResources(items) {
   const failures = [];
   try {
     for (const item of items) {
-      const result = await pushTask(item.url, item.headers);
+      const result = await pushTask(item.url, item.headers, item.filename);
       if (result?.ok || result?.error === "task_exists") {
         if (result.error === "task_exists") duplicate += 1;
         else ok += 1;
@@ -478,12 +506,16 @@ let view = "res"; // 显式声明（原先靠隐式全局）
 const prevBytes = new Map();
 
 // E7/E2：状态 pill 随每轮轮询更新（不再只开窗检测一次）
-function setStatusPill(ok) {
+function setStatusPill(ok, transport) {
   const el = document.getElementById("status");
   el.textContent = ok ? "已连接" : "未连接";
   el.classList.toggle("ok", ok);
   el.classList.toggle("err", !ok);
-  el.title = ok ? "主程序连接正常" : "主程序未连接，点击查看指引";
+  el.title = ok
+    ? transport === "http"
+      ? "主程序连接正常 · 本地桥接 (127.0.0.1:14371)"
+      : "主程序连接正常 · 原生通道"
+    : "主程序未连接，点击查看指引";
   if (ok) showGuide(false);
 }
 
@@ -961,6 +993,16 @@ function init() {
       });
     }
 
+    const ptEl = document.getElementById("set-prefix-title");
+    if (ptEl) {
+      ptEl.checked = CFG.prefixPageTitle !== false;
+      ptEl.addEventListener("change", async () => {
+        const previous = CFG.prefixPageTitle;
+        CFG.prefixPageTitle = ptEl.checked;
+        await savePreference(ptEl, () => chrome.storage.local.set({ sniffCfg: CFG }), () => { CFG.prefixPageTitle = previous; ptEl.checked = previous; });
+      });
+    }
+
     // —— 平台适配器开关（storage.local.adaptersCfg）
     try {
       const { adaptersCfg } = await chrome.storage.local.get("adaptersCfg");
@@ -1070,11 +1112,13 @@ async function start() {
 
   // 状态 pill 首检；此后随每轮轮询更新（E2）
   let appOnline = false;
+  let transport = null;
   try {
     const ping = await send({ type: "ping" });
     appOnline = !!(ping && ping.ok);
+    transport = ping && ping.transport;
   } catch (_) {}
-  setStatusPill(appOnline);
+  setStatusPill(appOnline, transport);
 
   let tab = null;
   try {

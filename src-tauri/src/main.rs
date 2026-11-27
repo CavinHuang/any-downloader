@@ -8,6 +8,8 @@
 #[cfg(windows)]
 mod cert;
 mod commands;
+#[cfg(target_os = "macos")]
+mod macos_sniff;
 mod nm;
 mod schedule;
 mod sniff;
@@ -88,6 +90,10 @@ thread: {:?}
             let handle = app.handle().clone();
             let engine = tauri::async_runtime::block_on(Engine::open_default())
                 .expect("open engine database");
+            let recovered = tauri::async_runtime::block_on(engine.recover_stale_active_tasks());
+            if recovered > 0 {
+                tracing::info!(recovered, "recovered stale active tasks to paused/failed");
+            }
 
             // 扩展通道：启动即把 NM 指向自带 dl-server（幂等、best-effort）
             nm::ensure_registered();
@@ -102,6 +108,54 @@ thread: {:?}
                     }
                 });
             }
+
+            // 浏览器扩展本地 HTTP 桥（127.0.0.1:14371）：与 NM 双通道并行，免注册直连
+            let bridge_handle = commands::BridgeHandle::default();
+            {
+                let bridge_port = tauri::async_runtime::block_on(engine.get_setting("bridge_port"))
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.trim().parse::<u16>().ok())
+                    .unwrap_or(dl_ipc::http_bridge::DEFAULT_BRIDGE_PORT);
+                let bridge_token =
+                    tauri::async_runtime::block_on(engine.get_setting("bridge_token"))
+                        .ok()
+                        .flatten();
+                match tauri::async_runtime::block_on(
+                    dl_ipc::http_bridge::HttpBridgeServer::start(
+                        engine.clone(),
+                        bridge_port,
+                        bridge_token,
+                    ),
+                ) {
+                    Ok(srv) => {
+                        let st = srv.state.clone();
+                        *bridge_handle.state.lock().unwrap() = Some(st.clone());
+                        // 保活（随进程生命周期存活）
+                        std::mem::forget(srv);
+                        let web_handle = handle.clone();
+                        let mut rx = st.subscribe();
+                        tauri::async_runtime::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(item) => {
+                                        let _ = web_handle.emit("browser-sniff-event", &item);
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                        tracing::info!(port = bridge_port, "extension http bridge listening");
+                    }
+                    Err(e) => {
+                        tracing::warn!(port = bridge_port, error = %e, "extension http bridge start failed");
+                    }
+                }
+            }
+            app.manage(bridge_handle);
 
             // 剪贴板监听（可开关）：新出现直链 → 事件提示 UI（DESIGN §8）
             {
@@ -298,8 +352,20 @@ thread: {:?}
             commands::nm_registered,
             commands::set_priority,
             commands::rename_task,
+            commands::update_task_url,
+            commands::compute_task_checksum,
+            commands::queue_status,
+            commands::start_queue,
+            commands::pause_queue,
+            commands::reorder_queue,
+            commands::set_max_concurrent,
+            commands::sniff_page_url,
+            commands::open_external_url,
             commands::remote_status,
             commands::set_remote_enabled,
+            commands::extension_bridge_status,
+            commands::extension_bridge_clear,
+            commands::extension_bridge_download,
             sniff::sniff_status,
             sniff::sniff_set_enabled,
             sniff::sniff_cert_install,

@@ -170,7 +170,7 @@ fn bad_params(id: u64, e: serde_json::Error) -> Response {
     Response::simple_err(id, "bad_params", e.to_string())
 }
 
-pub(crate) async fn dispatch(engine: &Engine, req: Request) -> Response {
+pub async fn dispatch(engine: &Engine, req: Request) -> Response {
     if req.v != PROTOCOL_VERSION {
         return Response::simple_err(
             req.id,

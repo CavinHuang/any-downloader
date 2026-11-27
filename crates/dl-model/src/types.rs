@@ -162,6 +162,9 @@ pub struct Task {
     pub kind: TaskKind,
     pub status: TaskStatus,
     pub priority: i32,
+    /// 队列顺序（越小越先出队；默认等于 created_at）。
+    #[serde(default)]
+    pub queue_order: i64,
     /// 敏感请求头（Cookie/Authorization）经 OS keychain 存储，库里只存引用（M5 加固）。
     pub headers_ref: Option<String>,
     /// 透传请求头 JSON（仅白名单头；M1.5 以明文列过渡，keychain 迁移见 DESIGN §9）。

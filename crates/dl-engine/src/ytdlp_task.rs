@@ -39,7 +39,7 @@ fn host_is(host: &str, bare: &str) -> bool {
 
 /// yt-dlp 托管模式识别的域名：URL 建任务时的自动 kind 判定用（engine.rs）。
 /// 各平台直链受风控/签名/动态清单保护，多线程引擎无法直接下，交给 yt-dlp。
-pub(crate) fn is_ytdlp_host(host: &str) -> bool {
+pub fn is_ytdlp_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     is_youtube_host(&h)
         || host_is(&h, "x.com")

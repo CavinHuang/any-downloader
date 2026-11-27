@@ -29,7 +29,6 @@ export function AddDialog({
   const [probing, setProbing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // dirty 基线（§3.6）：打开时初始值；dir 异步载入后定格
   const [baselineDir, setBaselineDir] = useState("");
 
   const dirty =
@@ -40,7 +39,6 @@ export function AddDialog({
     proxy !== "" ||
     dir !== baselineDir;
 
-  // §3.6：表单浮层 Esc / 遮罩在有未提交修改时先确认
   const requestClose = () => {
     if (busy) return;
     if (dirty && !window.confirm(t("dirtyConfirm"))) return;
@@ -48,7 +46,6 @@ export function AddDialog({
   };
   const { ref, onKeyDown } = useOverlay(requestClose);
 
-  // 默认目录：设置值 > 系统下载目录
   useEffect(() => {
     if (!desktopAvailable) return;
     api.getSettings().then(async (s) => {
@@ -58,7 +55,9 @@ export function AddDialog({
     }).catch(e => setError(String(e)));
   }, [desktopAvailable]);
 
-  const urlList = urls.split(/\s+/).filter((u) => /^https?:\/\//i.test(u));
+  const urlList = urls
+    .split(/\s+/)
+    .filter((u) => /^(?:https?|thunder|flashget|qqdl):\/\//i.test(u));
   const firstUrl = urlList[0] ?? "";
   const single = urlList.length === 1;
   const multi = urlList.length > 1;
@@ -78,9 +77,7 @@ export function AddDialog({
     }
   };
 
-  // A3：checksum/mirrors 真正传入 add_task（不再做摆设字段），仅单链接启用；
-  // A14：批量 Promise.allSettled 逐条尝试，单条失败不中断，结束汇总成败。
-  const doAdd = async () => {
+  const doAdd = async (startImmediately: boolean) => {
     if (busy || urlList.length === 0) return;
     setBusy(true);
     setError(null);
@@ -94,7 +91,9 @@ export function AddDialog({
           mirrors: single && mirrors.length > 0 ? mirrors : undefined,
           proxy: single && proxy.trim() ? proxy.trim() : undefined,
         });
-        await api.startDownload(task.id);
+        if (startImmediately) {
+          await api.startDownload(task.id);
+        }
       })
     );
     let ok = 0;
@@ -111,15 +110,19 @@ export function AddDialog({
       .replace("{dup}", String(dup))
       .replace("{fail}", String(fail));
     if (ok > 0) {
+      if (!startImmediately) {
+        showToast(t("queuedN").replace("{n}", String(ok)), dup + fail > 0 ? "warn" : "success");
+        onAdded();
+        return;
+      }
       if (urlList.length === 1 && dup + fail === 0) {
-        onAdded(); // 单条成功：路径最短，直接关（等价旧行为）
+        onAdded();
         return;
       }
       showToast(summary, dup + fail > 0 ? "warn" : "success");
       onAdded();
       return;
     }
-    // 全部失败：留在框内给可读原因（§4.1 失败不静默）；单链接失败优先展示原始原因
     setBusy(false);
     const failReason = results.find(
       (r) => r.status === "rejected" && !String(r.reason).includes("task_exists")
@@ -203,14 +206,48 @@ export function AddDialog({
           placeholder={"https://mirror1.example.com/...\nhttps://mirror2.example.com/..."}
           onChange={(e) => setMirrorText(e.target.value)}
         />
+        <label htmlFor="download-proxy">
+          {t("proxyPerTaskLabel")}
+          {multi ? `（${t("singleOnly")}）` : ""}
+        </label>
+        <input
+          id="download-proxy"
+          value={proxy}
+          disabled={multi}
+          placeholder={t("proxyPerTaskPlaceholder")}
+          onChange={(e) => setProxy(e.target.value)}
+        />
         </details>
         </fieldset>
         {probe && (
-          <div className="probe">
-            <b>{t("probeResult")}: </b>
-            {probe.filename ?? "?"} · {probe.total_bytes ? fmtBytes(probe.total_bytes) : "?"} ·{" "}
-            {probe.mime ?? "?"} · {probe.segmented ? t("probeSegmented") : t("probeSingle")}
-          </div>
+          probe.is_interstitial ? (
+            <div className="probe warn-box">
+              <div>
+                <b>{t("interstitialBlocked")}</b>
+                {probe.interstitial_title ? ` · ${probe.interstitial_title}` : ""}
+              </div>
+              {probe.final_url && (
+                <div style={{ marginTop: 6 }}>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => api.openExternalUrl(probe.final_url!).catch(() => {})}
+                  >
+                    {t("openInBrowser")}
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="probe">
+              {probe.resolved_from_interstitial && (
+                <div className="probe-badge">{t("interstitialResolved")}</div>
+              )}
+              <b>{t("probeResult")}: </b>
+              {probe.filename ?? "?"} · {probe.total_bytes ? fmtBytes(probe.total_bytes) : "?"} ·{" "}
+              {probe.mime ?? "?"} · {probe.segmented ? t("probeSegmented") : t("probeSingle")}
+            </div>
+          )
         )}
         {error && <div className="error">{error}</div>}
         <div className="modal-actions">
@@ -219,7 +256,10 @@ export function AddDialog({
           </button>
           <div className="spacer" />
           <button onClick={requestClose} disabled={busy}>{t("cancelBtn")}</button>
-          <button className="primary" onClick={doAdd} disabled={!desktopAvailable || busy || !firstUrl}>
+          <button onClick={() => void doAdd(false)} disabled={!desktopAvailable || busy || !firstUrl}>
+            {t("addToQueue")}
+          </button>
+          <button className="primary" onClick={() => void doAdd(true)} disabled={!desktopAvailable || busy || !firstUrl}>
             {busy ? t("addingTasks") : t("addAndStart")}
           </button>
         </div>

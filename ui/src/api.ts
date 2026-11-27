@@ -12,14 +12,15 @@ export interface Task {
   etag: string | null;
   last_modified: string | null;
   mime: string | null;
-  kind: "http" | "hls" | "content";
+  kind: "http" | "hls" | "ytdlp" | "content";
   status: TaskStatus;
   priority: number;
+  queue_order?: number;
   headers_ref: string | null;
   headers_json: string | null;
   downloaded_bytes: number;
   variants_json: string | null;
-  error: Record<string, unknown> | null;
+  error: unknown;
   created_at: number;
   updated_at: number;
 }
@@ -42,6 +43,10 @@ export interface ProbeInfo {
   total_bytes: number | null;
   mime: string | null;
   segmented: boolean;
+  final_url?: string | null;
+  resolved_from_interstitial?: boolean;
+  is_interstitial?: boolean;
+  interstitial_title?: string | null;
 }
 
 export interface SegInfo {
@@ -74,6 +79,7 @@ export interface Settings {
   yt_dlp_path: string | null;
   max_concurrent: string | null;
   max_auto_retry: string | null;
+  auto_speed_up?: string | null;
   auto_categorize: string | null;
   ytdlp_auto_update: string | null;
   schedule_enabled: string | null;
@@ -85,6 +91,22 @@ export interface Settings {
   yt_dlp_subs: string | null;
   yt_dlp_meta: string | null;
   yt_dlp_cookies: string | null;
+}
+
+export interface QueueStatus {
+  paused: boolean;
+  max_concurrent: number;
+  active: number;
+  queued: number;
+}
+
+export interface PageSniffItem {
+  url: string;
+  filename: string;
+  kind: string;
+  mime: string | null;
+  bytes: number | null;
+  source: string;
 }
 
 export interface SniffedItem {
@@ -102,10 +124,45 @@ export interface SniffStatus {
   enabled: boolean;
   certInstalled: boolean;
   port: number | null;
+  pacUrl?: string | null;
+  platform?: string;
+  supported?: boolean;
   items: SniffedItem[];
 }
 
 export type SniffEvent = { type: "item"; item: SniffedItem };
+
+export interface BrowserSniffVariant {
+  url: string;
+  label?: string | null;
+  bandwidth?: number | null;
+  resolution?: string | null;
+  height?: number | null;
+}
+
+export interface BrowserSniffItem {
+  id: string;
+  url: string;
+  tab_url?: string | null;
+  page_title?: string | null;
+  filename?: string | null;
+  kind: string;
+  mime?: string | null;
+  bytes?: number | null;
+  duration_sec?: number | null;
+  variants: BrowserSniffVariant[];
+  headers: Record<string, string>;
+  at: number;
+}
+
+export interface ExtensionBridgeStatus {
+  running: boolean;
+  port: number;
+  hasToken: boolean;
+  nmRegistered: boolean;
+  lastSeenAt: number | null;
+  items: BrowserSniffItem[];
+}
 
 export interface RemoteStatus {
   enabled: boolean;
@@ -146,12 +203,20 @@ export const api = {
   startDownload: (id: string) => invoke<void>("start_download", { id }),
   pauseTask: (id: string) => invoke<Task>("pause_task", { id }),
   cancelTask: (id: string) => invoke<Task>("cancel_task", { id }),
+  queueStatus: () => invoke<QueueStatus>("queue_status"),
+  startQueue: () => invoke<number>("start_queue"),
+  pauseQueue: () => invoke<number>("pause_queue"),
+  reorderQueue: (id: string, direction: "top" | "up" | "down") =>
+    invoke<void>("reorder_queue", { id, direction }),
+  setMaxConcurrent: (value: number) =>
+    invoke<QueueStatus>("set_max_concurrent", { value }),
   getSettings: () => invoke<Settings>("get_settings"),
   setSetting: (key: string, value: string) =>
     invoke<void>("set_setting", { key, value }),
   defaultDownloadDir: () => invoke<string>("default_download_dir"),
   revealTask: (id: string) => invoke<void>("reveal_task", { id }),
   openTask: (id: string) => invoke<void>("open_task", { id }),
+  openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
   openLogsDir: () => invoke<void>("open_logs_dir"),
@@ -163,11 +228,16 @@ export const api = {
   openExtensionDoc: () => invoke<void>("open_extension_doc"),
   renameTask: (id: string, filename: string) =>
     invoke<Task>("rename_task", { id, filename }),
+  updateTaskUrl: (id: string, url: string) =>
+    invoke<Task>("update_task_url", { id, url }),
+  computeTaskChecksum: (id: string, algo: "sha256" | "md5" | "sha1" | "sha512") =>
+    invoke<string>("compute_task_checksum", { id, algo }),
   exportTasks: (path: string) => invoke<number>("export_tasks", { path }),
   importTasks: (path: string) => invoke<number>("import_tasks", { path }),
   probeUrl: (url: string) => invoke<ProbeInfo>("probe_url", { url }),
   searchContent: (query: string) =>
     invoke<{ id: string; filename: string | null }[]>("search_content", { query }),
+  sniffPageUrl: (url: string) => invoke<PageSniffItem[]>("sniff_page_url", { url }),
   sniffStatus: () => invoke<SniffStatus>("sniff_status"),
   sniffSetEnabled: (on: boolean) =>
     invoke<{ ok: boolean; enabled: boolean }>("sniff_set_enabled", { on }),
@@ -179,6 +249,14 @@ export const api = {
     invoke<{ ok: boolean; taskId: string }>("sniff_download", { id }),
   sniffOverlayDownload: () =>
     invoke<{ ok: boolean; taskId: string; url: string }>("sniff_overlay_download"),
+  extensionBridgeStatus: () =>
+    invoke<ExtensionBridgeStatus>("extension_bridge_status"),
+  extensionBridgeClear: () => invoke<void>("extension_bridge_clear"),
+  extensionBridgeDownload: (id: string, variantUrl?: string) =>
+    invoke<Task>("extension_bridge_download", {
+      id,
+      variantUrl: variantUrl ?? null,
+    }),
   remoteStatus: () => invoke<RemoteStatus>("remote_status"),
   setRemoteEnabled: (on: boolean) => invoke<RemoteStatus>("set_remote_enabled", { on }),
 };
@@ -193,4 +271,10 @@ export function listenSniffEvents(
   cb: (ev: SniffEvent) => void
 ): Promise<() => void> {
   return listen<SniffEvent>("sniff-event", (e) => cb(e.payload));
+}
+
+export function listenBrowserSniffEvents(
+  cb: (item: BrowserSniffItem) => void
+): Promise<() => void> {
+  return listen<BrowserSniffItem>("browser-sniff-event", (e) => cb(e.payload));
 }
