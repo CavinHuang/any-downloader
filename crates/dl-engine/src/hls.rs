@@ -178,7 +178,7 @@ fn derive_iv_from_seq(seq: u64) -> [u8; 16] {
 
 // ---------------------------------------------------------------- IO 帮手
 
-async fn fetch_text(ctx: &Ctx, url: &str) -> Result<String, DriveErr> {
+pub(crate) async fn fetch_text(ctx: &Ctx, url: &str) -> Result<String, DriveErr> {
     for attempt in 1..=FETCH_RETRIES {
         if ctx.cancel.is_cancelled() {
             return Err(DriveErr::Paused);
@@ -253,7 +253,7 @@ fn looks_like_html_segment(bytes: &[u8]) -> bool {
     lower.starts_with("<!doctype html") || lower.starts_with("<html") || lower.starts_with("<head")
 }
 
-async fn fetch_segment_bytes(
+pub(crate) async fn fetch_segment_bytes(
     ctx: &Ctx,
     client: &reqwest::Client,
     url: &str,
@@ -754,7 +754,7 @@ async fn download_one(
     }
 }
 
-fn io_err_kind(e: &std::io::Error) -> ErrorKind {
+pub(crate) fn io_err_kind(e: &std::io::Error) -> ErrorKind {
     match e.kind() {
         std::io::ErrorKind::StorageFull => ErrorKind::DiskFull,
         std::io::ErrorKind::PermissionDenied => ErrorKind::FileAccessDenied,
@@ -933,7 +933,7 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     find_ffmpeg_with(hint.as_deref())
 }
 
-pub fn find_ffmpeg_with(hint: Option<&str>) -> Option<PathBuf> {
+pub(crate) fn find_ffmpeg_with(hint: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = hint {
         let p = PathBuf::from(p);
         if p.exists() {

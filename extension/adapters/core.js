@@ -499,19 +499,23 @@ ADL.parseDashManifest = (text, baseUrl) => {
   let m;
   while ((m = repRe.exec(src))) {
     const attrs = m[1];
+    const idM = /\bid\s*=\s*["']([^"']+)["']/i.exec(attrs);
     const width = /\bwidth\s*=\s*["'](\d+)["']/i.exec(attrs);
     const heightM = /\bheight\s*=\s*["'](\d+)["']/i.exec(attrs);
     const bwM = /\bbandwidth\s*=\s*["'](\d+)["']/i.exec(attrs);
+    const repId = idM ? idM[1] : null;
     const height = heightM ? parseInt(heightM[1], 10) : null;
     const bandwidth = bwM ? parseInt(bwM[1], 10) : 0;
     const resolution = width && height ? `${width[1]}x${height}` : null;
-    const key = `${height || 0}:${bandwidth}`;
+    const key = `${repId || ""}:${height || 0}:${bandwidth}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const label = height ? `${height}p` : bandwidth ? `${Math.round(bandwidth / 1000)}k` : null;
     if (!label) continue;
+    const cleanBase = String(baseUrl || "").split("#")[0];
     variants.push({
-      url: baseUrl || "",
+      id: repId,
+      url: repId && cleanBase ? `${cleanBase}#adl_rep=${encodeURIComponent(repId)}` : (baseUrl || ""),
       bandwidth,
       resolution,
       height,

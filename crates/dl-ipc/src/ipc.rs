@@ -145,6 +145,12 @@ struct IdParams {
 }
 
 #[derive(Deserialize)]
+struct ReorderParams {
+    id: String,
+    direction: String,
+}
+
+#[derive(Deserialize)]
 struct SettingParams {
     key: String,
 }
@@ -306,7 +312,8 @@ pub async fn dispatch(engine: &Engine, req: Request) -> Response {
             };
             task_response(req.id, engine.start(&p.id).await)
         }
-        method @ ("task.pause" | "task.resume" | "task.cancel" | "task.retry" | "task.remove") => {
+        method @ ("task.pause" | "task.resume" | "task.move_to_queue" | "task.cancel"
+        | "task.retry" | "task.remove") => {
             let Some(p) = serde_json::from_value::<IdParams>(req.params).ok() else {
                 return Response::simple_err(req.id, "bad_params", "expected {\"id\": ...}");
             };
@@ -324,10 +331,39 @@ pub async fn dispatch(engine: &Engine, req: Request) -> Response {
             let r = match method {
                 "task.pause" => engine.pause(&p.id).await,
                 "task.resume" => engine.resume(&p.id).await,
+                "task.move_to_queue" => engine.move_to_queue(&p.id).await,
                 "task.cancel" => engine.cancel(&p.id).await,
                 _ => engine.retry(&p.id).await,
             };
             task_response(req.id, r)
+        }
+        "queue.status" => match engine.queue_status().await {
+            Ok(st) => Response::ok(
+                req.id,
+                serde_json::to_value(st).unwrap_or(serde_json::Value::Null),
+            ),
+            Err(e) => Response::err(req.id, &e),
+        },
+        "queue.start" => match engine.start_queue().await {
+            Ok(started) => Response::ok(req.id, serde_json::json!({ "started": started })),
+            Err(e) => Response::err(req.id, &e),
+        },
+        "queue.pause" => match engine.pause_queue().await {
+            Ok(queued) => Response::ok(req.id, serde_json::json!({ "queued": queued })),
+            Err(e) => Response::err(req.id, &e),
+        },
+        "queue.reorder" => {
+            let Some(p) = serde_json::from_value::<ReorderParams>(req.params).ok() else {
+                return Response::simple_err(
+                    req.id,
+                    "bad_params",
+                    "expected {\"id\", \"direction\"}",
+                );
+            };
+            match engine.reorder_queue(&p.id, &p.direction).await {
+                Ok(()) => Response::ok(req.id, serde_json::json!({ "ok": true })),
+                Err(e) => Response::err(req.id, &e),
+            }
         }
         other => Response::simple_err(req.id, "unknown_method", format!("unknown method {other}")),
     }

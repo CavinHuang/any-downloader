@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
-import { api, RemoteStatus, Settings, SniffStatus } from "../api";
+import { api, MirrorLatency, RemoteStatus, Settings } from "../api";
 import { t } from "../i18n";
+import { showToast } from "../toast";
 import {
   checkForUpdate,
   getUpdateState,
@@ -10,8 +11,6 @@ import {
   restartToUpdate,
   subscribeUpdate,
 } from "../updater";
-import { useOverlay } from "../useOverlay";
-import { Icon } from "./Icon";
 import { ExtensionDialog } from "./ExtensionDialog";
 
 const SAVE_KEYS = [
@@ -19,6 +18,7 @@ const SAVE_KEYS = [
   "segments",
   "task_bps",
   "global_bps",
+  "proxy_mode",
   "proxy",
   "conflict",
   "after_done",
@@ -39,7 +39,37 @@ const SAVE_KEYS = [
   "yt_dlp_subs",
   "yt_dlp_meta",
   "yt_dlp_cookies",
+  "yt_dlp_quality",
+  "prevent_sleep",
+  "auto_resume_on_start",
+  "preserve_mtime",
+  "hf_mirror_enabled",
+  "hf_mirror_site",
+  "hf_token",
+  "github_mirror_enabled",
+  "github_mirror_site",
+  "github_mirror_custom",
 ] as const;
+
+const GH_PRESET_SITES = [
+  "https://gh-proxy.org",
+  "https://gh-proxy.com",
+  "https://cdn.gh-proxy.org",
+  "https://edgeone.gh-proxy.org",
+  "https://hk.gh-proxy.org",
+  "https://ghfast.top",
+  "https://wget.la",
+];
+
+type SettingsTab = "general" | "sites" | "media" | "advanced" | "about";
+
+const SETTINGS_TABS: { key: SettingsTab; labelKey: string }[] = [
+  { key: "general", labelKey: "settingsTabGeneral" },
+  { key: "sites", labelKey: "settingsTabSites" },
+  { key: "media", labelKey: "settingsTabMedia" },
+  { key: "advanced", labelKey: "settingsTabAdvanced" },
+  { key: "about", labelKey: "settingsTabAbout" },
+];
 
 // 数值输入允许范围（§3.2/A21）：blur 与保存时 clamp，不依赖 HTML min/max 兜底
 const NUM_BOUNDS: Partial<Record<keyof Settings, [number, number]>> = {
@@ -51,8 +81,22 @@ const NUM_BOUNDS: Partial<Record<keyof Settings, [number, number]>> = {
   schedule_outside_bps: [0, Number.MAX_SAFE_INTEGER],
 };
 
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
-  // hooks 全部置于顶部、无条件执行（条件渲染只在 return 阶段）
+export function SettingsDialog({
+  onBack: _onBack,
+  onDirtyChange,
+  initialTab,
+  onOpenNetDiag,
+}: {
+  onBack?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  initialTab?: SettingsTab;
+  onOpenNetDiag?: () => void;
+}) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
+
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
   const [s, setS] = useState<Settings | null>(null);
   const upd = useSyncExternalStore(subscribeUpdate, getUpdateState);
   const [saved, setSaved] = useState(false);
@@ -65,58 +109,80 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [nmOk, setNmOk] = useState<boolean | null>(null);
   const [remote, setRemote] = useState<RemoteStatus | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
-  // 桌面嗅探（独立生命周期，不走 SAVE_KEYS 保存流——开关即生效）
-  const [sniff, setSniff] = useState<SniffStatus | null>(null);
-  const [sniffBusy, setSniffBusy] = useState(false);
-  const [sniffErr, setSniffErr] = useState<string | null>(null);
   const [invalid, setInvalid] = useState<Record<string, boolean>>({});
   const [extOpen, setExtOpen] = useState(false);
-  // dirty 基线（§3.6）：载入值；保存成功后基线重置为已保存值
+  const [mirrorLatencies, setMirrorLatencies] = useState<MirrorLatency[] | null>(null);
+  const [probingMirrors, setProbingMirrors] = useState(false);
+  const [sysProxy, setSysProxy] = useState<string | null | undefined>(undefined);
   const [baseline, setBaseline] = useState("");
   const savedValues = useRef<Settings | null>(null);
+  const savedExtras = useRef<{ clip: boolean; done: string; auto: boolean }>({
+    clip: true,
+    done: "none",
+    auto: false,
+  });
+  const savedTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(savedTimer.current), []);
 
   const snapshotOf = (v: Settings, clip: boolean, done: string, auto: boolean) =>
     JSON.stringify([v, clip, done, auto]);
 
   useEffect(() => {
-    // 一次性并发载入；全部就位后再定基线（避免 autoOn 迟到造成假 dirty）
     Promise.all([
       api.getSettings(),
       api.getAutostart().catch(() => false),
       getVersion().catch(() => ""),
       api.nmRegistered().catch(() => null as boolean | null),
       api.remoteStatus().catch(() => null),
-      api.sniffStatus().catch(() => null),
-    ]).then(([v, auto, ver, nm, rm, sn]) => {
-      const clip = v.clipboard_monitor !== "off";
-      const done = v.after_done || "none";
-      setS(v);
-      savedValues.current = v;
-      setClipOn(clip);
-      setAfterDone(done);
-      setAutoOn(auto);
-      setVersion(ver);
-      setNmOk(nm);
-      setRemote(rm);
-      setSniff(sn);
-      setBaseline(snapshotOf(v, clip, done, auto));
-    }).catch(e => setSaveError(String(e)));
+      api.getSystemProxy().catch(() => null),
+    ])
+      .then(([v, auto, ver, nm, rm, sp]) => {
+        const clip = v.clipboard_monitor !== "off";
+        const done = v.after_done || "none";
+        setS(v);
+        savedValues.current = v;
+        savedExtras.current = { clip, done, auto };
+        setClipOn(clip);
+        setAfterDone(done);
+        setAutoOn(auto);
+        setVersion(ver);
+        setNmOk(nm);
+        setRemote(rm);
+        setSysProxy(sp);
+        setBaseline(snapshotOf(v, clip, done, auto));
+      })
+      .catch((e) => setSaveError(String(e)));
   }, []);
+
+  const refreshSystemProxy = async () => {
+    try {
+      setSysProxy(await api.getSystemProxy());
+    } catch {
+      setSysProxy(null);
+    }
+  };
 
   const dirty =
     !!s && baseline !== "" && snapshotOf(s, clipOn, afterDone, autoOn) !== baseline;
 
-  // §3.6：Esc / 遮罩 / 取消在有未保存修改时先确认
-  const requestClose = () => {
-    if (saving) return;
-    if (dirty && !window.confirm(t("dirtyConfirm"))) return;
-    onClose();
-  };
-  const { ref, onKeyDown } = useOverlay(requestClose);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const field = (key: keyof Settings) => s?.[key] ?? "";
   const set = (key: keyof Settings, value: string) => {
     if (s) setS({ ...s, [key]: value === "" ? null : value });
+  };
+
+  const resetChanges = () => {
+    if (!savedValues.current) return;
+    setS({ ...savedValues.current });
+    setClipOn(savedExtras.current.clip);
+    setAfterDone(savedExtras.current.done);
+    setAutoOn(savedExtras.current.auto);
+    setInvalid({});
+    setSaveError(null);
   };
 
   const clampField = (key: keyof Settings) => {
@@ -140,7 +206,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const save = async () => {
     if (saving || !s) return;
     setSaveError(null);
-    // 保存时 clamp + 校验（§3.2）
     const next: Settings = { ...s };
     let bad = false;
     for (const key of Object.keys(NUM_BOUNDS) as (keyof Settings)[]) {
@@ -159,27 +224,37 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       setSaveError(t("invalidNumber"));
       return;
     }
+    const mode = next.proxy_mode || (next.proxy ? "custom" : "system");
+    next.proxy_mode = mode;
+    const rawProxy = (next.proxy ?? "").trim();
+    if (
+      mode === "custom" &&
+      rawProxy !== "" &&
+      !/^(https?|socks5h?):\/\//i.test(rawProxy)
+    ) {
+      setInvalid((m) => ({ ...m, proxy: true }));
+      setSaveError(t("proxyAddressInvalid"));
+      return;
+    }
+    setInvalid((m) => ({ ...m, proxy: false }));
     setS(next);
     setSaving(true);
     try {
       for (const key of SAVE_KEYS) {
         const v = next[key];
-        // 已配置字段清空时也提交空串；从未配置的字段继续使用后端默认值。
         if (v != null || savedValues.current?.[key] != null) {
           await api.setSetting(key, v ?? "");
         }
       }
       await api.setAutostart(autoOn);
-      // 基线重置为已保存值（§3.6）：此后取消/Esc 不再提示
       setBaseline(snapshotOf(next, clipOn, afterDone, autoOn));
       savedValues.current = next;
+      savedExtras.current = { clip: clipOn, done: afterDone, auto: autoOn };
       setSaved(true);
-      // §3.6 取舍：保留自动关闭——「改一项 → 存 → 关」保持 1 次点击；
-      // 800ms 保证「已保存」可读。失败静默/遮罩丢改动的风险已由
-      // 错误行不关闭 + dirty 确认消除。
-      setTimeout(onClose, 800);
+      showToast(t("saved"), "success");
+      window.clearTimeout(savedTimer.current);
+      savedTimer.current = window.setTimeout(() => setSaved(false), 2500);
     } catch (e) {
-      // 保存失败：停留原地 + 框内错误行（带原因），不关闭
       setSaved(false);
       setSaveError(`${t("saveFailed")}: ${String(e)}`);
     } finally {
@@ -254,426 +329,646 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <>
-    <div className="modal-mask" onClick={requestClose}>
-      <div
-        className="modal settings-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("settingsTitle")}
-        ref={ref}
-        onKeyDown={onKeyDown}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="settings-heading">
-        <div className="dialog-header"><div><h3>{t("settingsTitle")}</h3></div><button className="icon-button" onClick={requestClose} disabled={saving} aria-label={t("close")}><Icon name="close" /></button></div>
-        <p className="dialog-description">{t("settingsDescription")}</p>
-        </div>
-        <div className="settings-content">
-        {!s ? !saveError && <div className="hint">{t("probing")}</div> : <>
-        <div className="form-section-title">{t("saveLocation")}</div>
-        <label>{t("defaultDir")}</label>
-        <div style={{ display: "flex", gap: 6 }}>
-          <input
-            value={field("default_dir")}
-            placeholder={t("defaultDir")}
-            onChange={(e) => set("default_dir", e.target.value)}
-          />
-          <button
-            style={{ whiteSpace: "nowrap" }}
-            onClick={async () => {
-              try {
-                const picked = await pickFolder({ directory: true });
-                if (typeof picked === "string") set("default_dir", picked);
-              } catch (error) { setSaveError(String(error)); }
-            }}
-          >
-            {t("browse")}
-          </button>
-        </div>
-        <div className="grid2">
-          <div>
-            <label>{t("segments")}</label>
-            {numInput("segments", "8")}
-          </div>
-          <div>
-            <label>{t("conflict")}</label>
-            <select
-              value={field("conflict") || "rename"}
-              onChange={(e) => set("conflict", e.target.value)}
+      <section className="settings-page" aria-label={t("settingsTitle")}>
+        <div className="settings-tabs" role="tablist" aria-label={t("settingsTitle")}>
+          {SETTINGS_TABS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              role="tab"
+              aria-selected={tab === item.key}
+              className={`settings-tab${tab === item.key ? " active" : ""}`}
+              onClick={() => setTab(item.key)}
             >
-              <option value="rename">{t("conflictRename")}</option>
-              <option value="overwrite">{t("conflictOverwrite")}</option>
-              <option value="skip">{t("conflictSkip")}</option>
-              <option value="ask">{t("conflictAsk")}</option>
-            </select>
-          </div>
+              {t(item.labelKey)}
+            </button>
+          ))}
         </div>
-        <div className="form-section-title">{t("transferPreferences")}</div>
-        <div className="grid2">
-          <div>
-            <label>{t("taskSpeed")}</label>
-            {speedInput("task_bps")}
-          </div>
-          <div>
-            <label>{t("globalSpeed")}</label>
-            {speedInput("global_bps")}
-          </div>
-        </div>
-        <div className="grid2">
-          <div>
-            <label>{t("maxConcurrent")}</label>
-            {numInput("max_concurrent", "3")}
-          </div>
-          <div>
-            <label>{t("maxAutoRetry")}</label>
-            {numInput("max_auto_retry", "3")}
-          </div>
-        </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("auto_speed_up") !== "off"}
-            onChange={(e) => set("auto_speed_up", e.target.checked ? "on" : "off")}
-          />
-          {t("autoSpeedUp")}
-        </label>
-        <div className="form-section-title">{t("toolPreferences")}</div>
-        <label>{t("proxy")}</label>
-        <input
-          value={field("proxy")}
-          placeholder="socks5h://127.0.0.1:1080"
-          onChange={(e) => set("proxy", e.target.value)}
-        />
-        <label>{t("ffmpegPath")}</label>
-        <input
-          value={field("ffmpeg_path")}
-          placeholder="C:\ffmpeg\bin\ffmpeg.exe"
-          onChange={(e) => set("ffmpeg_path", e.target.value)}
-        />
-        <label>{t("ytdlpPath")}</label>
-        <input
-          value={field("yt_dlp_path")}
-          placeholder={t("ytdlpPlaceholder")}
-          onChange={(e) => set("yt_dlp_path", e.target.value)}
-        />
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("ytdlp_auto_update") !== "off"}
-            onChange={(e) =>
-              set("ytdlp_auto_update", e.target.checked ? "on" : "off")
-            }
-          />
-          {t("ytdlpAutoUpdate")}
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("yt_dlp_subs") === "on"}
-            onChange={(e) => set("yt_dlp_subs", e.target.checked ? "on" : "off")}
-          />
-          {t("ytdlpSubs")}
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("yt_dlp_meta") === "on"}
-            onChange={(e) => set("yt_dlp_meta", e.target.checked ? "on" : "off")}
-          />
-          {t("ytdlpMeta")}
-        </label>
-        <label htmlFor="ytdlp-cookies">{t("ytdlpCookiesLabel")}</label>
-        <input
-          id="ytdlp-cookies"
-          value={field("yt_dlp_cookies")}
-          placeholder={t("ytdlpCookiesPlaceholder")}
-          onChange={(e) => set("yt_dlp_cookies", e.target.value)}
-        />
-        <div className="form-section-title">{t("behaviorPreferences")}</div>
-        <label>{t("afterDone")}</label>
-        <select
-          value={afterDone}
-          onChange={(e) => {
-            setAfterDone(e.target.value);
-            set("after_done", e.target.value);
-          }}
-        >
-          <option value="none">{t("afterDoneNone")}</option>
-          <option value="open_file">{t("afterDoneOpenFile")}</option>
-          <option value="open_folder">{t("afterDoneOpenFolder")}</option>
-          <option value="run_command">{t("afterDoneRun")}</option>
-          <option value="shutdown">{t("afterDoneShutdown")}</option>
-          <option value="sleep">{t("afterDoneSleep")}</option>
-        </select>
-        {afterDone === "run_command" && (
-          <>
-            <label>{t("runCommandLabel")}</label>
-            <input
-              value={field("run_command")}
-              placeholder={t("runCommandPlaceholder")}
-              onChange={(e) => set("run_command", e.target.value)}
-            />
-          </>
-        )}
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={clipOn}
-            onChange={(e) => {
-              const on = e.target.checked;
-              setClipOn(on);
-              set("clipboard_monitor", on ? "on" : "off");
-            }}
-          />
-          {t("clipboardMonitor")}
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("auto_categorize") === "on"}
-            onChange={(e) =>
-              set("auto_categorize", e.target.checked ? "on" : "off")
-            }
-          />
-          {t("autoCategorize")}
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={autoOn}
-            onChange={(e) => setAutoOn(e.target.checked)}
-          />
-          {t("autostart")}
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("schedule_enabled") === "on"}
-            onChange={(e) =>
-              set("schedule_enabled", e.target.checked ? "on" : "off")
-            }
-          />
-          {t("schedule")}
-        </label>
-        {field("schedule_enabled") === "on" && (
-          <>
-            <label>{t("scheduleWindow")}</label>
-            <input
-              value={field("schedule_window")}
-              placeholder="23:00-07:00"
-              onChange={(e) => set("schedule_window", e.target.value)}
-            />
-            <label>{t("scheduleOutside")}</label>
-            <select
-              value={field("schedule_outside") || "pause"}
-              onChange={(e) => set("schedule_outside", e.target.value)}
-            >
-              <option value="pause">{t("outsidePause")}</option>
-              <option value="limit">{t("outsideLimit")}</option>
-            </select>
-            {field("schedule_outside") === "limit" && (
-              <>
-                <label>{t("scheduleOutsideBps")}</label>
-                {speedInput("schedule_outside_bps")}
-              </>
-            )}
-          </>
-        )}
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={!!remote?.enabled}
-            disabled={remoteBusy}
-            onChange={async (e) => {
-              setRemoteBusy(true);
-              try {
-                setRemote(await api.setRemoteEnabled(e.target.checked));
-              } catch (err) {
-                setSaveError(String(err));
-              } finally {
-                setRemoteBusy(false);
-              }
-            }}
-          />
-          {t("remoteAdd")}
-        </label>
-        {remote?.enabled && (
-          <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-            {remote.qr && (
-              <img
-                src={`data:image/svg+xml;utf8,${encodeURIComponent(remote.qr)}`}
-                width={118}
-                height={118}
-                alt="QR"
-                style={{ borderRadius: 8, border: "1px solid var(--border)", flexShrink: 0 }}
-              />
-            )}
-            <div style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}>
-              {t("remoteScanHint")}
-              {remote.urls.map((u) => (
-                <div key={u}>{u}</div>
-              ))}
+
+        <div className="settings-page-body">
+          {!s ? (
+            !saveError && <div className="hint">{t("probing")}</div>
+          ) : (
+            <div className="settings-cards">
+              {tab === "general" && (
+                <>
+                  <div className="settings-card">
+                    <div className="settings-card-title">{t("saveLocation")}</div>
+                    <label>{t("defaultDir")}</label>
+                    <div className="settings-field-row">
+                      <input
+                        value={field("default_dir")}
+                        placeholder={t("defaultDir")}
+                        onChange={(e) => set("default_dir", e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const picked = await pickFolder({ directory: true });
+                            if (typeof picked === "string") set("default_dir", picked);
+                          } catch (error) {
+                            setSaveError(String(error));
+                          }
+                        }}
+                      >
+                        {t("browse")}
+                      </button>
+                    </div>
+                    <div className="grid2">
+                      <div>
+                        <label>{t("segments")}</label>
+                        {numInput("segments", "8")}
+                      </div>
+                      <div>
+                        <label>{t("conflict")}</label>
+                        <select
+                          value={field("conflict") || "rename"}
+                          onChange={(e) => set("conflict", e.target.value)}
+                        >
+                          <option value="rename">{t("conflictRename")}</option>
+                          <option value="overwrite">{t("conflictOverwrite")}</option>
+                          <option value="skip">{t("conflictSkip")}</option>
+                          <option value="ask">{t("conflictAsk")}</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="settings-card">
+                    <div className="settings-card-title">{t("transferPreferences")}</div>
+                    <div className="grid2">
+                      <div>
+                        <label>{t("taskSpeed")}</label>
+                        {speedInput("task_bps")}
+                      </div>
+                      <div>
+                        <label>{t("globalSpeed")}</label>
+                        {speedInput("global_bps")}
+                      </div>
+                    </div>
+                    <div className="grid2">
+                      <div>
+                        <label>{t("maxConcurrent")}</label>
+                        {numInput("max_concurrent", "1")}
+                      </div>
+                      <div>
+                        <label>{t("maxAutoRetry")}</label>
+                        {numInput("max_auto_retry", "3")}
+                      </div>
+                    </div>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("auto_speed_up") !== "off"}
+                        onChange={(e) => set("auto_speed_up", e.target.checked ? "on" : "off")}
+                      />
+                      <span>{t("autoSpeedUp")}</span>
+                    </label>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("preserve_mtime") !== "off"}
+                        onChange={(e) => set("preserve_mtime", e.target.checked ? "on" : "off")}
+                      />
+                      <span>{t("preserveMtime")}</span>
+                    </label>
+                  </div>
+
+                  <div className="settings-card">
+                    <div className="settings-card-title">{t("behaviorPreferences")}</div>
+                    <label>{t("afterDone")}</label>
+                    <select
+                      value={afterDone}
+                      onChange={(e) => {
+                        setAfterDone(e.target.value);
+                        set("after_done", e.target.value);
+                      }}
+                    >
+                      <option value="none">{t("afterDoneNone")}</option>
+                      <option value="open_file">{t("afterDoneOpenFile")}</option>
+                      <option value="open_folder">{t("afterDoneOpenFolder")}</option>
+                      <option value="extract_zip">{t("afterDoneExtractZip")}</option>
+                      <option value="run_command">{t("afterDoneRun")}</option>
+                      <option value="shutdown">{t("afterDoneShutdown")}</option>
+                      <option value="sleep">{t("afterDoneSleep")}</option>
+                    </select>
+                    {afterDone === "run_command" && (
+                      <>
+                        <label>{t("runCommandLabel")}</label>
+                        <input
+                          value={field("run_command")}
+                          placeholder={t("runCommandPlaceholder")}
+                          onChange={(e) => set("run_command", e.target.value)}
+                        />
+                      </>
+                    )}
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={clipOn}
+                        onChange={(e) => {
+                          const on = e.target.checked;
+                          setClipOn(on);
+                          set("clipboard_monitor", on ? "on" : "off");
+                        }}
+                      />
+                      <span>{t("clipboardMonitor")}</span>
+                    </label>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("auto_categorize") === "on"}
+                        onChange={(e) => set("auto_categorize", e.target.checked ? "on" : "off")}
+                      />
+                      <span>{t("autoCategorize")}</span>
+                    </label>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("prevent_sleep") !== "off"}
+                        onChange={(e) => set("prevent_sleep", e.target.checked ? "on" : "off")}
+                      />
+                      <span>{t("preventSleep")}</span>
+                    </label>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("auto_resume_on_start") !== "off"}
+                        onChange={(e) =>
+                          set("auto_resume_on_start", e.target.checked ? "on" : "off")
+                        }
+                      />
+                      <span>{t("autoResumeOnStart")}</span>
+                    </label>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={autoOn}
+                        onChange={(e) => setAutoOn(e.target.checked)}
+                      />
+                      <span>{t("autostart")}</span>
+                    </label>
+                  </div>
+                </>
+              )}
+
+              {tab === "sites" && (
+                <>
+                  <div className="settings-card">
+                    <div className="netdiag-card-head">
+                      <div className="settings-card-title" style={{ marginBottom: 0 }}>
+                        {t("proxySection")}
+                      </div>
+                      {onOpenNetDiag && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={onOpenNetDiag}
+                        >
+                          {t("netDiagOpenFromProxy")}
+                        </button>
+                      )}
+                    </div>
+                    <label htmlFor="proxy-mode">{t("proxyModeLabel")}</label>
+                    <select
+                      id="proxy-mode"
+                      value={field("proxy_mode") || (field("proxy") ? "custom" : "system")}
+                      onChange={(e) => {
+                        set("proxy_mode", e.target.value);
+                        setInvalid((m) => ({ ...m, proxy: false }));
+                      }}
+                    >
+                      <option value="system">{t("proxyModeSystem")}</option>
+                      <option value="custom">{t("proxyModeCustom")}</option>
+                      <option value="direct">{t("proxyModeDirect")}</option>
+                    </select>
+
+                    {(field("proxy_mode") || (field("proxy") ? "custom" : "system")) === "system" && (
+                      <div className="proxy-status-row">
+                        <span className="proxy-status-text">
+                          {sysProxy === undefined
+                            ? t("probing")
+                            : sysProxy
+                              ? (
+                                  <>
+                                    {t("proxySystemDetected").replace("{proxy}", "")}
+                                    <code>{sysProxy}</code>
+                                  </>
+                                )
+                              : t("proxySystemNone")}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => void refreshSystemProxy()}
+                        >
+                          {t("proxySystemRefresh")}
+                        </button>
+                      </div>
+                    )}
+
+                    {(field("proxy_mode") || (field("proxy") ? "custom" : "system")) === "custom" && (
+                      <>
+                        <label htmlFor="proxy-url">{t("proxyAddressLabel")}</label>
+                        <input
+                          id="proxy-url"
+                          value={field("proxy")}
+                          className={invalid.proxy ? "input-err" : ""}
+                          placeholder={t("proxyAddressPlaceholder")}
+                          onChange={(e) => {
+                            set("proxy", e.target.value);
+                            if (invalid.proxy) setInvalid((m) => ({ ...m, proxy: false }));
+                          }}
+                        />
+                        {invalid.proxy && <div className="err-line">{t("proxyAddressInvalid")}</div>}
+                        <div className="hint" style={{ marginTop: 6 }}>{t("proxyAddressHint")}</div>
+                      </>
+                    )}
+
+                    {(field("proxy_mode") || (field("proxy") ? "custom" : "system")) === "direct" && (
+                      <div className="hint" style={{ marginTop: 10 }}>{t("proxyDirectHint")}</div>
+                    )}
+                  </div>
+
+                  <div className="settings-card">
+                    <div className="settings-card-title">Hugging Face 加速</div>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("hf_mirror_enabled") !== "off"}
+                        onChange={(e) =>
+                          set("hf_mirror_enabled", e.target.checked ? "on" : "off")
+                        }
+                      />
+                      <span>{t("hfMirrorEnable")}</span>
+                    </label>
+                    <label htmlFor="hf-mirror-site">{t("hfMirrorSiteLabel")}</label>
+                    <input
+                      id="hf-mirror-site"
+                      value={field("hf_mirror_site")}
+                      placeholder="https://hf-mirror.com"
+                      onChange={(e) => set("hf_mirror_site", e.target.value)}
+                    />
+                    {mirrorLatencies && mirrorLatencies.some((m) => m.group === "huggingface") && (
+                      <div className="mirror-pills">
+                        {mirrorLatencies
+                          .filter((m) => m.group === "huggingface")
+                          .map((m) => {
+                            const activeSite = field("hf_mirror_site") || "https://hf-mirror.com";
+                            return (
+                              <button
+                                key={`${m.group}:${m.site}`}
+                                type="button"
+                                className={`mirror-pill${activeSite === m.site ? " active" : ""}${
+                                  m.latency_ms == null ? " unavailable" : ""
+                                }`}
+                                onClick={() => set("hf_mirror_site", m.site)}
+                              >
+                                {m.site.replace(/^https?:\/\//, "")}:{" "}
+                                {m.latency_ms != null ? `${m.latency_ms} ms` : t("mirrorUnavailable")}
+                              </button>
+                            );
+                          })}
+                      </div>
+                    )}
+                    <label htmlFor="hf-token">{t("hfTokenLabel")}</label>
+                    <input
+                      id="hf-token"
+                      type="password"
+                      value={field("hf_token")}
+                      placeholder="hf_..."
+                      onChange={(e) => set("hf_token", e.target.value)}
+                    />
+                  </div>
+
+                  <div className="settings-card">
+                    <div className="settings-card-title">GitHub Releases & 文件加速</div>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("github_mirror_enabled") === "on"}
+                        onChange={(e) =>
+                          set("github_mirror_enabled", e.target.checked ? "on" : "off")
+                        }
+                      />
+                      <span>{t("githubMirrorEnable")}</span>
+                    </label>
+                    <div className="settings-field-row">
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <label htmlFor="gh-mirror-site">{t("githubMirrorSiteLabel")}</label>
+                        <select
+                          id="gh-mirror-site"
+                          value={field("github_mirror_site") || "auto"}
+                          onChange={(e) => set("github_mirror_site", e.target.value)}
+                        >
+                          <option value="auto">{t("githubMirrorAuto")}</option>
+                          {GH_PRESET_SITES.map((u) => (
+                            <option key={u} value={u}>
+                              {u}
+                            </option>
+                          ))}
+                          <option value="custom">{t("githubMirrorCustom")}</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={probingMirrors}
+                        onClick={async () => {
+                          setProbingMirrors(true);
+                          try {
+                            setMirrorLatencies(await api.probeSiteMirrors());
+                          } catch (e) {
+                            setSaveError(String(e));
+                          } finally {
+                            setProbingMirrors(false);
+                          }
+                        }}
+                      >
+                        {probingMirrors ? t("probingMirrors") : t("probeMirrorsBtn")}
+                      </button>
+                    </div>
+                    {field("github_mirror_site") === "custom" && (
+                      <>
+                        <label htmlFor="gh-mirror-custom">{t("githubMirrorCustom")}</label>
+                        <input
+                          id="gh-mirror-custom"
+                          value={field("github_mirror_custom")}
+                          placeholder={t("githubMirrorCustomPlaceholder")}
+                          onChange={(e) => set("github_mirror_custom", e.target.value)}
+                        />
+                      </>
+                    )}
+                    {mirrorLatencies && mirrorLatencies.some((m) => m.group === "github") && (
+                      <div className="mirror-pills">
+                        {mirrorLatencies
+                          .filter((m) => m.group === "github")
+                          .map((m) => (
+                            <button
+                              key={`${m.group}:${m.site}`}
+                              type="button"
+                              className={`mirror-pill${
+                                field("github_mirror_site") === m.site ? " active" : ""
+                              }${m.latency_ms == null ? " unavailable" : ""}`}
+                              onClick={() => set("github_mirror_site", m.site)}
+                            >
+                              {m.site.replace(/^https?:\/\//, "")}:{" "}
+                              {m.latency_ms != null ? `${m.latency_ms} ms` : t("mirrorUnavailable")}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {tab === "media" && (
+                <div className="settings-card">
+                  <div className="settings-card-title">{t("toolPreferences")}</div>
+                  <label>{t("ffmpegPath")}</label>
+                  <input
+                    value={field("ffmpeg_path")}
+                    placeholder="C:\ffmpeg\bin\ffmpeg.exe"
+                    onChange={(e) => set("ffmpeg_path", e.target.value)}
+                  />
+                  <label>{t("ytdlpPath")}</label>
+                  <input
+                    value={field("yt_dlp_path")}
+                    placeholder={t("ytdlpPlaceholder")}
+                    onChange={(e) => set("yt_dlp_path", e.target.value)}
+                  />
+                  <label htmlFor="ytdlp-quality">{t("ytdlpQualityLabel")}</label>
+                  <select
+                    id="ytdlp-quality"
+                    value={field("yt_dlp_quality") || "best"}
+                    onChange={(e) => set("yt_dlp_quality", e.target.value)}
+                  >
+                    <option value="best">{t("ytdlpQualityBest")}</option>
+                    <option value="2160">{t("ytdlpQuality2160")}</option>
+                    <option value="1080">{t("ytdlpQuality1080")}</option>
+                    <option value="720">{t("ytdlpQuality720")}</option>
+                    <option value="audio">{t("ytdlpQualityAudio")}</option>
+                  </select>
+                  <label htmlFor="ytdlp-cookies">{t("ytdlpCookiesLabel")}</label>
+                  <input
+                    id="ytdlp-cookies"
+                    value={field("yt_dlp_cookies")}
+                    placeholder={t("ytdlpCookiesPlaceholder")}
+                    onChange={(e) => set("yt_dlp_cookies", e.target.value)}
+                  />
+                  <label className="settings-check">
+                    <input
+                      type="checkbox"
+                      checked={field("ytdlp_auto_update") !== "off"}
+                      onChange={(e) =>
+                        set("ytdlp_auto_update", e.target.checked ? "on" : "off")
+                      }
+                    />
+                    <span>{t("ytdlpAutoUpdate")}</span>
+                  </label>
+                  <label className="settings-check">
+                    <input
+                      type="checkbox"
+                      checked={field("yt_dlp_subs") === "on"}
+                      onChange={(e) => set("yt_dlp_subs", e.target.checked ? "on" : "off")}
+                    />
+                    <span>{t("ytdlpSubs")}</span>
+                  </label>
+                  <label className="settings-check">
+                    <input
+                      type="checkbox"
+                      checked={field("yt_dlp_meta") === "on"}
+                      onChange={(e) => set("yt_dlp_meta", e.target.checked ? "on" : "off")}
+                    />
+                    <span>{t("ytdlpMeta")}</span>
+                  </label>
+                </div>
+              )}
+
+              {tab === "advanced" && (
+                <>
+                  <div className="settings-card">
+                    <div className="settings-card-title">{t("schedule")}</div>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={field("schedule_enabled") === "on"}
+                        onChange={(e) =>
+                          set("schedule_enabled", e.target.checked ? "on" : "off")
+                        }
+                      />
+                      <span>{t("schedule")}</span>
+                    </label>
+                    {field("schedule_enabled") === "on" && (
+                      <>
+                        <label>{t("scheduleWindow")}</label>
+                        <input
+                          value={field("schedule_window")}
+                          placeholder="23:00-07:00"
+                          onChange={(e) => set("schedule_window", e.target.value)}
+                        />
+                        <label>{t("scheduleOutside")}</label>
+                        <select
+                          value={field("schedule_outside") || "pause"}
+                          onChange={(e) => set("schedule_outside", e.target.value)}
+                        >
+                          <option value="pause">{t("outsidePause")}</option>
+                          <option value="limit">{t("outsideLimit")}</option>
+                        </select>
+                        {field("schedule_outside") === "limit" && (
+                          <>
+                            <label>{t("scheduleOutsideBps")}</label>
+                            {speedInput("schedule_outside_bps")}
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  <div className="settings-card">
+                    <div className="settings-card-title">{t("remoteAdd")}</div>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={!!remote?.enabled}
+                        disabled={remoteBusy}
+                        onChange={async (e) => {
+                          setRemoteBusy(true);
+                          try {
+                            setRemote(await api.setRemoteEnabled(e.target.checked));
+                          } catch (err) {
+                            setSaveError(String(err));
+                          } finally {
+                            setRemoteBusy(false);
+                          }
+                        }}
+                      />
+                      <span>{t("remoteAdd")}</span>
+                    </label>
+                    {remote?.enabled && (
+                      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", marginTop: 10 }}>
+                        {remote.qr && (
+                          <img
+                            src={`data:image/svg+xml;utf8,${encodeURIComponent(remote.qr)}`}
+                            width={118}
+                            height={118}
+                            alt="QR"
+                            style={{
+                              borderRadius: 8,
+                              border: "1px solid var(--border)",
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                        <div style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all" }}>
+                          {t("remoteScanHint")}
+                          {remote.urls.map((u) => (
+                            <div key={u}>{u}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
+                      <span style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {t("nmStatus")}:
+                        {nmOk == null ? (
+                          <span style={{ color: "var(--muted)" }}>…</span>
+                        ) : nmOk ? (
+                          <span style={{ color: "var(--ok-ink)" }}>{t("nmOk")}</span>
+                        ) : (
+                          <span style={{ color: "var(--err-ink)" }}>{t("nmMissing")}</span>
+                        )}
+                      </span>
+                      <button type="button" className="text-button" onClick={() => setExtOpen(true)}>
+                        {t("extInstallBtn")}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {tab === "about" && (
+                <div className="settings-card">
+                  <div className="settings-card-title">{t("updateSection")}</div>
+                  <label className="settings-check">
+                    <input
+                      type="checkbox"
+                      checked={field("update_auto") !== "off"}
+                      onChange={(e) => set("update_auto", e.target.checked ? "on" : "off")}
+                    />
+                    <span>{t("updateAuto")}</span>
+                  </label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+                    {version && (
+                      <span style={{ color: "var(--muted)", fontSize: 12 }}>v{version}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => checkForUpdate()}
+                      disabled={upd.status === "checking" || upd.status === "installing"}
+                    >
+                      {upd.status === "checking" ? t("updateChecking") : t("updateCheckNow")}
+                    </button>
+                    {upd.status === "upToDate" && (
+                      <span style={{ color: "var(--ok-ink)", fontSize: 12 }}>{t("updateUpToDate")}</span>
+                    )}
+                    {upd.status === "available" && (
+                      <>
+                        <span style={{ fontSize: 12 }}>
+                          {t("updateAvailableTo").replace("{v}", upd.version ?? "")}
+                        </span>
+                        <button type="button" className="text-button" onClick={() => installUpdate()}>
+                          {t("updateDownload")}
+                        </button>
+                      </>
+                    )}
+                    {upd.status === "installing" && (
+                      <span style={{ color: "var(--muted)", fontSize: 12 }}>
+                        {t("updateInstalling")}
+                        {upd.total != null
+                          ? ` ${Math.min(100, Math.round((upd.downloaded / upd.total) * 100))}%`
+                          : "…"}
+                      </span>
+                    )}
+                    {upd.status === "ready" && (
+                      <>
+                        <span style={{ fontSize: 12 }}>{t("updateReady")}</span>
+                        <button type="button" className="text-button" onClick={restartToUpdate}>
+                          {t("updateRestart")}
+                        </button>
+                      </>
+                    )}
+                    {upd.status === "error" && (
+                      <span style={{ color: "var(--err-ink)", fontSize: 12 }}>
+                        {t("updateFailed")}: {upd.error}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {t("nmStatus")}:
-            {nmOk == null ? (
-              <span style={{ color: "var(--muted)" }}>…</span>
-            ) : nmOk ? (
-              <span style={{ color: "var(--ok-ink)" }}>{t("nmOk")}</span>
-            ) : (
-              <span style={{ color: "var(--err-ink)" }}>{t("nmMissing")}</span>
-            )}
-          </label>
-          <button className="text-button" onClick={() => setExtOpen(true)}>
-            {t("extInstallBtn")}
+          )}
+          {saveError && <div className="error" style={{ maxWidth: 780 }}>{saveError}</div>}
+        </div>
+
+        <div className="settings-footer">
+          <button type="button" onClick={openLogs}>
+            {t("openLogs")}
           </button>
-        </div>
-        <div className="form-section-title">{t("sniffSection")}</div>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={!!sniff?.enabled}
-            disabled={sniffBusy}
-            onChange={async (e) => {
-              setSniffBusy(true);
-              setSniffErr(null);
-              try {
-                await api.sniffSetEnabled(e.target.checked);
-                setSniff(await api.sniffStatus());
-              } catch (err) {
-                setSniffErr(String(err).includes("cert_missing") ? t("sniffNeedCert") : String(err));
-              } finally {
-                setSniffBusy(false);
-              }
-            }}
-          />
-          {t("sniffToggle")}
-        </label>
-        <p style={{ fontSize: 12, color: "var(--muted)", margin: "2px 0 10px", lineHeight: 1.7 }}>{t("sniffHint")}</p>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12 }}>
-            {sniff?.certInstalled ? (
-              <span style={{ color: "var(--ok-ink)" }}>{t("sniffCertOk")}</span>
-            ) : (
-              <span style={{ color: "var(--err-ink)" }}>{t("sniffCertMissing")}</span>
-            )}
-          </span>
-          {!sniff?.certInstalled && (
-            <button
-              className="text-button"
-              disabled={sniffBusy}
-              onClick={async () => {
-                setSniffBusy(true);
-                setSniffErr(null);
-                try {
-                  await api.sniffCertInstall();
-                  setSniff(await api.sniffStatus());
-                } catch (err) {
-                  setSniffErr(String(err));
-                } finally {
-                  setSniffBusy(false);
-                }
-              }}
-            >
-              {sniffBusy ? t("sniffCertBusy") : t("sniffCertInstall")}
-            </button>
-          )}
-          {sniff?.certInstalled && (
-            <button
-              className="text-button"
-              disabled={sniffBusy}
-              onClick={async () => {
-                setSniffBusy(true);
-                try {
-                  await api.sniffCertUninstall();
-                  setSniff(await api.sniffStatus());
-                } catch (err) {
-                  setSniffErr(String(err));
-                } finally {
-                  setSniffBusy(false);
-                }
-              }}
-            >
-              {t("sniffCertUninstall")}
-            </button>
-          )}
-        </div>
-        {sniffErr && <div className="error">{sniffErr}</div>}
-        <div className="form-section-title">{t("updateSection")}</div>
-        <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={field("update_auto") !== "off"}
-            onChange={(e) => set("update_auto", e.target.checked ? "on" : "off")}
-          />
-          {t("updateAuto")}
-        </label>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          {version && <span style={{ color: "var(--muted)", fontSize: 11 }}>v{version}</span>}
-          <button
-            className="text-button"
-            onClick={() => checkForUpdate()}
-            disabled={upd.status === "checking" || upd.status === "installing"}
-          >
-            {upd.status === "checking" ? t("updateChecking") : t("updateCheckNow")}
-          </button>
-          {upd.status === "upToDate" && (
-            <span style={{ color: "var(--ok-ink)", fontSize: 12 }}>{t("updateUpToDate")}</span>
-          )}
-          {upd.status === "available" && (
-            <>
-              <span style={{ fontSize: 12 }}>{t("updateAvailableTo").replace("{v}", upd.version ?? "")}</span>
-              <button className="text-button" onClick={() => installUpdate()}>{t("updateDownload")}</button>
-            </>
-          )}
-          {upd.status === "installing" && (
-            <span style={{ color: "var(--muted)", fontSize: 12 }}>
-              {t("updateInstalling")}
-              {upd.total != null
-                ? ` ${Math.min(100, Math.round((upd.downloaded / upd.total) * 100))}%`
-                : "…"}
-            </span>
-          )}
-          {upd.status === "ready" && (
-            <>
-              <span style={{ fontSize: 12 }}>{t("updateReady")}</span>
-              <button className="text-button" onClick={restartToUpdate}>{t("updateRestart")}</button>
-            </>
-          )}
-          {upd.status === "error" && (
-            <span style={{ color: "var(--err-ink)", fontSize: 12 }}>{t("updateFailed")}: {upd.error}</span>
-          )}
-        </div>
-        </>}
-        {saveError && <div className="error">{saveError}</div>}
-        </div>
-        <div className="modal-actions">
-          <button onClick={openLogs}>{t("openLogs")}</button>
+          {dirty && <span className="unsaved-pill">{t("unsavedChanges")}</span>}
           <div className="spacer" />
           {saved && <span className="saved">{t("saved")}</span>}
-          <button onClick={requestClose} disabled={saving}>{t("cancelBtn")}</button>
-          <button className="primary" onClick={save} disabled={saving || !s}>
+          <button type="button" onClick={resetChanges} disabled={!dirty || saving}>
+            {t("resetChanges")}
+          </button>
+          <button type="button" className="primary" onClick={save} disabled={saving || !s}>
             {t("save")}
             {saving ? "…" : ""}
           </button>
         </div>
-      </div>
-    </div>
-    {extOpen && <ExtensionDialog onClose={() => setExtOpen(false)} />}
+      </section>
+      {extOpen && <ExtensionDialog onClose={() => setExtOpen(false)} />}
     </>
   );
 }

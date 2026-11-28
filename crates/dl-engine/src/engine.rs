@@ -11,8 +11,8 @@ use dl_error::{DownloadError, ErrorKind, Res};
 use dl_model::{new_task_id, now_ms, CreateContentTask, CreateTask, Task, TaskKind, TaskStatus};
 use dl_persist::Db;
 
-/// 默认最大同时下载任务数（支持队列下载；0 = 不限并发）。
-pub const DEFAULT_MAX_CONCURRENT: usize = 3;
+/// 默认最大同时下载任务数（默认 1 = 按顺序依次下载；0 = 不限并发）。
+pub const DEFAULT_MAX_CONCURRENT: usize = 1;
 
 /// 队列状态快照（GUI 队列控制栏用）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -54,6 +54,8 @@ struct RunControl {
     queue_order: Arc<AtomicI64>,
     order: u64,
     external: Arc<AtomicBool>,
+    /// true = 立即/插队开始，跳过 max_concurrent 与 queue_paused 门禁。
+    bypass_limit: Arc<AtomicBool>,
 }
 
 /// 引擎句柄：任务生命周期 + 下载驱动 + 队列调度 + 事件流。
@@ -69,22 +71,29 @@ pub struct Engine {
     sequence: Arc<AtomicU64>,
     /// 内存缓存的并发上限（避免准入循环高频轮询 SQLite）。
     max_concurrent: Arc<AtomicUsize>,
-    /// 队列暂停标记：为 true 时已注册但未获准入的排队任务等待队列恢复。
+    /// 队列暂停标记：为 true 时排队任务暂不自动接棒或启动。
     queue_paused: Arc<AtomicBool>,
-    /// 队列状态变更通知（任务结束 / 并发数变更 / 优先级或顺序调整 / 队列恢复）。
+    /// 队列状态变更通知（任务创建 / 结束 / 并发数变更 / 优先级或顺序调整 / 队列恢复）。
     queue_notify: Arc<Notify>,
+    /// 是否启用后台队列自动接棒调度（桌面端宿主和 start_queue 开启，隔离单测默认关闭）。
+    auto_schedule: Arc<AtomicBool>,
+    /// 串行化 pump_queue 抽水，避免并发结束同时超发任务。
+    pump_lock: Arc<tokio::sync::Mutex<()>>,
     /// 数据根目录（db 所在目录）；journal 等工作文件放在其下。
     root: std::path::PathBuf,
     /// 按主机自学习的并发连接上限（参照 MDM HostLimits）。
     host_limits: Arc<crate::hosts::HostLimits>,
 }
 
-/// 任务级代理规范化：空 → None（跟随全局）；仅接受 reqwest 支持的
+/// 任务级代理规范化：空 → None（跟随全局）；支持 `direct` 直连或 reqwest 支持的
 /// http(s) / socks5(h) scheme，其余拒绝（InvalidParams）。
 fn normalize_proxy(v: &Option<String>) -> Res<Option<String>> {
     let Some(p) = v.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
+    if p.eq_ignore_ascii_case(dl_net::DIRECT_PROXY) {
+        return Ok(Some(dl_net::DIRECT_PROXY.to_string()));
+    }
     let lower = p.to_ascii_lowercase();
     if ["http://", "https://", "socks5://", "socks5h://"]
         .iter()
@@ -124,6 +133,8 @@ impl Engine {
             max_concurrent: Arc::new(AtomicUsize::new(initial_max)),
             queue_paused: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
+            auto_schedule: Arc::new(AtomicBool::new(false)),
+            pump_lock: Arc::new(tokio::sync::Mutex::new(())),
             root,
             host_limits: Arc::new(crate::hosts::HostLimits::default()),
         })
@@ -176,9 +187,33 @@ impl Engine {
             .store(bps, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 立即开始下载单个任务（绕过并发上限与队列暂停限制，对应 UI「立即下载 / 立即开始」）。
     pub async fn start(&self, id: &str) -> Res<Task> {
+        self.start_internal(id, true).await
+    }
+
+    /// 受队列并发上限与队列暂停开关约束的启动（供后台自动接棒与批量排队使用）。
+    pub async fn start_queued(&self, id: &str) -> Res<Task> {
+        self.start_internal(id, false).await
+    }
+
+    async fn start_internal(&self, id: &str, bypass_limit: bool) -> Res<Task> {
+        if bypass_limit {
+            let existing = self.runs.lock().unwrap().get(id).cloned();
+            if let Some(c) = existing {
+                if !c.token.is_cancelled() {
+                    if c.active.load(Ordering::Relaxed) {
+                        return self.require(id).await;
+                    }
+                    c.bypass_limit.store(true, Ordering::Relaxed);
+                    c.ready.store(true, Ordering::Relaxed);
+                    self.queue_notify.notify_waiters();
+                    return self.require(id).await;
+                }
+            }
+        }
         let mut opts = self.download_options_from_settings().await?;
-        let control = self.enqueue(id).await?;
+        let control = self.enqueue_with_mode(id, bypass_limit).await?;
         let task = self.require(id).await?;
         // 任务级代理覆盖全局设置（CreateTask.proxy；None = 跟随全局）
         if task.proxy.is_some() {
@@ -190,6 +225,66 @@ impl Engine {
             let _ = engine.drive_registered(&id, opts, control).await;
         });
         Ok(task)
+    }
+
+    /// 启动唯一后台队列接棒调度循环（幂等；桌面端启动或 start_queue 时激活）。
+    pub fn spawn_queue_scheduler(&self) {
+        if self.auto_schedule.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = engine.pump_queue().await;
+                tokio::select! {
+                    _ = engine.queue_notify.notified() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {},
+                }
+            }
+        });
+    }
+
+    /// 按队列顺序（priority DESC, queue_order ASC）拉起排队任务，严格受 max_concurrent 与 queue_paused 约束。
+    pub fn pump_queue(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Res<usize>> + Send + '_>> {
+        Box::pin(async move {
+            let _guard = self.pump_lock.lock().await;
+            if self.queue_paused.load(Ordering::Relaxed) {
+                return Ok(0);
+            }
+            let max = self.max_concurrent.load(Ordering::Relaxed);
+            let occupied = self
+                .runs
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|r| !r.token.is_cancelled())
+                .count();
+            let slots = if max == 0 {
+                usize::MAX
+            } else {
+                max.saturating_sub(occupied)
+            };
+            if slots == 0 {
+                return Ok(0);
+            }
+            let queued = self.list_tasks(Some(TaskStatus::Queued)).await?;
+            let mut started = 0;
+            for t in queued {
+                if started >= slots {
+                    break;
+                }
+                let already = self.runs.lock().unwrap().contains_key(&t.id);
+                if already {
+                    continue;
+                }
+                if self.start_queued(&t.id).await.is_ok() {
+                    started += 1;
+                }
+            }
+            Ok(started)
+        })
     }
 
     /// 暂停全部运行中任务（协作 checkpoint），返回数量。退出前调用。
@@ -205,48 +300,43 @@ impl Engine {
         n
     }
 
-    /// 启动全部可恢复任务（paused/waiting_retry/queued），返回发起数量。
-    /// 供定时错峰进入下载时段使用；并发上限由队列准入控制，已在队列的任务跳过。
+    /// 启动全部可恢复任务（paused/waiting_retry/queued），返回调度拉起的数量。
+    /// 供定时错峰进入下载时段使用；将 paused/waiting_retry 放回队列后交由队列按并发上限接棒。
     pub async fn start_resumable_all(&self) -> usize {
-        let ids: Vec<String> = match self.list_tasks(None).await {
-            Ok(list) => list
-                .into_iter()
-                .filter(|t| {
-                    matches!(
-                        t.status,
-                        TaskStatus::Paused | TaskStatus::WaitingRetry | TaskStatus::Queued
-                    )
-                })
-                .map(|t| t.id)
-                .collect(),
-            Err(_) => return 0,
-        };
-        let mut n = 0;
-        for id in ids {
-            if self.start(&id).await.is_ok() {
-                n += 1;
+        self.queue_paused.store(false, Ordering::Relaxed);
+        if let Ok(list) = self.list_tasks(None).await {
+            for t in list {
+                if matches!(t.status, TaskStatus::Paused | TaskStatus::WaitingRetry) {
+                    let _ = self.transition(&t.id, TaskStatus::Queued, None).await;
+                }
             }
         }
-        n
+        let started = self.pump_queue().await.unwrap_or(0);
+        self.queue_notify.notify_waiters();
+        started
     }
 
-    /// 暂停全部活动与排队任务：运行中走协作 checkpoint，排队/等待重试转入 paused。
-    /// 供定时错峰离开下载时段（暂停策略）使用，返回处理数量。
+    /// 暂停队列并暂停全部活动与等待重试任务（排队任务保留在队列等待，不会顶替空位）。
     pub async fn pause_all(&self) -> usize {
+        self.queue_paused.store(true, Ordering::Relaxed);
         let mut n = self.request_pause_all();
         let ids: Vec<String> = match self.list_tasks(None).await {
             Ok(list) => list
                 .into_iter()
-                .filter(|t| matches!(t.status, TaskStatus::Queued | TaskStatus::WaitingRetry))
+                .filter(|t| matches!(t.status, TaskStatus::WaitingRetry))
                 .map(|t| t.id)
                 .collect(),
-            Err(_) => return n,
+            Err(_) => {
+                self.queue_notify.notify_waiters();
+                return n;
+            }
         };
         for id in ids {
             if self.pause(&id).await.is_ok() {
                 n += 1;
             }
         }
+        self.queue_notify.notify_waiters();
         n
     }
 
@@ -292,11 +382,11 @@ impl Engine {
     /// 驱动一个任务走完 下载 → 验证 → 收尾 全流程，返回最终任务。
     /// 入口状态：Queued（新任务）、Paused（续传）或 Downloading（崩溃残留）。
     pub async fn download(&self, id: &str, opts: DownloadOptions) -> Res<Task> {
-        let control = self.enqueue(id).await?;
+        let control = self.enqueue_with_mode(id, false).await?;
         self.drive_registered(id, opts, control).await
     }
 
-    async fn enqueue(&self, id: &str) -> Res<RunControl> {
+    async fn enqueue_with_mode(&self, id: &str, bypass_limit: bool) -> Res<RunControl> {
         use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
         loop {
             let task = self.require(id).await?;
@@ -340,6 +430,7 @@ impl Engine {
                             })),
                             order: self.sequence.fetch_add(1, Ordering::Relaxed),
                             external: Arc::new(AtomicBool::new(task.kind == TaskKind::Ytdlp)),
+                            bypass_limit: Arc::new(AtomicBool::new(bypass_limit)),
                         };
                         runs.insert(id.to_string(), c.clone());
                         Some(c)
@@ -371,6 +462,13 @@ impl Engine {
         self.runs.lock().unwrap().remove(id);
         control.done.notify_waiters();
         self.queue_notify.notify_waiters();
+        if self.auto_schedule.load(Ordering::Relaxed) && !self.queue_paused.load(Ordering::Relaxed)
+        {
+            let eng = self.clone();
+            tokio::spawn(async move {
+                let _ = eng.pump_queue().await;
+            });
+        }
         result
     }
 
@@ -388,7 +486,10 @@ impl Engine {
                 }
                 let max = self.max_concurrent.load(Ordering::Relaxed);
                 let q_paused = self.queue_paused.load(Ordering::Relaxed);
-                let admitted = if q_paused {
+                let admitted = if c.bypass_limit.load(Ordering::Relaxed) {
+                    c.active.store(true, Ordering::Relaxed);
+                    true
+                } else if q_paused {
                     false
                 } else {
                     let runs = self.runs.lock().unwrap();
@@ -403,6 +504,7 @@ impl Engine {
                             !r.active.load(Ordering::Relaxed)
                                 && r.ready.load(Ordering::Relaxed)
                                 && !r.token.is_cancelled()
+                                && !r.bypass_limit.load(Ordering::Relaxed)
                         })
                         .max_by_key(|(_, r)| {
                             (
@@ -445,11 +547,11 @@ impl Engine {
             c.active.store(false, Ordering::Relaxed);
             self.queue_notify.notify_waiters();
             match result {
-                // 直播 HLS（无 #EXT-X-ENDLIST）HTTP 驱动不支持 → 自动转 yt-dlp
+                // 直播 HLS/DASH（无 #EXT-X-ENDLIST / type="dynamic"）HTTP 驱动不支持 → 自动转 yt-dlp
                 // 托管录制（yt-dlp 原生支持直播/回放）。一次性重路由，不计重试。
                 Err(ref e) if matches!(e.kind, ErrorKind::LiveUnsupported) => {
                     let cur = self.require(id).await?;
-                    if cur.kind != dl_model::TaskKind::Hls {
+                    if !matches!(cur.kind, dl_model::TaskKind::Hls | dl_model::TaskKind::Dash) {
                         return result;
                     }
                     self.set_kind(id, dl_model::TaskKind::Ytdlp).await?;
@@ -539,6 +641,8 @@ impl Engine {
         if let Some(unwrapped) = dl_net::interstitial::unwrap_wrapped_link(&c.url) {
             c.url = unwrapped;
         }
+        // 常用站点透明适配（HF 镜像/Token、GitHub 加速镜像、ModelScope/GitLab/Gitee/arXiv 直链）
+        crate::site_adapt::adapt_create_task(self, &mut c).await;
         // scheme 白名单是安全不变量（DESIGN §9）：重定向跟随层同样只允许 http/https。
         let parsed = url::Url::parse(&c.url)
             .map_err(|e| DownloadError::new(ErrorKind::InvalidUrl, format!("invalid url: {e}")))?;
@@ -663,24 +767,35 @@ impl Engine {
             if host_ok {
                 return Some(TaskKind::Ytdlp);
             }
-            if url::Url::parse(&c.url)
-                .ok()
-                .and_then(|u| {
-                    u.path_segments().map(|mut it| {
-                        it.next_back().map(|s| {
-                            s.to_ascii_lowercase().ends_with(".m3u8")
-                                || s.to_ascii_lowercase().ends_with(".m3u")
-                        })
+            url::Url::parse(&c.url).ok().and_then(|u| {
+                u.path_segments().and_then(|mut it| {
+                    it.next_back().and_then(|s| {
+                        let low = s.to_ascii_lowercase();
+                        if low.ends_with(".m3u8") || low.ends_with(".m3u") {
+                            Some(TaskKind::Hls)
+                        } else if low.ends_with(".mpd") {
+                            Some(TaskKind::Dash)
+                        } else {
+                            None
+                        }
                     })
                 })
-                .flatten()
-                .unwrap_or(false)
-            {
-                Some(TaskKind::Hls)
-            } else {
-                None
-            }
+            })
         });
+        let format = c
+            .format
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if let Some(ref f) = format {
+            if !crate::ytdlp_task::is_valid_format_selector(f) {
+                return Err(DownloadError::new(
+                    ErrorKind::InvalidParams,
+                    "invalid format selector".to_string(),
+                ));
+            }
+        }
         let now = now_ms();
         let task = Task {
             file_size: None,
@@ -709,11 +824,17 @@ impl Engine {
             mirrors_json,
             postprocess_json: Self::normalize_postprocess(&c.postprocess),
             proxy: normalize_proxy(&c.proxy)?,
+            format,
             error: None,
             created_at: now,
             updated_at: now,
         };
         self.db.insert_task(task.clone()).await?;
+        self.emit(EngineEvent::StateChanged {
+            task_id: task.id.clone(),
+            status: TaskStatus::Queued,
+        });
+        self.queue_notify.notify_waiters();
         Ok(task)
     }
 
@@ -854,6 +975,7 @@ impl Engine {
             created_at: now,
             updated_at: now,
             proxy: None,
+            format: None,
         };
         self.db.insert_task(task.clone()).await?;
         // 正文全文索引（收藏室全文搜索；删除任务时随 tasks 行同删）
@@ -868,6 +990,30 @@ impl Engine {
             status: TaskStatus::Done,
         });
         Ok(task)
+    }
+
+    /// 根据 `proxy_mode` 与 `proxy` 计算实际全局代理：
+    /// - `"direct"` -> `Some("direct")`（显式绕过系统代理与环境变量）
+    /// - `"system"` -> `None`（跟随系统代理 / 环境变量）
+    /// - `"custom"` -> `proxy`
+    /// - 未设置 `proxy_mode` 时向后兼容：有 `proxy` 则用之，否则跟随系统。
+    pub async fn effective_proxy(&self) -> Res<Option<String>> {
+        let mode = self
+            .get_setting("proxy_mode")
+            .await?
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        let proxy = self
+            .get_setting("proxy")
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Ok(match mode.as_deref() {
+            Some("direct") => Some(dl_net::DIRECT_PROXY.to_string()),
+            Some("system") => None,
+            Some("custom") => proxy,
+            _ => proxy,
+        })
     }
 
     /// 从设置构建下载选项（GUI 设置页 / IPC task.start 共用）。
@@ -895,12 +1041,17 @@ impl Engine {
             .get_setting("global_bps")
             .await?
             .and_then(|v| v.parse::<u64>().ok());
-        let proxy = self.get_setting("proxy").await?.filter(|s| !s.is_empty());
+        let proxy = self.effective_proxy().await?;
         let conflict = self
             .get_setting("conflict")
             .await?
             .and_then(|v| dl_filename::ConflictPolicy::parse(&v))
             .unwrap_or_default();
+        let preserve_mtime = self
+            .get_setting("preserve_mtime")
+            .await?
+            .map(|v| v != "off")
+            .unwrap_or(true);
         Ok(crate::driver::DownloadOptions {
             dir: std::path::PathBuf::from(dir),
             segments,
@@ -909,6 +1060,7 @@ impl Engine {
             proxy,
             conflict,
             spot_checks: 2,
+            preserve_mtime,
         })
     }
 
@@ -922,6 +1074,11 @@ impl Engine {
                 .unwrap_or(DEFAULT_MAX_CONCURRENT);
             self.max_concurrent.store(v, Ordering::Relaxed);
             self.queue_notify.notify_waiters();
+            if self.auto_schedule.load(Ordering::Relaxed)
+                && !self.queue_paused.load(Ordering::Relaxed)
+            {
+                let _ = self.pump_queue().await;
+            }
         }
         Ok(())
     }
@@ -945,19 +1102,14 @@ impl Engine {
         })
     }
 
-    /// 开始/恢复队列下载：解除队列暂停并调度所有处于 Queued 的任务。
+    /// 开始/恢复队列下载：解除队列暂停、激活自动接棒并按并发上限抽水拉起排队任务。
     pub async fn start_queue(&self) -> Res<usize> {
         self.queue_paused.store(false, Ordering::Relaxed);
-        let queued = self.list_tasks(Some(TaskStatus::Queued)).await?;
-        let mut started = 0;
-        for t in queued {
-            let already = self.runs.lock().unwrap().contains_key(&t.id);
-            if !already && self.start(&t.id).await.is_ok() {
-                started += 1;
-            }
-        }
+        self.auto_schedule.store(true, Ordering::Relaxed);
+        let queued_total = self.list_tasks(Some(TaskStatus::Queued)).await?.len();
+        let _ = self.pump_queue().await?;
         self.queue_notify.notify_waiters();
-        Ok(started)
+        Ok(queued_total)
     }
 
     /// 暂停队列准入：阻止新的排队任务启动（已在传输的任务自然完成或由用户单独暂停）。
@@ -1061,11 +1213,13 @@ impl Engine {
     }
 
     /// 进程重启恢复：将崩溃残留的活跃状态任务温和置回 Paused（journal 完整保留可续传）。
-    pub async fn recover_stale_active_tasks(&self) -> usize {
+    /// 返回 `(总恢复数, 可自动续传的任务 ID 列表)`。
+    pub async fn recover_stale_active_task_ids(&self) -> (usize, Vec<String>) {
         let Ok(list) = self.list_tasks(None).await else {
-            return 0;
+            return (0, Vec::new());
         };
         let mut recovered = 0;
+        let mut resumable = Vec::new();
         for t in list {
             if t.status.is_active() && !self.runs.lock().unwrap().contains_key(&t.id) {
                 let target = if matches!(t.status, TaskStatus::Probing | TaskStatus::Downloading) {
@@ -1080,14 +1234,31 @@ impl Engine {
                 };
                 if self.transition(&t.id, target, err).await.is_ok() {
                     recovered += 1;
+                    if target == TaskStatus::Paused {
+                        resumable.push(t.id);
+                    }
                 }
             }
         }
-        recovered
+        (recovered, resumable)
+    }
+
+    /// 进程重启恢复：将崩溃残留的活跃状态任务温和置回 Paused（journal 完整保留可续传）。
+    pub async fn recover_stale_active_tasks(&self) -> usize {
+        self.recover_stale_active_task_ids().await.0
     }
 
     pub async fn get_task(&self, id: &str) -> Res<Option<Task>> {
         self.db.get_task(id).await
+    }
+
+    pub async fn has_active_url(&self, url: &str) -> bool {
+        self.db
+            .find_active_by_url(url)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     pub async fn snapshot(&self, cursor: Option<u64>) -> Res<dl_persist::TaskSnapshot> {
@@ -1122,6 +1293,87 @@ impl Engine {
             return self.require(id).await;
         }
         self.transition(id, TaskStatus::Paused, None).await
+    }
+
+    /// 迁入等待队列（停用任何正在运行中的下载并保留已下载进度，置为 `Queued` 等待调度）。
+    /// - 活动任务让位且队列另有等待任务或并发槽仍满时，放入队尾由队列接棒；
+    /// - 若本身就是唯一活动任务且无其他排队任务，则同步暂停队列准入，避免立刻原地弹回下载。
+    pub async fn move_to_queue(&self, id: &str) -> Res<Task> {
+        let task = self.require(id).await?;
+        if task.status == TaskStatus::Done {
+            return Err(DownloadError::new(
+                ErrorKind::InvalidTransition {
+                    from: task.status.as_str().into(),
+                    to: "queued".into(),
+                },
+                "cannot move a completed task to queue",
+            ));
+        }
+
+        let was_active = task.status.is_active() || self.runs.lock().unwrap().contains_key(id);
+
+        // 若任务仍在 runs（运行中或排队等待准入），先温和取消使之退出 runs 并落盘断点
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let control = self.runs.lock().unwrap().get(id).cloned();
+            let Some(c) = control else {
+                break;
+            };
+            c.cancel_requested.store(false, Ordering::Relaxed);
+            c.token.cancel();
+            if tokio::time::Instant::now() >= deadline {
+                return Err(DownloadError::new(
+                    ErrorKind::Internal,
+                    "timed out waiting for active task to pause before queueing",
+                ));
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), c.done.notified())
+                .await;
+        }
+
+        let cur = self.require(id).await?;
+        if cur.status == TaskStatus::Done {
+            return Ok(cur);
+        }
+
+        let order = dl_model::now_ms();
+        self.db.set_queue_order(id, order).await?;
+
+        let updated = if cur.status != TaskStatus::Queued {
+            if cur.status.is_active() {
+                let _ = self.transition(id, TaskStatus::Paused, None).await?;
+            }
+            self.transition(id, TaskStatus::Queued, None).await?
+        } else {
+            self.emit(EngineEvent::StateChanged {
+                task_id: id.to_string(),
+                status: TaskStatus::Queued,
+            });
+            self.require(id).await?
+        };
+
+        if was_active {
+            let max = self.max_concurrent.load(Ordering::Relaxed);
+            let other_active = self
+                .runs
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|r| !r.token.is_cancelled())
+                .count();
+            let other_queued = self
+                .list_tasks(Some(TaskStatus::Queued))
+                .await?
+                .into_iter()
+                .filter(|t| t.id != id)
+                .count();
+            if other_queued == 0 && (max == 0 || other_active < max) {
+                self.queue_paused.store(true, Ordering::Relaxed);
+            }
+        }
+
+        self.queue_notify.notify_waiters();
+        Ok(updated)
     }
 
     pub async fn resume(&self, id: &str) -> Res<Task> {
@@ -1302,7 +1554,7 @@ impl Engine {
 
     /// 任务类型重路由：直播 HLS（无 ENDLIST）→ yt-dlp 托管录制。
     /// 幂等保护在调用侧（仅 Hls 任务转一次）。
-    async fn set_kind(&self, id: &str, kind: dl_model::TaskKind) -> Res<()> {
+    pub(crate) async fn set_kind(&self, id: &str, kind: dl_model::TaskKind) -> Res<()> {
         tracing::info!(task = %id, kind = kind.as_str(), "task kind rerouted");
         self.db.update_kind(id, kind).await
     }
@@ -1312,9 +1564,8 @@ impl Engine {
         let path = url::Url::parse(url).ok()?.path().to_ascii_lowercase();
         let ext = path.rsplit('.').next()?;
         Some(match ext {
-            "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "flv" | "m4v" | "ts" | "m3u8" => {
-                "视频"
-            }
+            "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "flv" | "m4v" | "ts" | "m3u8"
+            | "mpd" => "视频",
             "mp3" | "flac" | "m4a" | "aac" | "ogg" | "wav" | "ape" => "音乐",
             "zip" | "rar" | "7z" | "tar" | "gz" => "压缩包",
             "pdf" | "epub" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => "文档",
@@ -1831,6 +2082,7 @@ mod tests {
                 mirrors: None,
                 postprocess: None,
                 proxy: None,
+                format: None,
             })
             .await
             .unwrap();
@@ -1954,5 +2206,117 @@ mod tests {
             env.engine.get_setting("segments").await.unwrap(),
             Some("4".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn effective_proxy_respects_mode_and_preserves_custom_url() {
+        let env = test_engine().await;
+        // 默认未设置：跟随系统（None）
+        assert_eq!(env.engine.effective_proxy().await.unwrap(), None);
+
+        // 向后兼容：仅配置 proxy 而无 proxy_mode
+        env.engine
+            .set_setting("proxy", "socks5h://127.0.0.1:1080")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.engine.effective_proxy().await.unwrap(),
+            Some("socks5h://127.0.0.1:1080".into())
+        );
+
+        // 切到系统代理时忽略已保存的自定义地址（不删除它）
+        env.engine
+            .set_setting("proxy_mode", "system")
+            .await
+            .unwrap();
+        assert_eq!(env.engine.effective_proxy().await.unwrap(), None);
+        assert_eq!(
+            env.engine.get_setting("proxy").await.unwrap().as_deref(),
+            Some("socks5h://127.0.0.1:1080")
+        );
+
+        // 切回手动代理时恢复使用
+        env.engine
+            .set_setting("proxy_mode", "custom")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.engine.effective_proxy().await.unwrap(),
+            Some("socks5h://127.0.0.1:1080".into())
+        );
+
+        // 切到直连时返回 "direct"
+        env.engine
+            .set_setting("proxy_mode", "direct")
+            .await
+            .unwrap();
+        assert_eq!(
+            env.engine.effective_proxy().await.unwrap(),
+            Some(dl_net::DIRECT_PROXY.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn move_to_queue_transitions_paused_failed_and_canceled_without_starting() {
+        let env = test_engine().await;
+        let t = env
+            .engine
+            .create_task(CreateTask::of("https://example.com/archive.zip"))
+            .await
+            .unwrap();
+
+        // Paused -> Queued
+        env.engine
+            .transition(&t.id, TaskStatus::Paused, None)
+            .await
+            .unwrap();
+        let queued = env.engine.move_to_queue(&t.id).await.unwrap();
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert_eq!(env.engine.pending_count(), 0);
+
+        // Probing -> WaitingRetry -> Queued (clears error)
+        env.engine
+            .transition(&t.id, TaskStatus::Probing, None)
+            .await
+            .unwrap();
+        env.engine
+            .transition(
+                &t.id,
+                TaskStatus::WaitingRetry,
+                Some(ErrorKind::NetworkConnectionReset),
+            )
+            .await
+            .unwrap();
+        let queued2 = env.engine.move_to_queue(&t.id).await.unwrap();
+        assert_eq!(queued2.status, TaskStatus::Queued);
+        assert!(queued2.error.is_none());
+
+        // Canceled -> Queued
+        env.engine
+            .transition(&t.id, TaskStatus::Canceled, None)
+            .await
+            .unwrap();
+        let queued3 = env.engine.move_to_queue(&t.id).await.unwrap();
+        assert_eq!(queued3.status, TaskStatus::Queued);
+
+        // Done -> InvalidTransition
+        env.engine
+            .transition(&t.id, TaskStatus::Probing, None)
+            .await
+            .unwrap();
+        env.engine
+            .transition(&t.id, TaskStatus::Downloading, None)
+            .await
+            .unwrap();
+        env.engine
+            .transition(&t.id, TaskStatus::Verifying, None)
+            .await
+            .unwrap();
+        env.engine
+            .transition(&t.id, TaskStatus::Done, None)
+            .await
+            .unwrap();
+        let err = env.engine.move_to_queue(&t.id).await.unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidTransition { .. }));
     }
 }

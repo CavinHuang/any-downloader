@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +35,54 @@ const TAIL_LINES: usize = 8;
 /// 摘要单行截断宽度（chars，非 bytes）。
 const TAIL_LINE_CHARS: usize = 200;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyPolicy {
+    /// 跟随系统代理（传入探测到的系统/环境代理以便 yt-dlp 与子进程 ffmpeg/deno 保持一致）。
+    System(Option<String>),
+    /// 显式禁用代理（`--proxy ""` 并清除代理环境变量）。
+    Direct,
+    /// 使用指定自定义代理（`--proxy <url>` 并同步代理环境变量）。
+    Custom(String),
+}
+
+impl Default for ProxyPolicy {
+    fn default() -> Self {
+        Self::System(None)
+    }
+}
+
+const PROXY_ENV_KEYS: [&str; 6] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+
+fn apply_proxy_policy(args: &mut Vec<String>, cmd: &mut Command, policy: &ProxyPolicy) {
+    match policy {
+        ProxyPolicy::Direct => {
+            args.push("--proxy".into());
+            args.push(String::new());
+            for k in PROXY_ENV_KEYS {
+                cmd.env_remove(k);
+            }
+        }
+        ProxyPolicy::Custom(url) | ProxyPolicy::System(Some(url)) => {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                args.push("--proxy".into());
+                args.push(trimmed.to_string());
+                for k in PROXY_ENV_KEYS {
+                    cmd.env(k, trimmed);
+                }
+            }
+        }
+        ProxyPolicy::System(None) => {}
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct YtdlpSpec {
     pub url: String,
@@ -47,6 +96,8 @@ pub struct YtdlpSpec {
     pub extra_args: Vec<String>,
     /// 追加到子进程 PATH 前部的目录（内置 yt-dlp/deno/ffmpeg 的安装目录）。
     pub path_prepend: Vec<PathBuf>,
+    /// 代理策略（系统代理 / 手动代理 / 直连）。
+    pub proxy: ProxyPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +139,280 @@ pub async fn available(exe: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// yt-dlp 链接探测输入规格（单视频格式列表 / 播放列表展开）。
+#[derive(Debug, Clone)]
+pub struct InspectSpec {
+    pub url: String,
+    pub exe: String,
+    pub extra_args: Vec<String>,
+    pub path_prepend: Vec<PathBuf>,
+    pub proxy: ProxyPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormatOption {
+    pub format_id: String,
+    pub label: String,
+    pub ext: String,
+    pub resolution: Option<String>,
+    pub fps: Option<u32>,
+    pub filesize: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistEntry {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub duration_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InspectResult {
+    Video {
+        title: String,
+        duration_sec: Option<f64>,
+        thumbnail: Option<String>,
+        formats: Vec<FormatOption>,
+    },
+    Playlist {
+        title: String,
+        total_count: usize,
+        entries: Vec<PlaylistEntry>,
+    },
+}
+
+/// 快速探测 yt-dlp 视频信息或播放列表（30s 超时）。
+pub async fn inspect(spec: InspectSpec) -> Result<InspectResult, YtdlpError> {
+    let mut args = vec![
+        spec.url.clone(),
+        "--flat-playlist".into(),
+        "--dump-single-json".into(),
+        "--no-warnings".into(),
+        "--skip-download".into(),
+    ];
+    args.extend(spec.extra_args.iter().cloned());
+
+    let mut cmd = Command::new(&spec.exe);
+    apply_proxy_policy(&mut args, &mut cmd, &spec.proxy);
+    cmd.args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if !spec.path_prepend.is_empty() {
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = spec
+            .path_prepend
+            .iter()
+            .cloned()
+            .chain(std::env::split_paths(&current));
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            cmd.env("PATH", joined);
+        }
+    }
+
+    let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
+        .await
+        .map_err(|_| YtdlpError::Failed("yt-dlp inspect timed out (30s)".into()))?
+        .map_err(|e| YtdlpError::Failed(format!("spawn {}: {e}", spec.exe)))?;
+
+    if !output.status.success() {
+        let err_tail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(YtdlpError::Failed(format!(
+            "yt-dlp inspect exited with {}: {}",
+            output.status, err_tail
+        )));
+    }
+    let json_text = String::from_utf8_lossy(&output.stdout);
+    parse_inspect_json(&json_text, &spec.url)
+}
+
+pub fn parse_inspect_json(json_text: &str, input_url: &str) -> Result<InspectResult, YtdlpError> {
+    let v: serde_json::Value = serde_json::from_str(json_text.trim())
+        .map_err(|e| YtdlpError::Failed(format!("invalid yt-dlp json: {e}")))?;
+
+    if let Some(entries_arr) = v.get("entries").and_then(|e| e.as_array()) {
+        if !entries_arr.is_empty() || v.get("_type").and_then(|t| t.as_str()) == Some("playlist") {
+            let title = v
+                .get("title")
+                .and_then(|s| s.as_str())
+                .unwrap_or("Playlist")
+                .trim()
+                .to_string();
+            let total_count = entries_arr.len();
+            let mut entries = Vec::with_capacity(entries_arr.len().min(200));
+            for item in entries_arr.iter().take(200) {
+                let id = item
+                    .get("id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let etitle = item
+                    .get("title")
+                    .and_then(|s| s.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(if id.is_empty() { "Video" } else { &id })
+                    .to_string();
+                let entry_url = resolve_entry_url(item, &id, input_url);
+                let Some(entry_url) = entry_url else {
+                    continue;
+                };
+                let duration_sec = item.get("duration").and_then(|d| d.as_f64());
+                entries.push(PlaylistEntry {
+                    id,
+                    title: etitle,
+                    url: entry_url,
+                    duration_sec,
+                });
+            }
+            return Ok(InspectResult::Playlist {
+                title,
+                total_count,
+                entries,
+            });
+        }
+    }
+
+    let title = v
+        .get("title")
+        .and_then(|s| s.as_str())
+        .unwrap_or("Video")
+        .trim()
+        .to_string();
+    let duration_sec = v.get("duration").and_then(|d| d.as_f64());
+    let thumbnail = v
+        .get("thumbnail")
+        .and_then(|s| s.as_str())
+        .map(str::to_string);
+
+    let mut formats = Vec::new();
+    let mut seen_heights = std::collections::BTreeSet::new();
+    if let Some(fmts) = v.get("formats").and_then(|f| f.as_array()) {
+        struct FormatCandidate {
+            height: u32,
+            fps: Option<u32>,
+            filesize: Option<u64>,
+            ext: String,
+            res: String,
+        }
+        // 按分辨率高度降序整理主流清晰度档位（选择器用 bv*[height<=H]+ba/b 兼容分离流与直出流）
+        let mut candidates: Vec<FormatCandidate> = Vec::new();
+        for f in fmts {
+            let vcodec = f.get("vcodec").and_then(|s| s.as_str()).unwrap_or("none");
+            if vcodec == "none" {
+                continue;
+            }
+            let Some(h) = f.get("height").and_then(|n| n.as_u64()).map(|n| n as u32) else {
+                continue;
+            };
+            if h < 144 {
+                continue;
+            }
+            let w = f.get("width").and_then(|n| n.as_u64()).map(|n| n as u32);
+            let res = w
+                .map(|ww| format!("{ww}x{h}"))
+                .unwrap_or_else(|| format!("{h}p"));
+            let fps = f
+                .get("fps")
+                .and_then(|n| n.as_f64())
+                .map(|x| x.round() as u32);
+            let ext = f
+                .get("ext")
+                .and_then(|s| s.as_str())
+                .unwrap_or("mp4")
+                .to_string();
+            let fs = f
+                .get("filesize")
+                .or_else(|| f.get("filesize_approx"))
+                .and_then(|n| n.as_u64());
+            candidates.push(FormatCandidate {
+                height: h,
+                fps,
+                filesize: fs,
+                ext,
+                res,
+            });
+        }
+        candidates.sort_by(|a, b| b.height.cmp(&a.height).then(b.filesize.cmp(&a.filesize)));
+        for c in candidates {
+            if !seen_heights.insert(c.height) {
+                continue;
+            }
+            let fps_tag = c
+                .fps
+                .filter(|&f| f > 30)
+                .map(|f| format!("{f}fps"))
+                .unwrap_or_default();
+            let label = if fps_tag.is_empty() {
+                format!("{}p", c.height)
+            } else {
+                format!("{}p {fps_tag}", c.height)
+            };
+            formats.push(FormatOption {
+                format_id: format!("bv*[height<={}]+ba/b[height<={}]/b", c.height, c.height),
+                label,
+                ext: c.ext,
+                resolution: Some(c.res),
+                fps: c.fps,
+                filesize: c.filesize,
+            });
+        }
+    }
+    formats.push(FormatOption {
+        format_id: "bestaudio[ext=m4a]/bestaudio/best".into(),
+        label: "仅音频 (M4A/最佳音频)".into(),
+        ext: "m4a".into(),
+        resolution: None,
+        fps: None,
+        filesize: None,
+    });
+
+    Ok(InspectResult::Video {
+        title,
+        duration_sec,
+        thumbnail,
+        formats,
+    })
+}
+
+fn resolve_entry_url(item: &serde_json::Value, id: &str, input_url: &str) -> Option<String> {
+    for key in ["webpage_url", "original_url", "url"] {
+        if let Some(u) = item.get(key).and_then(|s| s.as_str()) {
+            if u.starts_with("http://") || u.starts_with("https://") {
+                return Some(u.to_string());
+            }
+        }
+    }
+    if id.is_empty() {
+        return None;
+    }
+    let ie = item
+        .get("ie_key")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let lower_in = input_url.to_ascii_lowercase();
+    if ie.contains("youtube") || lower_in.contains("youtube.com") || lower_in.contains("youtu.be") {
+        return Some(format!("https://www.youtube.com/watch?v={id}"));
+    }
+    if (ie.contains("bilibili") || lower_in.contains("bilibili.com"))
+        && (id.starts_with("BV") || id.starts_with("av"))
+    {
+        return Some(format!("https://www.bilibili.com/video/{id}"));
+    }
+    None
+}
+
 /// 运行到结束。取消 = 杀进程并返回 `YtdlpError::Canceled`；
 /// 失败时错误消息附带 yt-dlp 日志尾部摘要。
 pub async fn run(
@@ -115,6 +440,7 @@ pub async fn run(
     args.extend(spec.extra_args.iter().cloned());
 
     let mut cmd = Command::new(&spec.exe);
+    apply_proxy_policy(&mut args, &mut cmd, &spec.proxy);
     cmd.args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -577,5 +903,92 @@ mod tests {
     #[tokio::test]
     async fn available_rejects_missing_exe() {
         assert!(!available("adl-definitely-missing-ytdlp-xyz").await);
+    }
+
+    #[test]
+    fn parse_inspect_json_handles_video_and_playlist() {
+        let video_json = r#"{
+            "title": "Sample Video",
+            "duration": 125.0,
+            "thumbnail": "https://img.example/1.jpg",
+            "formats": [
+                {"vcodec": "none", "acodec": "mp4a", "ext": "m4a"},
+                {"vcodec": "avc1", "height": 720, "width": 1280, "fps": 30, "ext": "mp4", "filesize": 1000},
+                {"vcodec": "avc1", "height": 1080, "width": 1920, "fps": 60, "ext": "mp4", "filesize": 2000}
+            ]
+        }"#;
+        let v = parse_inspect_json(video_json, "https://youtu.be/abc").unwrap();
+        match v {
+            InspectResult::Video {
+                title,
+                duration_sec,
+                formats,
+                ..
+            } => {
+                assert_eq!(title, "Sample Video");
+                assert_eq!(duration_sec, Some(125.0));
+                assert_eq!(formats[0].label, "1080p 60fps");
+                assert_eq!(
+                    formats[0].format_id,
+                    "bv*[height<=1080]+ba/b[height<=1080]/b"
+                );
+                assert_eq!(formats[1].label, "720p");
+                assert_eq!(
+                    formats.last().unwrap().format_id,
+                    "bestaudio[ext=m4a]/bestaudio/best"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let pl_json = r#"{
+            "_type": "playlist",
+            "title": "Course List",
+            "entries": [
+                {"id": "vid1", "title": "Part 1", "duration": 60.0},
+                {"id": "vid2", "title": "Part 2", "url": "https://www.youtube.com/watch?v=vid2"}
+            ]
+        }"#;
+        let pl =
+            parse_inspect_json(pl_json, "https://www.youtube.com/playlist?list=PL123").unwrap();
+        match pl {
+            InspectResult::Playlist {
+                title,
+                total_count,
+                entries,
+            } => {
+                assert_eq!(title, "Course List");
+                assert_eq!(total_count, 2);
+                assert_eq!(entries[0].url, "https://www.youtube.com/watch?v=vid1");
+                assert_eq!(entries[1].url, "https://www.youtube.com/watch?v=vid2");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_proxy_policy_sets_args_cleanly() {
+        let mut args = Vec::new();
+        let mut cmd = Command::new("yt-dlp");
+        apply_proxy_policy(&mut args, &mut cmd, &ProxyPolicy::Direct);
+        assert_eq!(args, vec!["--proxy", ""]);
+
+        let mut args2 = Vec::new();
+        let mut cmd2 = Command::new("yt-dlp");
+        apply_proxy_policy(
+            &mut args2,
+            &mut cmd2,
+            &ProxyPolicy::Custom("socks5h://127.0.0.1:1080".into()),
+        );
+        assert_eq!(args2, vec!["--proxy", "socks5h://127.0.0.1:1080"]);
+
+        let mut args3 = Vec::new();
+        let mut cmd3 = Command::new("yt-dlp");
+        apply_proxy_policy(
+            &mut args3,
+            &mut cmd3,
+            &ProxyPolicy::System(Some("http://127.0.0.1:7890".into())),
+        );
+        assert_eq!(args3, vec!["--proxy", "http://127.0.0.1:7890"]);
     }
 }

@@ -167,7 +167,14 @@ fn is_batch_url(url: &str) -> bool {
             );
     }
     if host_is(&host, "bilibili.com") {
-        return host == "space.bilibili.com" || u.path().to_ascii_lowercase().starts_with("/space");
+        let lp = u.path().to_ascii_lowercase();
+        return host == "space.bilibili.com"
+            || lp.starts_with("/space")
+            || lp.contains("/lists/")
+            || lp.contains("/favlist")
+            || lp.contains("/medialist/")
+            || lp.starts_with("/list/ml")
+            || lp.contains("/channel/collectiondetail");
     }
     if host_is(&host, "tiktok.com") {
         return segs.len() == 1 && segs[0].starts_with('@');
@@ -223,12 +230,150 @@ fn out_stem(name: &str) -> String {
     }
 }
 
+pub(crate) fn is_valid_format_selector(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && !t.starts_with('-')
+        && t.len() <= 200
+        && t.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'+'
+                        | b'/'
+                        | b'-'
+                        | b'['
+                        | b']'
+                        | b'<'
+                        | b'>'
+                        | b'='
+                        | b'.'
+                        | b','
+                        | b'*'
+                        | b' '
+                )
+        })
+}
+
+pub(crate) struct YtdlpEnv {
+    pub exe: String,
+    pub ffmpeg_dir: Option<std::path::PathBuf>,
+    pub path_prepend: Vec<std::path::PathBuf>,
+    pub extra_args: Vec<String>,
+    pub proxy: dl_ytdlp::ProxyPolicy,
+}
+
+fn to_ytdlp_proxy(proxy: Option<&str>) -> dl_ytdlp::ProxyPolicy {
+    if dl_net::is_direct_proxy(proxy) {
+        dl_ytdlp::ProxyPolicy::Direct
+    } else if let Some(p) = proxy.map(str::trim).filter(|s| !s.is_empty()) {
+        dl_ytdlp::ProxyPolicy::Custom(p.to_string())
+    } else {
+        dl_ytdlp::ProxyPolicy::System(dl_net::detect_system_proxy())
+    }
+}
+
+pub(crate) async fn resolve_ytdlp_env(
+    engine: &crate::Engine,
+    proxy: Option<&str>,
+) -> dl_error::Res<YtdlpEnv> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()));
+    let managed = crate::managed_bin_dir().join(crate::managed_ytdlp_name());
+    let bundled = exe_dir
+        .as_ref()
+        .map(|d| {
+            d.join(if cfg!(windows) {
+                "yt-dlp.exe"
+            } else {
+                "yt-dlp"
+            })
+        })
+        .filter(|p| p.exists());
+    let (exe, via_setting) = match engine
+        .get_setting("yt_dlp_path")
+        .await?
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(p) => (p, true),
+        None if managed.exists() => (managed.display().to_string(), false),
+        None => match bundled {
+            Some(p) => (p.display().to_string(), false),
+            None => ("yt-dlp".into(), false),
+        },
+    };
+    if !dl_ytdlp::available(&exe).await {
+        let hint = if via_setting {
+            format!("yt-dlp 不可用（{exe}）：请检查设置中的路径")
+        } else {
+            "yt-dlp 不可用：请在设置中配置 yt-dlp 路径".into()
+        };
+        return Err(dl_error::DownloadError::new(ErrorKind::Internal, hint));
+    }
+    let ffmpeg_dir = engine
+        .get_setting("ffmpeg_path")
+        .await?
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()));
+
+    let mut path_prepend = Vec::new();
+    if let Some(d) = &exe_dir {
+        let has_sidecar = if cfg!(windows) {
+            d.join("yt-dlp.exe").exists() || d.join("deno.exe").exists()
+        } else {
+            d.join("yt-dlp").exists() || d.join("deno").exists()
+        };
+        if has_sidecar {
+            path_prepend.push(d.clone());
+        }
+    }
+    if let Some(ff) = &ffmpeg_dir {
+        path_prepend.push(ff.clone());
+    }
+
+    let mut extra_args = Vec::new();
+    if let Ok(Some(ck)) = engine.get_setting("yt_dlp_cookies").await {
+        let ck = ck.trim();
+        if !ck.is_empty() {
+            extra_args.push("--cookies".into());
+            extra_args.push(ck.to_string());
+        }
+    }
+    Ok(YtdlpEnv {
+        exe,
+        ffmpeg_dir,
+        path_prepend,
+        extra_args,
+        proxy: to_ytdlp_proxy(proxy),
+    })
+}
+
+/// 探测单个视频（提取画质选项）或播放列表/合集（展开条目列表）。
+pub async fn inspect_url(
+    engine: &crate::Engine,
+    url: &str,
+) -> dl_error::Res<dl_ytdlp::InspectResult> {
+    let proxy = engine.effective_proxy().await.ok().flatten();
+    let env = resolve_ytdlp_env(engine, proxy.as_deref()).await?;
+    dl_ytdlp::inspect(dl_ytdlp::InspectSpec {
+        url: url.to_string(),
+        exe: env.exe,
+        extra_args: env.extra_args,
+        path_prepend: env.path_prepend,
+        proxy: env.proxy,
+    })
+    .await
+    .map_err(|e| dl_error::DownloadError::new(ErrorKind::Internal, e.to_string()))
+}
+
 pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<(), DriveErr> {
-    // 合集/主页链接先快速失败，避免 yt-dlp 拉下几十个视频全写同一个文件名
+    // 合集/主页链接先快速失败，引导使用「识别」展开成多条队列任务
     if is_batch_url(&ctx.url) {
         return Err(DriveErr::Fatal(
             ErrorKind::InvalidUrl,
-            "合集/频道/播放列表/用户主页链接无法作为单文件任务下载（只会互相覆盖、只剩最后一个视频）：请打开具体作品页（如 watch?v=…、/status/…、/video/BV…）后再试"
+            "合集/频道/播放列表链接请先在「新建下载」中点击「识别」展开为多条队列任务，或打开具体视频页下载"
                 .into(),
         ));
     }
@@ -274,82 +419,10 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     let stem = out_stem(&raw_name);
     let out_path = std::path::Path::new(&dir).join(&stem);
 
-    // 解析链：设置显式路径 > 数据目录托管副本（自动更新落点，跨版本存活）>
-    // 应用目录内置副本（安装器自带）> PATH
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|x| x.to_path_buf()));
-    let managed = crate::managed_bin_dir().join(crate::managed_ytdlp_name());
-    let bundled = exe_dir
-        .as_ref()
-        .map(|d| {
-            d.join(if cfg!(windows) {
-                "yt-dlp.exe"
-            } else {
-                "yt-dlp"
-            })
-        })
-        .filter(|p| p.exists());
-    let (exe, via_setting) = match ctx
-        .engine
-        .get_setting("yt_dlp_path")
+    let env = resolve_ytdlp_env(&ctx.engine, ctx.opts.proxy.as_deref())
         .await
-        .map_err(drive_from)?
-        .filter(|s| !s.trim().is_empty())
-    {
-        Some(p) => (p, true),
-        None if managed.exists() => (managed.display().to_string(), false),
-        None => match bundled {
-            Some(p) => (p.display().to_string(), false),
-            None => ("yt-dlp".into(), false),
-        },
-    };
-    if !dl_ytdlp::available(&exe).await {
-        let hint = if via_setting {
-            format!("yt-dlp 不可用（{exe}）：请检查设置中的路径")
-        } else {
-            "yt-dlp 不可用：请在设置中配置 yt-dlp 路径".into()
-        };
-        return Err(DriveErr::Fatal(ErrorKind::Internal, hint));
-    }
-    let ffmpeg_dir = ctx
-        .engine
-        .get_setting("ffmpeg_path")
-        .await
-        .map_err(drive_from)?
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .and_then(|p| p.parent().map(|x| x.to_path_buf()));
-
-    // PATH 注入：内置目录（yt-dlp/deno 同目录）、ffmpeg 目录
-    let mut path_prepend = Vec::new();
-    if let Some(d) = &exe_dir {
-        let has_sidecar = if cfg!(windows) {
-            d.join("yt-dlp.exe").exists() || d.join("deno.exe").exists()
-        } else {
-            d.join("yt-dlp").exists() || d.join("deno").exists()
-        };
-        if has_sidecar {
-            path_prepend.push(d.clone());
-        }
-    }
-    if let Some(ff) = &ffmpeg_dir {
-        path_prepend.push(ff.clone());
-    }
-
-    // 透传引擎选项：代理（YouTube 场景常配代理，否则 yt-dlp 子进程直连失败）
-    // 与任务级限速——HTTP 驱动有 Limiter，托管进程只能靠 yt-dlp 自己的参数
-    let mut extra_args: Vec<String> = Vec::new();
-    if let Some(proxy) = ctx
-        .opts
-        .proxy
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        extra_args.push("--proxy".into());
-        extra_args.push(proxy.to_string());
-    }
+        .map_err(drive_from)?;
+    let mut extra_args = env.extra_args;
     if let Some(bps) = [ctx.opts.task_bps, ctx.opts.global_bps]
         .into_iter()
         .flatten()
@@ -360,9 +433,34 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
         extra_args.push(bps.to_string());
     }
 
+    // 并发分片拉取（大幅提升 yt-dlp HLS/DASH 分段吞吐）
+    let frag_threads = ctx.opts.segments.clamp(1, 16);
+    extra_args.push("--concurrent-fragments".into());
+    extra_args.push(frag_threads.to_string());
+
+    // 画质/格式选择：任务指定 format > 设置项 yt_dlp_quality > yt-dlp 默认最佳
+    let preset_fmt = match ctx.engine.get_setting("yt_dlp_quality").await {
+        Ok(Some(v)) => match v.as_str() {
+            "2160" => Some("bv*[height<=2160]+ba/b[height<=2160]/b"),
+            "1080" => Some("bv*[height<=1080]+ba/b[height<=1080]/b"),
+            "720" => Some("bv*[height<=720]+ba/b[height<=720]/b"),
+            "audio" => Some("bestaudio[ext=m4a]/bestaudio/best"),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(fmt) = task
+        .format
+        .as_deref()
+        .filter(|f| is_valid_format_selector(f))
+        .or(preset_fmt)
+    {
+        extra_args.push("-f".into());
+        extra_args.push(fmt.to_string());
+    }
+
     // —— 采集增强选项（设置驱动，缺省关；docs/MEDIA-ADAPTERS.md P0）：
-    //    字幕（全语言转 srt）、缩略图+元数据嵌入（需 ffmpeg，安装器已内置）、
-    //    cookies.txt（会员/登录态内容）。
+    //    字幕（全语言转 srt）、缩略图+元数据嵌入（需 ffmpeg，安装器已内置）。
     let subs = match ctx.engine.get_setting("yt_dlp_subs").await {
         Ok(Some(v)) => v == "on",
         _ => false,
@@ -387,21 +485,15 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
             extra_args.push(a.into());
         }
     }
-    if let Ok(Some(ck)) = ctx.engine.get_setting("yt_dlp_cookies").await {
-        let ck = ck.trim();
-        if !ck.is_empty() {
-            extra_args.push("--cookies".into());
-            extra_args.push(ck.to_string());
-        }
-    }
 
     let spec = dl_ytdlp::YtdlpSpec {
         url: ctx.url.clone(),
-        exe,
+        exe: env.exe,
         out_path,
-        ffmpeg_dir,
+        ffmpeg_dir: env.ffmpeg_dir,
         extra_args,
-        path_prepend,
+        path_prepend: env.path_prepend,
+        proxy: env.proxy,
     };
 
     let ectx = ctx.clone();
@@ -719,6 +811,8 @@ mod tests {
             "https://twitter.com/testuser",
             "https://space.bilibili.com/123456",
             "https://www.bilibili.com/space/bilibili",
+            "https://www.bilibili.com/medialist/detail/ml12345",
+            "https://www.bilibili.com/list/ml12345",
             "https://www.tiktok.com/@someuser",
             "https://www.douyin.com/user/MS4wLjABAAAAabcd1234",
         ] {

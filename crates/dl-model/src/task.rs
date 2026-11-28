@@ -34,6 +34,7 @@ pub fn can_transition(from: TaskStatus, to: TaskStatus) -> bool {
             | (WaitingRetry, Downloading)
             | (WaitingRetry, Probing)
             | (WaitingRetry, Paused)
+            | (WaitingRetry, Queued)
             | (WaitingRetry, Failed)
             | (Merging, Verifying)
             | (Merging, Failed)

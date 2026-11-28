@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/dl-ipc", "crates/dl-error", "crates/dl-model", "crates/dl-persist", "crates/dl-throttle",
     "crates/dl-journal", "crates/dl-segment", "crates/dl-filename", "crates/dl-net",
-    "crates/dl-io", "crates/dl-engine", "crates/dl-testserver", "crates/dl-cli", "crates/dl-server", "crates/dl-ytdlp", "crates/dl-remote", "crates/dl-sniff",
+    "crates/dl-io", "crates/dl-engine", "crates/dl-testserver", "crates/dl-cli", "crates/dl-server", "crates/dl-ytdlp", "crates/dl-remote",
     "src-tauri",
 ]
 
@@ -40,6 +40,9 @@ fs4 = "0.9"
 open = "5"
 flate2 = "1"
 brotli = "9"
+filetime = "0.2"
+quick-xml = "0.42"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 # 视频号解密：必须与微信 WASM 的 Isaac64 行为逐位一致（样本对拍锁定 0.5.1）
 rand_isaac = "=0.5.1"
 rand_core = "0.10"
@@ -59,7 +62,6 @@ dl-io = { path = "crates/dl-io" }
 dl-engine = { path = "crates/dl-engine" }
 dl-testserver = { path = "crates/dl-testserver" }
 dl-remote = { path = "crates/dl-remote" }
-dl-sniff = { path = "crates/dl-sniff" }
 
 [profile.release]
 lto = "thin"

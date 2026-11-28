@@ -5,9 +5,45 @@
 use std::io::Read;
 
 const BINARY_EXTS: &[&str] = &[
-    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "exe", "msi", "dmg", "pkg", "apk",
-    "ipa", "iso", "img", "deb", "rpm", "appimage", "mp4", "mkv", "webm", "mov", "avi", "mp3",
-    "flac", "m4a", "wav", "pdf", "epub", "bin",
+    "zip",
+    "rar",
+    "7z",
+    "tar",
+    "gz",
+    "tgz",
+    "bz2",
+    "xz",
+    "zst",
+    "exe",
+    "msi",
+    "dmg",
+    "pkg",
+    "apk",
+    "ipa",
+    "iso",
+    "img",
+    "deb",
+    "rpm",
+    "appimage",
+    "mp4",
+    "mkv",
+    "webm",
+    "mov",
+    "avi",
+    "mp3",
+    "flac",
+    "m4a",
+    "wav",
+    "pdf",
+    "epub",
+    "bin",
+    "gguf",
+    "safetensors",
+    "onnx",
+    "ckpt",
+    "pt",
+    "pth",
+    "whl",
 ];
 
 /// 解码常见 HTML 实体（`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&nbsp;`, `&#NN;`, `&#xNN;`）。
@@ -203,6 +239,68 @@ pub fn normalize_download_url(raw: &str) -> Option<String> {
             return Some(format!(
                 "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
             ));
+        }
+    }
+
+    // Hugging Face / hf-mirror: /blob/{rev}/{path} -> /resolve/{rev}/{path}
+    if matches!(
+        host.as_str(),
+        "huggingface.co" | "www.huggingface.co" | "hf-mirror.com" | "www.hf-mirror.com"
+    ) {
+        let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+        let has_prefix = matches!(segs.first().copied(), Some("datasets" | "spaces"));
+        let action_idx = if has_prefix { 3 } else { 2 };
+        if segs.len() >= action_idx + 3 && segs[action_idx] == "blob" {
+            let prefix = segs[..action_idx].join("/");
+            let rest = segs[action_idx + 1..].join("/");
+            let scheme = u.scheme();
+            let q = u.query().map(|q| format!("?{q}")).unwrap_or_default();
+            return Some(format!("{scheme}://{host}/{prefix}/resolve/{rest}{q}"));
+        }
+    }
+
+    // ModelScope: /{models|datasets}/{org}/{repo}/file/view/{rev}/{path} -> .../resolve/{rev}/{path}
+    if matches!(host.as_str(), "modelscope.cn" | "www.modelscope.cn") {
+        let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() >= 7
+            && matches!(segs[0], "models" | "datasets")
+            && segs[3] == "file"
+            && segs[4] == "view"
+        {
+            let head = segs[..3].join("/");
+            let rest = segs[5..].join("/");
+            return Some(format!("https://{host}/{head}/resolve/{rest}"));
+        }
+    }
+
+    // GitLab: /-/blob/ -> /-/raw/
+    if matches!(host.as_str(), "gitlab.com" | "www.gitlab.com") && u.path().contains("/-/blob/") {
+        let next_path = u.path().replacen("/-/blob/", "/-/raw/", 1);
+        let q = u.query().map(|q| format!("?{q}")).unwrap_or_default();
+        return Some(format!("https://{host}{next_path}{q}"));
+    }
+
+    // Gitee: /{owner}/{repo}/blob/{ref}/{path} -> .../raw/{ref}/{path}
+    if matches!(host.as_str(), "gitee.com" | "www.gitee.com") {
+        let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() >= 5 && segs[2] == "blob" {
+            let owner = segs[0];
+            let repo = segs[1];
+            let rest = segs[3..].join("/");
+            return Some(format!("https://{host}/{owner}/{repo}/raw/{rest}"));
+        }
+    }
+
+    // arXiv: /abs/{id} -> https://arxiv.org/pdf/{id}.pdf
+    if matches!(host.as_str(), "arxiv.org" | "www.arxiv.org") {
+        if let Some(id) = u
+            .path()
+            .strip_prefix("/abs/")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let clean = id.strip_suffix(".pdf").unwrap_or(id);
+            return Some(format!("https://arxiv.org/pdf/{clean}.pdf"));
         }
     }
 
@@ -676,5 +774,46 @@ mod tests {
         ));
         assert!(looks_like_html_body(b"  <HTML><head>"));
         assert!(!looks_like_html_body(b"PK\x03\x04\x14\x00"));
+    }
+
+    #[test]
+    fn normalizes_hf_modelscope_gitlab_gitee_arxiv() {
+        assert_eq!(
+            normalize_download_url(
+                "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/blob/main/qwen2.5-7b-instruct-q4_k_m.gguf"
+            )
+            .as_deref(),
+            Some(
+                "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"
+            )
+        );
+        assert_eq!(
+            normalize_download_url(
+                "https://hf-mirror.com/datasets/org/ds/blob/v1.0/data/train.parquet"
+            )
+            .as_deref(),
+            Some("https://hf-mirror.com/datasets/org/ds/resolve/v1.0/data/train.parquet")
+        );
+        assert_eq!(
+            normalize_download_url(
+                "https://modelscope.cn/models/Qwen/Qwen2.5-7B/file/view/master/config.json"
+            )
+            .as_deref(),
+            Some("https://modelscope.cn/models/Qwen/Qwen2.5-7B/resolve/master/config.json")
+        );
+        assert_eq!(
+            normalize_download_url("https://gitlab.com/group/sub/repo/-/blob/main/release.zip")
+                .as_deref(),
+            Some("https://gitlab.com/group/sub/repo/-/raw/main/release.zip")
+        );
+        assert_eq!(
+            normalize_download_url("https://gitee.com/owner/repo/blob/master/dist/app.exe")
+                .as_deref(),
+            Some("https://gitee.com/owner/repo/raw/master/dist/app.exe")
+        );
+        assert_eq!(
+            normalize_download_url("https://arxiv.org/abs/2401.12345").as_deref(),
+            Some("https://arxiv.org/pdf/2401.12345.pdf")
+        );
     }
 }

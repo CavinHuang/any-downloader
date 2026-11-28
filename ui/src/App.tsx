@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { api, isActive, listenEngineEvents, listenSniffEvents, QueueStatus, Task, TaskStatus } from "./api";
+import { api, isActive, listenBrowserSniffEvents, listenEngineEvents, QueueStatus, Task, TaskStatus } from "./api";
+import { classifyInputUrl, extractLinksFromText } from "./utils/urlDetect";
 
 // 剪贴板事件监听（复用 tauri event 通道）
-function listenEngineEventsClip(cb: (url: string) => void) {
-  return listen<{ url: string }>("clipboard-url", (e) => cb(e.payload.url));
+function listenEngineEventsClip(cb: (payload: { url: string; kind?: "direct" | "inspect" }) => void) {
+  return listen<{ url: string; kind?: "direct" | "inspect" }>("clipboard-url", (e) => cb(e.payload));
 }
 import { open as pickFile, save as pickSave } from "@tauri-apps/plugin-dialog";
 import { t } from "./i18n";
@@ -19,6 +20,7 @@ import {
 import { AddDialog } from "./components/AddDialog";
 import { DetailDrawer } from "./components/DetailDrawer";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { NetDiagPage } from "./components/NetDiagPage";
 import { SniffPanel } from "./components/SniffPanel";
 import { TaskRow } from "./components/TaskRow";
 import { store } from "./store";
@@ -43,6 +45,7 @@ const OVERSCAN = 8;
 export function App() {
   const tasks = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const totalBps = useSyncExternalStore(store.subscribe, store.getTotalBps);
+  const totalEtaSecs = useSyncExternalStore(store.subscribe, store.getTotalEtaSecs);
   const toasts = useSyncExternalStore(subscribeToasts, getToasts);
   const upd = useSyncExternalStore(subscribeUpdate, getUpdateState);
   // 更新提示形态：设置图标角标 + 悬停 tooltip（完整进度/操作在设置 → 更新）
@@ -64,7 +67,9 @@ export function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [catFilter, setCatFilter] = useState<Category>("all");
   const [showAdd, setShowAdd] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [page, setPage] = useState<"tasks" | "settings" | "netdiag">("tasks");
+  const [settingsTab, setSettingsTab] = useState<"general" | "sites" | "media" | "advanced" | "about">("general");
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const [draftUrl, setDraftUrl] = useState("");
   const [quickBusy, setQuickBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -101,7 +106,8 @@ export function App() {
   // 桌面嗅探：入口角标计数 + 抽屉开关（条目列表在 SniffPanel 内自持）
   const [sniffOpen, setSniffOpen] = useState(false);
   const [sniffCount, setSniffCount] = useState(0);
-  const [clipUrl, setClipUrl] = useState<string | null>(null);
+  const [clipItem, setClipItem] = useState<{ url: string; kind: "direct" | "inspect" } | null>(null);
+  const [addPreset, setAddPreset] = useState<{ urls: string; autoProbe: boolean } | null>(null);
   const [clipBusy, setClipBusy] = useState(false);
   const seenClips = useRef(new Set<string>());
   const [sortKey, setSortKey] = useState<null | "name" | "size" | "speed">(null);
@@ -121,13 +127,13 @@ export function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || showAdd || showSettings || detailId) return;
+      if (!(event.ctrlKey || event.metaKey) || showAdd || page === "settings" || detailId) return;
       if (event.key.toLowerCase() === "k") { event.preventDefault(); searchRef.current?.focus(); }
       if (event.key.toLowerCase() === "n") { event.preventDefault(); setShowAdd(true); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showAdd, showSettings, detailId]);
+  }, [showAdd, page, detailId]);
 
   useEffect(() => {
     if (!firstLoad) return;
@@ -135,13 +141,11 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [firstLoad]);
 
-  // 桌面嗅探新条目：masthead 角标 + 轻提示（列表本体在 SniffPanel 里维护）
+  // 浏览器扩展嗅探新条目：侧边栏徽标计数（列表本体在 SniffPanel 里维护）
   useEffect(() => {
     if (!inTauri) return;
-    const un = listenSniffEvents((ev) => {
-      if (ev.type !== "item") return;
+    const un = listenBrowserSniffEvents(() => {
       setSniffCount((n) => n + 1);
-      showToast(t("sniffNewToast").replace("{t}", (ev.item.title || ev.item.url).slice(0, 60)), "info");
     }).catch(() => () => {});
     return () => {
       un.then((f) => f());
@@ -172,11 +176,11 @@ export function App() {
       store.applyEvent(ev);
       if (ev.type === "state_changed") refreshQueue();
     }).catch(() => () => {});
-    const unclip = listenEngineEventsClip((url) => {
-      // 同链接本会话只提示一次（DESIGN §8 防误触发）
-      if (seenClips.current.has(url)) return;
+    const unclip = listenEngineEventsClip((payload) => {
+      const url = payload?.url;
+      if (!url || seenClips.current.has(url)) return;
       seenClips.current.add(url);
-      setClipUrl(url);
+      setClipItem({ url, kind: payload.kind === "inspect" ? "inspect" : "direct" });
     }).catch(() => () => {});
     // 自动更新：启动后静默首查，此后每 6 小时一轮；发现新版本自动后台下载（§docs/RELEASE.md）
     scheduleAutoChecks();
@@ -276,12 +280,12 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (showAdd || showSettings || detailId) return;
+      if (showAdd || page !== "tasks" || detailId) return;
       if (selected.size > 0) setSelected(new Set());
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected.size, showAdd, showSettings, detailId]);
+  }, [selected.size, showAdd, page, detailId]);
 
   const toggleSelect = (task: Task, index: number, shift: boolean) => {
     const anchor = lastIndexRef.current;
@@ -354,6 +358,19 @@ export function App() {
     return c;
   }, [tasks]);
 
+  const queueRankMap = useMemo(() => {
+    const map = new Map<string, number>();
+    let pos = 1;
+    for (const x of tasks) {
+      if (x.status === "queued") {
+        map.set(x.id, pos);
+        pos += 1;
+      }
+    }
+    return map;
+  }, [tasks]);
+  const queueTotal = queueRankMap.size;
+
   // A12：详情任务实时取自 store 快照
   const detailTask = useMemo(
     () => (detailId ? tasks.find((x) => x.id === detailId) ?? null : null),
@@ -384,22 +401,27 @@ export function App() {
 
   const pauseAll = () =>
     runBatch("pauseAll", async () => {
+      await api.pauseQueue();
       const targets = tasks.filter((x) => isActive(x.status));
       const rs = await Promise.allSettled(targets.map((x) => api.pauseTask(x.id)));
-      store.refresh();
-      toastBatch(t("pausedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+      setQueueSt(await api.queueStatus().catch(() => null));
+      await store.refresh();
+      if (targets.length > 0) {
+        toastBatch(t("pausedN").replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
+      } else {
+        showToast(t("queuePaused"), "info");
+      }
     });
 
   const startAllPending = () =>
     runBatch("startAll", async () => {
-      const pausedTargets = tasks.filter((x) => x.status === "paused");
-      const rs = await Promise.allSettled(pausedTargets.map((x) => api.startDownload(x.id)));
-      const qStarted = counts.queued > 0 ? await api.startQueue() : 0;
+      const pausedTargets = tasks.filter((x) => x.status === "paused" || x.status === "waiting_retry");
+      const rs = await Promise.allSettled(pausedTargets.map((x) => api.moveToQueue(x.id)));
+      await api.startQueue();
       setQueueSt(await api.queueStatus().catch(() => null));
       await store.refresh();
-      const totalOk = countOk(rs) + qStarted;
       if (pausedTargets.length > 0) {
-        toastBatch(t("resumedN").replace("{n}", String(totalOk)), countOk(rs), pausedTargets.length);
+        toastBatch(t("resumedN").replace("{n}", String(countOk(rs))), countOk(rs), pausedTargets.length);
       } else {
         showToast(t("queueStarted"), "success");
       }
@@ -473,7 +495,8 @@ export function App() {
         return;
       }
       const rs = await Promise.allSettled(targets.map(action));
-      store.refresh();
+      setQueueSt(await api.queueStatus().catch(() => null));
+      await store.refresh();
       toastBatch(t(msgKey).replace("{n}", String(countOk(rs))), countOk(rs), targets.length);
     });
 
@@ -486,6 +509,18 @@ export function App() {
     );
   const selPause = () =>
     runSelected("selPause", (x) => isActive(x.status), (x) => api.pauseTask(x.id), "pausedN");
+  const selMoveToQueue = () =>
+    runSelected(
+      "selQueue",
+      (x) =>
+        isActive(x.status) ||
+        x.status === "paused" ||
+        x.status === "failed" ||
+        x.status === "canceled" ||
+        x.status === "waiting_retry",
+      (x) => api.moveToQueue(x.id),
+      "movedToQueueN"
+    );
   const selRetry = () =>
     runSelected(
       "selRetry",
@@ -512,13 +547,19 @@ export function App() {
 
   // A4：剪贴板「下载」失败不再无声（task_exists → duplicate 文案）
   const addFromClip = async () => {
-    const url = clipUrl;
-    if (!url) return;
+    if (!clipItem) return;
+    if (clipItem.kind === "inspect") {
+      setAddPreset({ urls: clipItem.url, autoProbe: true });
+      setClipItem(null);
+      setShowAdd(true);
+      return;
+    }
+    const url = clipItem.url;
     setClipBusy(true);
     try {
       const task = await api.addTask({ url });
       await api.startDownload(task.id);
-      setClipUrl(null);
+      setClipItem(null);
       store.refresh();
     } catch (e) {
       const msg = String(e);
@@ -532,7 +573,19 @@ export function App() {
 
   const showSkeleton = inTauri && firstLoad && tasks.length === 0 && skeletonOn;
 
-  const openAdd = () => setShowAdd(true);
+  const openAdd = () => {
+    setAddPreset(null);
+    setShowAdd(true);
+  };
+  const leaveSettings = (next?: () => void) => {
+    if (page === "settings" && settingsDirty && !window.confirm(t("dirtyConfirm"))) {
+      return false;
+    }
+    setPage("tasks");
+    setSettingsDirty(false);
+    next?.();
+    return true;
+  };
   const requireDesktop = () => {
     if (inTauri) return true;
     showToast(t("desktopRequired"), "warn");
@@ -540,28 +593,56 @@ export function App() {
   };
   const quickSubmit = async (startImmediately: boolean) => {
     if (quickBusy || !requireDesktop()) return;
-    const urls = draftUrl.trim().split(/\s+/).filter(Boolean);
-    if (urls.length === 0) return;
-    const supportedUrl = /^(?:https?|thunder|flashget|qqdl):\/\//i;
-    if (urls.some((url) => !supportedUrl.test(url))) {
-      showToast(t("invalidDownloadUrl"), "warn");
+    const urls = extractLinksFromText(draftUrl);
+    if (urls.length === 0) {
+      if (draftUrl.trim()) showToast(t("invalidDownloadUrl"), "warn");
       return;
+    }
+    if (urls.length === 1) {
+      const url = urls[0];
+      const cls = classifyInputUrl(url);
+      if (cls === "inspect") {
+        setAddPreset({ urls: url, autoProbe: true });
+        setDraftUrl("");
+        setShowAdd(true);
+        return;
+      }
+      if (cls === "ambiguous") {
+        setQuickBusy(true);
+        try {
+          const probe = await api.probeUrl(url);
+          const mime = (probe.mime ?? "").toLowerCase();
+          if (probe.is_interstitial || mime.startsWith("text/html")) {
+            showToast(t("notDownloadablePage"), "warn");
+            return;
+          }
+        } catch (e) {
+          showToast(String(e), "error");
+          return;
+        } finally {
+          setQuickBusy(false);
+        }
+      }
     }
     setQuickBusy(true);
     try {
+      const singleImmediate = startImmediately && urls.length === 1;
       const results = await Promise.allSettled(urls.map(async url => {
         const task = await api.addTask({ url });
-        if (startImmediately) {
+        if (singleImmediate) {
           await api.startDownload(task.id);
         }
       }));
       const failedUrls = urls.filter((_, index) => results[index].status === "rejected");
       const ok = results.length - failedUrls.length;
+      if (startImmediately && urls.length > 1 && ok > 0) {
+        await api.startQueue().catch(() => {});
+      }
       setDraftUrl(failedUrls.join(" "));
       if (ok > 0) { setFilter("all"); setCatFilter("all"); setSearch(""); }
       const duplicate = results.filter(result => result.status === "rejected" && String(result.reason).includes("task_exists")).length;
       if (!startImmediately && ok > 0 && failedUrls.length === 0) {
-        showToast(t("queuedN").replace("{n}", String(ok)), "success");
+        showToast(t("queuedAutoN").replace("{n}", String(ok)), "success");
       } else {
         showToast(t("addSummary").replace("{ok}", String(ok)).replace("{dup}", String(duplicate)).replace("{fail}", String(failedUrls.length - duplicate)), failedUrls.length ? "warn" : "success");
       }
@@ -598,7 +679,7 @@ export function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <button className="brand" aria-label={t("home")} onClick={() => { setFilter("all"); setCatFilter("all"); setSearch(""); }}>
+        <button className="brand" aria-label={t("home")} onClick={() => leaveSettings(() => { setFilter("all"); setCatFilter("all"); setSearch(""); })}>
           <span className="brand-icon"><Icon name="download" size={20} /></span>
           <span className="brand-name">Anything<span>Downloader</span></span>
         </button>
@@ -606,13 +687,13 @@ export function App() {
         <div className="nav-label">{t("navMainGroup")}</div>
         <nav className="task-nav" aria-label={t("sideStatus")}>
           {PRIMARY_VIEWS.map(({key, icon}) => (
-            <button key={key} className={`nav-item${filter === key ? " active" : ""}`} onClick={() => setFilter(key)} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={filter === key ? "page" : undefined}>
+            <button key={key} className={`nav-item${page === "tasks" && filter === key ? " active" : ""}`} onClick={() => leaveSettings(() => setFilter(key))} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={page === "tasks" && filter === key ? "page" : undefined}>
               <Icon name={icon} size={17} /><span>{t(`view_${key}`)}</span><span className="nav-count">{counts[key]}</span>
             </button>
           ))}
           <div className="nav-divider" />
           {SECONDARY_VIEWS.map(({key, icon}) => (
-            <button key={key} className={`nav-item${filter === key ? " active" : ""}`} onClick={() => setFilter(key)} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={filter === key ? "page" : undefined}>
+            <button key={key} className={`nav-item${page === "tasks" && filter === key ? " active" : ""}`} onClick={() => leaveSettings(() => setFilter(key))} aria-label={t(`view_${key}`)} title={t(`view_${key}`)} aria-current={page === "tasks" && filter === key ? "page" : undefined}>
               <Icon name={icon} size={17} /><span>{t(`view_${key}`)}</span><span className={`nav-count${key === "failed" && counts.failed > 0 ? " has-errors" : ""}`}>{counts[key]}</span>
             </button>
           ))}
@@ -622,7 +703,10 @@ export function App() {
           <button className="nav-item" aria-label={t("sniffTool")} title={t("sniffTool")} onClick={() => { if (requireDesktop()) { setSniffCount(0); setSniffOpen(true); } }}>
             <Icon name="radar" size={17} /><span>{t("sniffTool")}</span>{sniffCount > 0 && <span className="nav-count has-badge">{sniffCount}</span>}
           </button>
-          <button className="nav-item settings-entry" aria-label={t("settings")} title={updateTooltip} onClick={() => requireDesktop() && setShowSettings(true)}>
+          <button className={`nav-item${page === "netdiag" ? " active" : ""}`} aria-label={t("netDiagTool")} title={t("netDiagTool")} aria-current={page === "netdiag" ? "page" : undefined} onClick={() => { if (requireDesktop()) leaveSettings(() => setPage("netdiag")); }}>
+            <Icon name="gauge" size={17} /><span>{t("netDiagTool")}</span>
+          </button>
+          <button className={`nav-item settings-entry${page === "settings" ? " active" : ""}`} aria-label={t("settings")} title={updateTooltip} aria-current={page === "settings" ? "page" : undefined} onClick={() => { if (requireDesktop()) { setSettingsTab("general"); setPage("settings"); } }}>
             <Icon name="settings" size={17} /><span>{t("settings")}</span>{updateNudge && <span className="update-dot" aria-hidden="true" />}
           </button>
         </div>
@@ -637,8 +721,10 @@ export function App() {
       <div className="workspace">
         <header className="workspace-header">
           <div className="page-heading">
-            <h1>{t(`view_${filter}`)}</h1>
-            <span className="task-total">{t("taskCount").replace("{n}", String(counts[filter]))}</span>
+            <h1>{page === "settings" ? t("settingsTitle") : page === "netdiag" ? t("netDiagTitle") : t(`view_${filter}`)}</h1>
+            <span className="task-total">
+              {page === "settings" ? t("settingsDescription") : page === "netdiag" ? t("netDiagDesc") : t("taskCount").replace("{n}", String(counts[filter]))}
+            </span>
           </div>
           <div className={`header-speed-pill${counts.active > 0 ? " active" : ""}`} title={t("totalSpeedLabel")}>
             <span className={`pulse-dot${counts.active > 0 ? " live" : ""}`} />
@@ -648,19 +734,43 @@ export function App() {
               <span className="header-active-badge">{t("activeDownloads").replace("{n}", String(counts.active))}</span>
             )}
           </div>
-          <label className="search-box"><Icon name="search" size={15} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchTasks")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>Ctrl K</kbd></label>
+          {page !== "tasks" ? (
+            <button type="button" onClick={() => leaveSettings()}>
+              {t("backToTasks")}
+            </button>
+          ) : (
+            <label className="search-box"><Icon name="search" size={15} /><input ref={searchRef} aria-label={t("search")} placeholder={t("searchTasks")} value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setSearch(""); }} /><kbd>Ctrl K</kbd></label>
+          )}
         </header>
 
         <main className="main">
+          {page === "settings" ? (
+            <SettingsDialog
+              initialTab={settingsTab}
+              onBack={() => leaveSettings()}
+              onDirtyChange={setSettingsDirty}
+              onOpenNetDiag={() => leaveSettings(() => setPage("netdiag"))}
+            />
+          ) : page === "netdiag" ? (
+            <NetDiagPage
+              onOpenProxySettings={() => {
+                setSettingsTab("sites");
+                setPage("settings");
+              }}
+            />
+          ) : (
+            <>
           <section className="download-entry" aria-label={t("quickDownload")}>
             <form className="link-entry" onSubmit={e => { e.preventDefault(); void quickSubmit(true); }}>
               <Icon name="link" size={18} />
               <input aria-label={t("quickLinkLabel")} value={draftUrl} disabled={quickBusy} onChange={e => setDraftUrl(e.target.value)} onPaste={e => {
                 const pasted = e.clipboardData.getData("text");
-                if (/[\r\n]/.test(pasted)) {
+                const extracted = extractLinksFromText(pasted);
+                if (extracted.length > 0 && (extracted.join(" ") !== pasted.trim() || /[\r\n]/.test(pasted))) {
                   e.preventDefault();
                   const input = e.currentTarget;
-                  setDraftUrl(draftUrl.slice(0, input.selectionStart ?? 0) + pasted.replace(/\s+/g, " ").trim() + draftUrl.slice(input.selectionEnd ?? draftUrl.length));
+                  const clean = extracted.join(" ");
+                  setDraftUrl(draftUrl.slice(0, input.selectionStart ?? 0) + clean + draftUrl.slice(input.selectionEnd ?? draftUrl.length));
                 }
               }} placeholder={t("quickLinkPlaceholder")} />
               <button type="button" className="entry-queue-btn" disabled={quickBusy || !draftUrl.trim()} onClick={() => void quickSubmit(false)}>{t("addToQueue")}</button>
@@ -673,16 +783,25 @@ export function App() {
             <div className="task-toolbar" role="toolbar" aria-label={t("taskActions")}>
               <div className="toolbar-actions">
                 <button onClick={startAllPending} disabled={busyOp !== null || counts.queued + counts.paused === 0}><Icon name="play" size={14} />{t("startAll")}</button>
-                <button onClick={pauseAll} disabled={busyOp !== null || counts.active === 0}><Icon name="pause" size={14} />{t("pauseAll")}</button>
-                {counts.queued > 0 && (
+                <button
+                  onClick={pauseAll}
+                  disabled={busyOp !== null || (counts.active === 0 && (counts.queued === 0 || Boolean(queueSt?.paused)))}
+                >
+                  <Icon name="pause" size={14} />{t("pauseAll")}
+                </button>
+                {(counts.queued > 0 || queueSt?.paused) && (
                   <button
                     className={`queue-pill ${queueSt?.paused ? "paused" : "running"}`}
                     onClick={queueSt?.paused ? startAllQueued : toggleQueue}
                     disabled={busyOp !== null}
                     title={queueSt?.paused ? t("startQueue") : t("pauseQueue")}
                   >
-                    <Icon name={queueSt?.paused ? "pause" : "clock"} size={14} />
-                    {queueSt?.paused ? t("queueStopped") : t("queueRunning")}
+                    <Icon name={queueSt?.paused ? "play" : "clock"} size={14} />
+                    {queueSt?.paused
+                      ? counts.queued > 0
+                        ? `${t("queueStopped")} · ${counts.queued}`
+                        : t("queuePausedResume")
+                      : t("queueAutoCount").replace("{n}", String(counts.queued))}
                   </button>
                 )}
                 {filter === "failed" && counts.failed > 0 && <button onClick={retryAllFailed} disabled={busyOp !== null}><Icon name="retry" size={14} />{t("retryAllFailed")}</button>}
@@ -693,10 +812,10 @@ export function App() {
                   <label className="conc-control" title={t("maxConcurrent")}>
                     <span>{t("concurrentTasksLabel")}</span>
                     <select
-                      value={String(queueSt?.max_concurrent ?? 3)}
+                      value={String(queueSt?.max_concurrent ?? 1)}
                       onChange={(e) => void changeConcurrent(Number(e.target.value))}
                     >
-                      <option value="1">1</option>
+                      <option value="1">{t("concurrentSequential")}</option>
                       <option value="2">2</option>
                       <option value="3">3</option>
                       <option value="5">5</option>
@@ -724,9 +843,13 @@ export function App() {
               </div>
             </div>
 
-            {clipUrl && <div className="banner clip" role="status">
-              <Icon name="link" size={16} /><div className="clip-info"><b>{t("clipboardFound")}</b><span className="clip-url">{clipUrl}</span></div>
-              <button onClick={addFromClip} disabled={clipBusy}>{t("download")}{clipBusy ? "…" : ""}</button><button onClick={() => setClipUrl(null)}>{t("ignore")}</button>
+            {clipItem && <div className="banner clip" role="status">
+              <Icon name="link" size={16} /><div className="clip-info"><b>{t("clipboardFound")}</b><span className="clip-url">{clipItem.url}</span></div>
+              <button onClick={addFromClip} disabled={clipBusy}>{clipItem.kind === "inspect" ? t("clipboardInspect") : t("download")}{clipBusy ? "…" : ""}</button>
+              {clipItem.kind === "direct" && (
+                <button onClick={() => { setAddPreset({ urls: clipItem.url, autoProbe: true }); setClipItem(null); setShowAdd(true); }} disabled={clipBusy}>{t("probe")}</button>
+              )}
+              <button onClick={() => setClipItem(null)}>{t("ignore")}</button>
             </div>}
 
             {selected.size > 0 && (
@@ -734,6 +857,7 @@ export function App() {
                 <span className="sel-count">{t("selectedN").replace("{n}", String(selected.size))}</span>
                 <button onClick={selStart} disabled={busyOp !== null}>{t("start")}</button>
                 <button onClick={selPause} disabled={busyOp !== null}>{t("pause")}</button>
+                <button onClick={selMoveToQueue} disabled={busyOp !== null}>{t("moveToQueue")}</button>
                 <button onClick={selRetry} disabled={busyOp !== null}>{t("retry")}</button>
                 <button onClick={selCancel} disabled={busyOp !== null}>{t("cancel")}</button>
                 <button className="danger" onClick={selRemove} disabled={busyOp !== null}>{t("remove")}</button>
@@ -758,20 +882,33 @@ export function App() {
               ) : (
                 <div style={{height: filtered.length * ROW_H, position: "relative"}}>
                   <div style={{transform: `translateY(${start * ROW_H}px)`}}>
-                    {visible.map((task, vi) => <TaskRow key={task.id} task={task} onDetail={() => setDetailId(task.id)} selected={selected.has(task.id)} onToggleSelect={shift => toggleSelect(task, start + vi, shift)} />)}
+                    {visible.map((task, vi) => (
+                      <TaskRow
+                        key={task.id}
+                        task={task}
+                        onDetail={() => setDetailId(task.id)}
+                        selected={selected.has(task.id)}
+                        onToggleSelect={shift => toggleSelect(task, start + vi, shift)}
+                        queuePos={queueRankMap.get(task.id)}
+                        queueTotal={queueTotal}
+                        queuePaused={Boolean(queueSt?.paused)}
+                        onQueueChanged={() => api.queueStatus().then(setQueueSt).catch(() => {})}
+                      />
+                    ))}
                   </div>
                 </div>
               )}
             </div>
             <div className="list-footer"><span>{t("visibleTasks").replace("{n}", String(filtered.length))}</span><span>{t("taskDetailHint")}</span></div>
           </section>
+            </>
+          )}
         </main>
-        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} queued={counts.queued} />
+        <TransferPanel tasks={tasks} bps={totalBps} active={counts.active} queued={counts.queued} etaSecs={totalEtaSecs} />
       </div>
 
       <div className="toast-stack">{toasts.map(x => <div key={x.id} className={`banner toast ${x.kind}`} role={x.kind === "error" ? "alert" : "status"}><span className="banner-text">{x.text}</span><button className="banner-close" aria-label={t("close")} onClick={() => dismissToast(x.id)}>×</button></div>)}</div>
-      {showAdd && <AddDialog initialUrls={draftUrl} desktopAvailable={inTauri} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); setDraftUrl(""); store.refresh(); }} />}
-      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {showAdd && <AddDialog initialUrls={addPreset?.urls ?? draftUrl} autoProbe={addPreset?.autoProbe ?? false} desktopAvailable={inTauri} onClose={() => { setShowAdd(false); setAddPreset(null); }} onAdded={() => { setShowAdd(false); setAddPreset(null); setDraftUrl(""); store.refresh(); }} />}
       {sniffOpen && <SniffPanel onClose={() => setSniffOpen(false)} />}
       {detailId && detailTask && <DetailDrawer key={detailTask.id} task={detailTask} onClose={() => setDetailId(null)} onChanged={nt => store.upsert(nt)} onRemoved={() => { setDetailId(null); store.refresh(); }} />}
     </div>

@@ -10,6 +10,12 @@ const nativeRequire = createRequire(join(sourceDir, '../package.json'));
 // Load the actual store and API through the project's TypeScript compiler.
 // Only the async task source is replaced; no Tauri window is needed.
 function fixture(tasks) {
+  if (typeof globalThis.document === 'undefined') {
+    globalThis.document = { documentElement: { lang: '' } };
+  }
+  if (typeof globalThis.navigator === 'undefined') {
+    globalThis.navigator = { language: 'zh-CN' };
+  }
   const modules = new Map();
   function load(file) {
     if (modules.has(file)) return modules.get(file).exports;
@@ -28,7 +34,12 @@ function fixture(tasks) {
   let updates = [];
   api.listTasks = async () => tasks;
   api.tasksUpdatedSince = async () => updates;
-  return { store: load(join(sourceDir, 'store.ts')).store, setUpdates: rows => { updates = rows; } };
+  return {
+    store: load(join(sourceDir, 'store.ts')).store,
+    eta: load(join(sourceDir, 'utils/eta.ts')),
+    i18n: load(join(sourceDir, 'i18n.ts')),
+    setUpdates: rows => { updates = rows; },
+  };
 }
 
 const task = (id, extra = {}) => ({
@@ -171,4 +182,43 @@ test('pruneStaleSpeeds decays old speeds without breaking list snapshot referenc
   assert.equal(store.getTotalBps(), 0);
   assert.equal(store.liveOf('d1').bps, 0);
   assert.equal(store.getSnapshot(), snap);
+});
+
+test('avgBps smooths spikes and getTotalEtaSecs tracks slowest active task', async () => {
+  const { store } = fixture([
+    task('fast', { status: 'downloading', total_bytes: 1000 }),
+    task('slow', { status: 'downloading', total_bytes: 10000 }),
+  ]);
+  await store.refresh();
+  assert.equal(store.getTotalEtaSecs(), null);
+
+  store.applyEvent(progress('fast', 200, { bps: 800, total: 1000 }));
+  store.applyEvent(progress('slow', 0, { bps: 500, total: 10000 }));
+  assert.equal(store.liveOf('fast').avgBps, 800);
+  // First sample: slow remaining = 10000 / 500 = 20s > fast remaining 1s
+  assert.equal(store.getTotalEtaSecs(), 20);
+
+  // Spike on slow task is smoothed via EWMA (0.75 * 500 + 0.25 * 900 = 600)
+  store.applyEvent(progress('slow', 1000, { bps: 900, total: 10000 }));
+  assert.equal(store.liveOf('slow').avgBps, 600);
+  assert.equal(store.getTotalEtaSecs(), 15);
+
+  // Pausing slow task leaves fast task's 1s ETA
+  store.applyEvent({ type: 'state_changed', task_id: 'slow', status: 'paused' });
+  assert.equal(store.getTotalEtaSecs(), 1);
+});
+
+test('eta formatting produces duration and local wall-clock finish labels', () => {
+  const { eta, i18n } = fixture([]);
+  assert.equal(eta.fmtRemaining(42), `42 ${i18n.t('secondsShort')}`);
+  assert.equal(
+    eta.fmtRemaining(125),
+    `2 ${i18n.t('minutesShort')} 5 ${i18n.t('secondsShort')}`
+  );
+  assert.equal(eta.fmtRemaining(9000), `2 ${i18n.t('hoursShort')} 30 ${i18n.t('minutesShort')}`);
+
+  const base = new Date(2026, 10, 28, 22, 30, 0).getTime();
+  assert.equal(eta.fmtFinishClock(30 * 60, base), '23:00');
+  assert.equal(eta.fmtFinishClock(3 * 3600, base), `${i18n.t('etaTomorrow')} 01:30`);
+  assert.equal(eta.fmtFinishClock(48 * 3600, base), '11-30 22:30');
 });

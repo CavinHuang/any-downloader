@@ -112,7 +112,8 @@ fn parse_status(s: &str) -> anyhow::Result<TaskStatus> {
 }
 
 fn parse_kind(s: &str) -> anyhow::Result<TaskKind> {
-    TaskKind::parse(s).ok_or_else(|| anyhow::anyhow!("unknown kind {s:?}, expected http or hls"))
+    TaskKind::parse(s)
+        .ok_or_else(|| anyhow::anyhow!("unknown kind {s:?}, expected http, hls, dash, or ytdlp"))
 }
 
 fn human_bytes(n: u64) -> String {
@@ -159,6 +160,7 @@ fn parse_common(
         conflict: ConflictPolicy::parse(conflict)
             .ok_or_else(|| anyhow::anyhow!("unknown conflict policy {conflict:?}"))?,
         spot_checks: 2,
+        preserve_mtime: true,
     })
 }
 
@@ -355,6 +357,10 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .unwrap_or_else(|| ".".into())
                 .into();
+            let proxy = match proxy {
+                Some(p) => Some(p),
+                None => engine.effective_proxy().await?,
+            };
             let opts = parse_common(segments, max_speed, global_speed, proxy, &conflict, dir)?;
             let ctrl_engine = engine.clone();
             let ctrl = tokio::spawn(wait_ctrl_c_then_pause(ctrl_engine, vec![id.clone()]));
@@ -377,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .map(|t| t.id)
                 .collect();
+            let proxy = match proxy {
+                Some(p) => Some(p),
+                None => engine.effective_proxy().await?,
+            };
             let opts = parse_common(segments, None, None, proxy, "rename", ".".into())?;
             let ctrl_engine = engine.clone();
             let ctrl = tokio::spawn(wait_ctrl_c_then_pause(ctrl_engine, ids));

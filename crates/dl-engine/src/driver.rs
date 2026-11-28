@@ -64,6 +64,7 @@ pub struct DownloadOptions {
     pub proxy: Option<String>,
     pub conflict: ConflictPolicy,
     pub spot_checks: usize,
+    pub preserve_mtime: bool,
 }
 
 impl Default for DownloadOptions {
@@ -76,6 +77,7 @@ impl Default for DownloadOptions {
             proxy: None,
             conflict: ConflictPolicy::Rename,
             spot_checks: 2,
+            preserve_mtime: true,
         }
     }
 }
@@ -725,11 +727,72 @@ async fn phase(ctx: Arc<Ctx>, mirrors_raw: &[String]) -> Result<(), DriveErr> {
     if task.kind == dl_model::TaskKind::Hls {
         return crate::hls::phase(ctx).await;
     }
+    if task.kind == dl_model::TaskKind::Dash {
+        return crate::dash::phase(ctx).await;
+    }
 
-    let probe = tokio::select! {
+    let primary_probe = tokio::select! {
         _ = ctx.cancel.cancelled() => return Err(DriveErr::Paused),
-        result = probe::probe(&ctx.client, &task.url, &ctx.task_headers) => result.map_err(drive_from)?,
+        result = probe::probe(&ctx.client, &task.url, &ctx.task_headers) => result,
     };
+
+    let (probe, used_fallback_mirror) = match primary_probe {
+        Ok(p) => (p, false),
+        Err(primary_err) => {
+            if mirrors_raw.is_empty() {
+                return Err(drive_from(primary_err));
+            }
+            let mut fb_set = tokio::task::JoinSet::new();
+            for m in mirrors_raw.iter().take(8) {
+                if m == &task.url {
+                    continue;
+                }
+                let client = ctx.client.clone();
+                let url = m.clone();
+                let hdrs = ctx.task_headers.clone();
+                fb_set.spawn(async move {
+                    let fut = probe::probe(&client, &url, &hdrs);
+                    tokio::time::timeout(Duration::from_secs(8), fut).await
+                });
+            }
+            let mut picked: Option<ProbeResult> = None;
+            loop {
+                let next = tokio::select! {
+                    _ = ctx.cancel.cancelled() => return Err(DriveErr::Paused),
+                    res = fb_set.join_next() => res,
+                };
+                let Some(res) = next else {
+                    break;
+                };
+                if let Ok(Ok(Ok(mp))) = res {
+                    tracing::warn!(
+                        task = %ctx.task_id,
+                        fallback = %mp.final_url,
+                        error = %primary_err,
+                        "primary probe failed; failing over to mirror"
+                    );
+                    picked = Some(mp);
+                    break;
+                }
+            }
+            match picked {
+                Some(p) => (p, true),
+                None => return Err(drive_from(primary_err)),
+            }
+        }
+    };
+
+    if probe
+        .mime
+        .as_deref()
+        .is_some_and(|m| m.eq_ignore_ascii_case("application/dash+xml"))
+    {
+        ctx.engine
+            .set_kind(&ctx.task_id, dl_model::TaskKind::Dash)
+            .await
+            .map_err(drive_from)?;
+        return crate::dash::phase(ctx).await;
+    }
 
     // 合并中转页穿透带出的 Referer / Cookie（任务显式头优先）
     let mut run_headers = ctx.task_headers.clone();
@@ -748,7 +811,7 @@ async fn phase(ctx: Arc<Ctx>, mirrors_raw: &[String]) -> Result<(), DriveErr> {
     let mut mirrors: Vec<String> = Vec::new();
     let mut mirror_set = tokio::task::JoinSet::new();
     for m in mirrors_raw.iter().take(8) {
-        if m == &task.url {
+        if m == &task.url || m == &probe.final_url {
             continue;
         }
         let client = ctx.client.clone();
@@ -767,11 +830,17 @@ async fn phase(ctx: Arc<Ctx>, mirrors_raw: &[String]) -> Result<(), DriveErr> {
     }
     while let Some(res) = mirror_set.join_next().await {
         if let Ok(Some(u)) = res {
-            mirrors.push(u);
+            if u != probe.final_url && !mirrors.iter().any(|x| x == &u) {
+                mirrors.push(u);
+            }
         }
     }
-    if !mirrors.is_empty() {
-        tracing::info!(count = mirrors.len(), "mirrors enabled");
+    if !mirrors.is_empty() || used_fallback_mirror {
+        tracing::info!(
+            count = mirrors.len() + 1,
+            failover = used_fallback_mirror,
+            "mirrors enabled"
+        );
     }
     // 主源使用探测解析后的 final_url（避免每个分段重新走重定向链/中转页）
     mirrors.insert(0, probe.final_url.clone());
@@ -2649,6 +2718,24 @@ pub(crate) async fn finalize(ctx: &Ctx, paths: &TargetPaths) -> Result<(), Drive
             ),
         ));
     }
+    if ctx.opts.preserve_mtime {
+        if let Some(lm) = ctx
+            .engine
+            .get_task(&ctx.task_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|t| t.last_modified)
+        {
+            if let Some(ts) = parse_http_date(&lm) {
+                if let Err(e) =
+                    filetime::set_file_mtime(&target, filetime::FileTime::from_unix_time(ts, 0))
+                {
+                    tracing::debug!(error = %e, "set file mtime failed");
+                }
+            }
+        }
+    }
     let size = std::fs::metadata(&target).ok().map(|m| m.len());
     let name = target.file_name().unwrap().to_string_lossy();
     ctx.engine
@@ -2770,6 +2857,107 @@ fn humansize(n: u64) -> String {
     format!("{v:.1}{}", U[i])
 }
 
+/// 解析 HTTP 日期头（IMF-fixdate / RFC 850 / ANSI C asctime）为 Unix 秒级时间戳。
+pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parse_month = |m: &str| -> Option<u32> {
+        match m {
+            "Jan" => Some(1),
+            "Feb" => Some(2),
+            "Mar" => Some(3),
+            "Apr" => Some(4),
+            "May" => Some(5),
+            "Jun" => Some(6),
+            "Jul" => Some(7),
+            "Aug" => Some(8),
+            "Sep" => Some(9),
+            "Oct" => Some(10),
+            "Nov" => Some(11),
+            "Dec" => Some(12),
+            _ => None,
+        }
+    };
+    let parse_hms = |hms: &str| -> Option<(u32, u32, u32)> {
+        let mut it = hms.split(':');
+        let h: u32 = it.next()?.parse().ok()?;
+        let m: u32 = it.next()?.parse().ok()?;
+        let sec: u32 = it.next()?.parse().ok()?;
+        if it.next().is_some() || h > 23 || m > 59 || sec > 60 {
+            return None;
+        }
+        Some((h, m, sec.min(59)))
+    };
+
+    let (year, month, day, h, m, sec) = if let Some((_, rest)) = s.split_once(',') {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() == 5 && parts[4].eq_ignore_ascii_case("GMT") {
+            // IMF-fixdate: "06 Nov 1994 08:49:37 GMT"
+            let day: u32 = parts[0].parse().ok()?;
+            let month = parse_month(parts[1])?;
+            let year: i64 = parts[2].parse().ok()?;
+            let (h, m, sec) = parse_hms(parts[3])?;
+            (year, month, day, h, m, sec)
+        } else if parts.len() == 3 && parts[2].eq_ignore_ascii_case("GMT") {
+            // RFC 850: "06-Nov-94 08:49:37 GMT"
+            let dmy: Vec<&str> = parts[0].split('-').collect();
+            if dmy.len() != 3 {
+                return None;
+            }
+            let day: u32 = dmy[0].parse().ok()?;
+            let month = parse_month(dmy[1])?;
+            let yy: i64 = dmy[2].parse().ok()?;
+            let year = if yy >= 70 { 1900 + yy } else { 2000 + yy };
+            let (h, m, sec) = parse_hms(parts[1])?;
+            (year, month, day, h, m, sec)
+        } else {
+            return None;
+        }
+    } else {
+        // ANSI C asctime: "Sun Nov  6 08:49:37 1994"
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() != 5 {
+            return None;
+        }
+        let month = parse_month(parts[1])?;
+        let day: u32 = parts[2].parse().ok()?;
+        let (h, m, sec) = parse_hms(parts[3])?;
+        let year: i64 = parts[4].parse().ok()?;
+        (year, month, day, h, m, sec)
+    };
+
+    if !(1970..=9999).contains(&year) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return None,
+    };
+    if day > max_day {
+        return None;
+    }
+    // Howard Hinnant days_from_civil (UTC)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let m_adj = month as i64 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * m_adj + 2) / 5 + (day as i64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + (h as i64) * 3600 + (m as i64) * 60 + (sec as i64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2873,5 +3061,28 @@ mod tests {
         assert_eq!(pick_mirror(&shared, &mirrors), 1);
         // 排除 1 时次优应选 2
         assert_eq!(pick_mirror_excluding(&shared, &mirrors, Some(1)), 2);
+    }
+
+    #[test]
+    fn parse_http_date_handles_standard_formats() {
+        // 1994-11-06T08:49:37Z = 784111777
+        assert_eq!(
+            parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(784_111_777)
+        );
+        assert_eq!(
+            parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT"),
+            Some(784_111_777)
+        );
+        assert_eq!(
+            parse_http_date("Sun Nov  6 08:49:37 1994"),
+            Some(784_111_777)
+        );
+        assert_eq!(
+            parse_http_date("Mon, 29 Feb 2024 00:00:00 GMT"),
+            Some(1_709_164_800)
+        );
+        assert_eq!(parse_http_date("Tue, 29 Feb 2023 00:00:00 GMT"), None);
+        assert_eq!(parse_http_date("invalid-date"), None);
     }
 }

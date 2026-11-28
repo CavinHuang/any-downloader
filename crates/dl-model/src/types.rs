@@ -16,6 +16,7 @@ pub fn now_ms() -> i64 {
 pub enum TaskKind {
     Http,
     Hls,
+    Dash,
     /// yt-dlp 托管模式（YouTube 等；docs/MEDIA-ADAPTERS.md §5.2）。
     Ytdlp,
     /// 内容任务（站点适配层文章导出，docs/MEDIA-ADAPTERS.md §11）：
@@ -28,6 +29,7 @@ impl TaskKind {
         match self {
             TaskKind::Http => "http",
             TaskKind::Hls => "hls",
+            TaskKind::Dash => "dash",
             TaskKind::Ytdlp => "ytdlp",
             TaskKind::Content => "content",
         }
@@ -37,6 +39,7 @@ impl TaskKind {
         match s {
             "http" => Some(TaskKind::Http),
             "hls" => Some(TaskKind::Hls),
+            "dash" => Some(TaskKind::Dash),
             "ytdlp" => Some(TaskKind::Ytdlp),
             "content" => Some(TaskKind::Content),
             _ => None,
@@ -187,6 +190,9 @@ pub struct Task {
     /// 任务级代理覆盖（http(s)/socks5(h)；None = 跟随全局代理设置）。
     #[serde(default)]
     pub proxy: Option<String>,
+    /// yt-dlp 清晰度/格式选择器（如 `bv*[height<=1080]+ba/b`；None = 跟随全局设置）。
+    #[serde(default)]
+    pub format: Option<String>,
     pub error: Option<dl_error::ErrorKind>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -215,6 +221,9 @@ pub struct CreateTask {
     /// 任务级代理（http(s)/socks5(h)，覆盖全局代理设置；缺省跟随全局）。
     #[serde(default)]
     pub proxy: Option<String>,
+    /// yt-dlp 清晰度/格式选择器（可选）。
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 impl CreateTask {
@@ -230,6 +239,7 @@ impl CreateTask {
             mirrors: None,
             postprocess: None,
             proxy: None,
+            format: None,
         }
     }
 }

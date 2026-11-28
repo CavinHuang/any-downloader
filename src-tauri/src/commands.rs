@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use dl_engine::{DownloadOptions, Engine};
 use dl_model::Task;
-use tauri::State;
+use tauri::{Emitter, State};
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::AppState;
 
@@ -59,6 +60,7 @@ pub async fn add_task(
     checksum: Option<String>,
     mirrors: Option<Vec<String>>,
     proxy: Option<String>,
+    format: Option<String>,
 ) -> Result<Task, String> {
     let mut c = dl_model::CreateTask::of(url);
     c.dir = dir.filter(|s| !s.is_empty());
@@ -67,7 +69,35 @@ pub async fn add_task(
     c.checksum = checksum.filter(|s| !s.is_empty());
     c.mirrors = mirrors.filter(|m| !m.is_empty());
     c.proxy = proxy.filter(|s| !s.trim().is_empty());
+    c.format = format.filter(|s| !s.trim().is_empty());
     state.engine.create_task(c).await.map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn inspect_media_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<dl_ytdlp::InspectResult, String> {
+    dl_engine::ytdlp_task::inspect_url(&state.engine, &url)
+        .await
+        .map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn inspect_site_url(
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<dl_engine::site_adapt::SiteInspectResult, String> {
+    dl_engine::site_adapt::inspect_site_url(&state.engine, &url)
+        .await
+        .map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn probe_site_mirrors(
+    state: State<'_, AppState>,
+) -> Result<Vec<dl_engine::site_adapt::MirrorLatency>, String> {
+    Ok(dl_engine::site_adapt::probe_site_mirrors(&state.engine).await)
 }
 
 #[tauri::command]
@@ -109,6 +139,11 @@ pub async fn remove_task(state: State<'_, AppState>, id: String) -> Result<bool,
 #[tauri::command]
 pub async fn retry_task(state: State<'_, AppState>, id: String) -> Result<Task, String> {
     state.engine.retry(&id).await.map_err(str_err)
+}
+
+#[tauri::command]
+pub async fn move_to_queue(state: State<'_, AppState>, id: String) -> Result<Task, String> {
+    state.engine.move_to_queue(&id).await.map_err(str_err)
 }
 
 /// 启动下载：spawn 驱动任务，进度经 engine-event 推给前端。
@@ -185,6 +220,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "segments",
         "task_bps",
         "global_bps",
+        "proxy_mode",
         "proxy",
         "conflict",
         "ffmpeg_path",
@@ -198,6 +234,16 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "auto_categorize",
         "after_done",
         "clipboard_monitor",
+        "prevent_sleep",
+        "auto_resume_on_start",
+        "preserve_mtime",
+        "yt_dlp_quality",
+        "hf_mirror_enabled",
+        "hf_mirror_site",
+        "hf_token",
+        "github_mirror_enabled",
+        "github_mirror_site",
+        "github_mirror_custom",
         "ytdlp_auto_update",
         "schedule_enabled",
         "schedule_window",
@@ -205,9 +251,6 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "schedule_outside_bps",
         "update_auto",
         "run_command",
-        "sniff_desktop",
-        "sniff_port",
-        "sniff_overlay",
     ] {
         let v = engine.get_setting(key).await.map_err(str_err)?;
         out.insert(
@@ -245,13 +288,7 @@ pub async fn probe_url(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<serde_json::Value, String> {
-    let proxy = state
-        .engine
-        .get_setting("proxy")
-        .await
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty());
+    let proxy = state.engine.effective_proxy().await.ok().flatten();
     let client = dl_net::build_client(proxy.as_deref()).map_err(str_err)?;
     match dl_net::probe::probe(&client, &url, &HashMap::new()).await {
         Ok(r) => Ok(serde_json::json!({
@@ -329,13 +366,7 @@ pub async fn sniff_page_url(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<Vec<dl_net::page_sniff::PageSniffItem>, String> {
-    let proxy = state
-        .engine
-        .get_setting("proxy")
-        .await
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty());
+    let proxy = state.engine.effective_proxy().await.ok().flatten();
     let client = dl_net::build_client(proxy.as_deref()).map_err(str_err)?;
     let mut items = dl_net::page_sniff::sniff_page(&client, &url)
         .await
@@ -694,6 +725,25 @@ pub async fn run_after_done(
                     .spawn();
             }
         }
+        "extract_zip" => {
+            let p = std::path::PathBuf::from(file);
+            if p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+                && p.is_file()
+            {
+                let dest_parent = std::path::PathBuf::from(dir);
+                match tokio::task::spawn_blocking(move || extract_zip_safely(&p, &dest_parent))
+                    .await
+                {
+                    Ok(Ok(out)) => {
+                        tracing::info!(dir = %out.display(), "auto-extracted zip archive")
+                    }
+                    Ok(Err(e)) => tracing::warn!(error = %e, "auto-extract zip failed"),
+                    Err(e) => tracing::warn!(error = %e, "auto-extract zip task panicked"),
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -901,4 +951,246 @@ pub async fn extension_bridge_download(
         .map_err(str_err)?;
     let _ = app_state.engine.start(&task.id).await;
     Ok(task)
+}
+
+fn unique_extract_dir(parent: &std::path::Path, zip_path: &std::path::Path) -> std::path::PathBuf {
+    let stem = zip_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("extracted");
+    let first = parent.join(stem);
+    if !first.exists() {
+        return first;
+    }
+    for i in 2..1000 {
+        let cand = parent.join(format!("{stem} ({i})"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    parent.join(format!("{stem}-{}", dl_model::now_ms()))
+}
+
+pub(crate) fn extract_zip_safely(
+    zip_path: &std::path::Path,
+    dest_parent: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("open zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("read zip: {e}"))?;
+    let out_dir = unique_extract_dir(dest_parent, zip_path);
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("create extract dir: {e}"))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
+        if entry.is_symlink() {
+            continue;
+        }
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
+        let target = out_dir.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| format!("mkdir {}: {e}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let mut out_file = std::fs::File::create(&target)
+            .map_err(|e| format!("create {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut out_file)
+            .map_err(|e| format!("write {}: {e}", target.display()))?;
+    }
+    Ok(out_dir)
+}
+
+#[derive(Default)]
+pub struct AppUpdateState(pub tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+
+#[tauri::command]
+pub async fn check_app_update(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    upd_state: State<'_, AppUpdateState>,
+) -> Result<Option<serde_json::Value>, String> {
+    let proxy = state.engine.effective_proxy().await.map_err(str_err)?;
+    let mut builder = app.updater_builder();
+    if dl_net::is_direct_proxy(proxy.as_deref()) {
+        builder = builder.no_proxy();
+    } else if let Some(p) = proxy {
+        let url = tauri::Url::parse(&p).map_err(|e| format!("invalid proxy url: {e}"))?;
+        builder = builder.proxy(url);
+    }
+    let updater = builder.build().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let info = update
+        .as_ref()
+        .map(|u| serde_json::json!({ "version": u.version }));
+    *upd_state.0.lock().await = update;
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn install_app_update(
+    app: tauri::AppHandle,
+    upd_state: State<'_, AppUpdateState>,
+) -> Result<(), String> {
+    let update = upd_state
+        .0
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| "no pending update".to_string())?;
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            |chunk_len, content_len| {
+                downloaded += chunk_len as u64;
+                let _ = app.emit(
+                    "app-update-progress",
+                    serde_json::json!({ "downloaded": downloaded, "total": content_len }),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_system_proxy() -> Option<String> {
+    dl_net::detect_system_proxy()
+}
+
+#[derive(Default)]
+pub struct SpeedTestState(pub tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>);
+
+#[tauri::command]
+pub async fn detect_network_ip(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let raw_mode = state
+        .engine
+        .get_setting("proxy_mode")
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let raw_proxy = state
+        .engine
+        .get_setting("proxy")
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let effective_mode = match raw_mode.as_deref() {
+        Some("direct") => "direct",
+        Some("system") => "system",
+        Some("custom") => "custom",
+        _ => {
+            if raw_proxy.is_some() {
+                "custom"
+            } else {
+                "system"
+            }
+        }
+    };
+    let effective = state.engine.effective_proxy().await.map_err(str_err)?;
+    let sys_proxy = dl_net::detect_system_proxy();
+    let display_proxy = match effective_mode {
+        "direct" => None,
+        "system" => sys_proxy.clone(),
+        "custom" => raw_proxy,
+        _ => None,
+    };
+    let proxy_active = display_proxy.is_some();
+
+    let (active_res, direct_res) = if proxy_active {
+        let (a, d) = tokio::join!(
+            dl_net::diag::detect_ip(effective.as_deref()),
+            dl_net::diag::detect_ip(Some(dl_net::DIRECT_PROXY)),
+        );
+        (a, Some(d))
+    } else {
+        (dl_net::diag::detect_ip(effective.as_deref()).await, None)
+    };
+
+    Ok(serde_json::json!({
+        "proxy_mode": effective_mode,
+        "effective_proxy": display_proxy,
+        "active": active_res.as_ref().ok(),
+        "active_error": active_res.as_ref().err().map(|e| e.to_string()),
+        "direct": direct_res.and_then(|r| r.ok()),
+    }))
+}
+
+#[tauri::command]
+pub async fn run_speed_test(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    st: State<'_, SpeedTestState>,
+    server: Option<String>,
+) -> Result<dl_net::diag::SpeedTestResult, String> {
+    let token = tokio_util::sync::CancellationToken::new();
+    {
+        let mut guard = st.0.lock().await;
+        if let Some(prev) = guard.replace(token.clone()) {
+            prev.cancel();
+        }
+    }
+    let effective = state.engine.effective_proxy().await.map_err(str_err)?;
+    let srv = server.unwrap_or_else(|| "auto".into());
+    let app_ev = app.clone();
+    let res = dl_net::diag::run_speed_test(effective.as_deref(), &srv, token, move |p| {
+        let _ = app_ev.emit("net-speed-progress", &p);
+    })
+    .await
+    .map_err(str_err);
+    *st.0.lock().await = None;
+    res
+}
+
+#[tauri::command]
+pub async fn cancel_speed_test(st: State<'_, SpeedTestState>) -> Result<(), String> {
+    if let Some(tok) = st.0.lock().await.take() {
+        tok.cancel();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    #[test]
+    fn extract_zip_safely_extracts_valid_entries_and_blocks_zip_slip() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("pkg.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("sub/hello.txt", opts).unwrap();
+            zw.write_all(b"world").unwrap();
+            zw.start_file("../evil.txt", opts).unwrap();
+            zw.write_all(b"pwned").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let extracted = super::extract_zip_safely(&zip_path, dir.path()).unwrap();
+        assert_eq!(extracted, dir.path().join("pkg"));
+        assert_eq!(
+            std::fs::read_to_string(extracted.join("sub/hello.txt")).unwrap(),
+            "world"
+        );
+        assert!(!dir.path().join("evil.txt").exists());
+        assert!(!dir.path().join("pkg").join("../evil.txt").exists());
+        assert!(zip_path.exists(), "original zip must remain intact");
+    }
 }

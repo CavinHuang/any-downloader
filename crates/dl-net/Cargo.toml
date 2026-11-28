@@ -9,10 +9,14 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 url.workspace = true
 flate2.workspace = true
 brotli.workspace = true
 dl-error.workspace = true
 dl-filename.workspace = true
 dl-model.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 

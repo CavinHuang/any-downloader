@@ -23,25 +23,26 @@ dl-remote.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 dirs.workspace = true
 dl-engine.workspace = true
+dl-ytdlp.workspace = true
 dl-ipc.workspace = true
 dl-net.workspace = true
 dl-model.workspace = true
 dl-error.workspace = true
 dl-filename.workspace = true
-dl-sniff.workspace = true
 anyhow.workspace = true
+zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 windows-sys = { version = "0.59", features = [
-    "Win32_Networking_WinInet",
-    "Win32_Foundation",
-    "Win32_Security_Cryptography",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
+    "Win32_System_Power",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -9,11 +9,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     target: "chrome110",
-    // 双入口：主界面 + 微信视频窗口的悬浮下载图标（sniff-overlay 窗口）
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
-        overlay: resolve(__dirname, "sniff-overlay.html"),
       },
     },
   },

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Task } from "../api";
 import { fmtBytes, fmtSpeed } from "../App";
 import { t } from "../i18n";
+import { fmtFinishClock, fmtRemaining } from "../utils/eta";
 import { Icon } from "./Icon";
 
 export function TransferPanel({
@@ -9,11 +10,13 @@ export function TransferPanel({
   bps,
   active,
   queued = 0,
+  etaSecs = null,
 }: {
   tasks: Task[];
   bps: number;
   active: number;
   queued?: number;
+  etaSecs?: number | null;
 }) {
   const [history, setHistory] = useState<number[]>(Array(40).fill(0));
   const currentBps = useRef(bps);
@@ -54,6 +57,14 @@ export function TransferPanel({
         <span className={`connection-dot${active > 0 ? " connected" : ""}`} />
         {active > 0 ? t("activeDownloads").replace("{n}", String(active)) : t("transferIdle")}
       </span>
+      {active > 0 && etaSecs != null && (
+        <span className="transfer-eta">
+          <Icon name="clock" size={13} />
+          {t("etaTotalFinish")
+            .replace("{time}", fmtFinishClock(etaSecs))
+            .replace("{dur}", fmtRemaining(etaSecs))}
+        </span>
+      )}
       {queued > 0 && (
         <span className="transfer-queued">{t("queuedCount").replace("{n}", String(queued))}</span>
       )}

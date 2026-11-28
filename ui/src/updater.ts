@@ -5,9 +5,8 @@
 // 显示状态 tooltip；完整进度与「立即重启」在设置 → 05 / 关于与更新。
 // 非 Tauri 环境（界面预览）全部静默。
 
-import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { api } from "./api";
+import { api, listenAppUpdateProgress } from "./api";
 
 export type UpdateStatus =
   | "idle" // 未检查 / 已忽略
@@ -52,18 +51,18 @@ export const subscribeUpdate = (l: () => void) => {
 
 export const getUpdateState = (): UpdateState => state;
 
-let current: Update | null = null;
+let pendingVersion: string | null = null;
 let busy = false; // 串行化：检查/安装进行中忽略重复触发
 
 export async function checkForUpdate(silent = false): Promise<void> {
   if (busy || !("__TAURI_INTERNALS__" in window)) return;
   busy = true;
-  current = null;
+  pendingVersion = null;
   set({ status: "checking", error: null });
   try {
-    const update = await check();
-    current = update;
+    const update = await api.checkAppUpdate();
     if (update) {
+      pendingVersion = update.version;
       set({
         status: "available",
         version: update.version,
@@ -82,21 +81,21 @@ export async function checkForUpdate(silent = false): Promise<void> {
 }
 
 export async function installUpdate(): Promise<void> {
-  if (busy || !current) return;
+  if (busy || !pendingVersion) return;
   busy = true;
   set({ status: "installing", downloaded: 0, total: null, error: null });
+  let unlisten: (() => void) | undefined;
   try {
-    await current.downloadAndInstall((event) => {
-      if (event.event === "Started") {
-        set({ total: event.data.contentLength ?? null });
-      } else if (event.event === "Progress") {
-        set({ downloaded: state.downloaded + event.data.chunkLength });
-      }
+    unlisten = await listenAppUpdateProgress((p) => {
+      set({ downloaded: p.downloaded, total: p.total });
     });
+    await api.installAppUpdate();
+    pendingVersion = null;
     set({ status: "ready" });
   } catch (e) {
     set({ status: "error", error: String(e) });
   } finally {
+    unlisten?.();
     busy = false;
   }
 }

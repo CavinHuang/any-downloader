@@ -23,7 +23,7 @@
 
   <main id="popup-main">
 
-    <div class="pastebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="m10 7 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2m2 5 6-6"/></svg><input id="paste-input" type="text" placeholder="粘贴链接或分享口令…" aria-label="链接或分享口令" autofocus /><button id="paste-go" class="primary">下载</button></div>
+    <div class="pastebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="m10 7 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2m2 5 6-6"/></svg><input id="paste-input" type="text" placeholder="粘贴链接或分享口令…" aria-label="链接或分享口令" autofocus /><button id="paste-queue" class="queue-btn">入队</button><button id="paste-go" class="primary">下载</button></div>
     <div id="paste-result" role="status" aria-live="polite"></div>
 
     <nav class="tabs2" aria-label="下载视图"><button id="tab-res" class="tab2 active" aria-pressed="true">网页资源 <span id="resource-count" class="tab-count">0</span></button><button id="tab-tasks" class="tab2" aria-pressed="false">下载任务 <span id="task-count" class="tab-count">0</span></button></nav>
@@ -33,8 +33,8 @@
       <div class="filters" id="filters" role="group" aria-label="资源类型"></div>
       <div class="resource-toolbar"><div id="tools"><button id="btn-scan" class="text-button">重新扫描</button></div><div id="resource-tools"></div></div>
       <div id="scan-result" role="status" aria-live="polite"></div>
-      <div id="site-card" class="site-card hidden"><div class="site-row"><span class="site-marker" aria-hidden="true">↓</span><div class="site-info"><span id="site-name"></span><span id="site-counts"></span></div><button id="site-push">下载页面资源</button></div></div>
-      <div id="batchbar" class="filters hidden" role="toolbar" aria-label="批量下载"><span class="batch-label">已选 <b id="sel-n">0</b> 项</span><button id="sel-cancel" class="chip-f">取消选择</button><button id="sel-push" class="chip-f push-all">下载选中</button></div>
+      <div id="site-card" class="site-card hidden"><div class="site-row"><span class="site-marker" aria-hidden="true">↓</span><div class="site-info"><span id="site-name"></span><span id="site-counts"></span></div><div class="site-actions"><button id="site-queue">入队</button><button id="site-push">下载资源</button></div></div></div>
+      <div id="batchbar" class="filters hidden" role="toolbar" aria-label="批量下载"><span class="batch-label">已选 <b id="sel-n">0</b> 项</span><button id="sel-cancel" class="chip-f">取消选择</button><button id="sel-queue" class="chip-f">选中入队</button><button id="sel-push" class="chip-f push-all">下载选中</button></div>
       <div id="download-result" role="status" aria-live="polite"></div>
       <div id="list"><div class="empty">正在读取可下载资源…</div></div>
     </section>

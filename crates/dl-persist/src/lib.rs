@@ -170,6 +170,18 @@ fn migrate(conn: &Connection) -> Result<(), DownloadError> {
         )
         .map_err(sql_err)?;
     }
+    if conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='format'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(sql_err)?
+        == 0
+    {
+        conn.execute("ALTER TABLE tasks ADD COLUMN format TEXT", [])
+            .map_err(sql_err)?;
+    }
     // 文章正文全文索引（收藏室全文搜索；kind=content 任务建索引，删任务同删）
     conn.execute(
         "CREATE TABLE IF NOT EXISTS content_index (task_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '')",
@@ -187,7 +199,7 @@ pub struct TaskSnapshot {
     pub deleted: Vec<String>,
 }
 
-const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,queue_order,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size";
+const COLS: &str = "id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,queue_order,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,format,error,created_at,updated_at,file_size";
 
 /// 全文检索命中：(task_id, filename)。
 pub type ContentHit = (String, Option<String>);
@@ -965,8 +977,8 @@ fn snapshot(conn: &Connection, since: Option<u64>) -> Res<TaskSnapshot> {
 fn insert(conn: &Connection, t: &Task) -> Res<()> {
     let error_json = t.error.as_ref().and_then(|e| serde_json::to_string(e).ok());
     conn.execute(
-        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,queue_order,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,error,created_at,updated_at,file_size)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+        "INSERT INTO tasks (id,url,final_url,filename,dir,total_bytes,etag,last_modified,mime,kind,status,priority,queue_order,headers_ref,headers_json,downloaded_bytes,variants_json,checksum,mirrors_json,postprocess_json,proxy,format,error,created_at,updated_at,file_size)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
         rusqlite::params![
             &t.id,
             &t.url,
@@ -989,6 +1001,7 @@ fn insert(conn: &Connection, t: &Task) -> Res<()> {
             &t.mirrors_json,
             &t.postprocess_json,
             &t.proxy,
+            &t.format,
             error_json,
             t.created_at,
             t.updated_at,
@@ -1067,6 +1080,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         mirrors_json: row.get("mirrors_json")?,
         postprocess_json: row.get("postprocess_json")?,
         proxy: row.get("proxy")?,
+        format: row.get("format")?,
         error: error_json.and_then(|s| serde_json::from_str(&s).ok()),
         created_at,
         updated_at: row.get("updated_at")?,
@@ -1103,6 +1117,7 @@ mod tests {
             mirrors_json: None,
             postprocess_json: None,
             proxy: None,
+            format: None,
             error: Some(ErrorKind::Http {
                 status: 429,
                 retry_after_secs: Some(3),

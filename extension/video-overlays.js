@@ -262,60 +262,67 @@
     menuOptions = [];
     menuEl.textContent = "";
     menuEl.classList.remove("has-opts");
+    const buildMenu = (items) => {
+      const opts = [];
+      for (const it of items) {
+        if (Array.isArray(it.variants) && it.variants.length > 1) {
+          for (const v of it.variants.slice(0, 5)) {
+            opts.push({
+              label: v.label || v.resolution || "画质",
+              sub: v.bandwidth ? `${Math.round(v.bandwidth / 1000)}k` : "",
+              variantUrl: v.url,
+              parentUrl: it.url,
+              start: true,
+            });
+          }
+          break;
+        }
+      }
+      if (!opts.length && items.length > 1) {
+        for (const it of items.slice(0, 4)) {
+          const sub = it.bytes ? `${(it.bytes / 1048576).toFixed(1)}M` : it.type.toUpperCase();
+          opts.push({
+            label: (it.filename || "视频流").slice(0, 18),
+            sub,
+            variantUrl: it.url,
+            parentUrl: it.url,
+            start: true,
+          });
+        }
+      }
+      opts.push({
+        label: "加入下载队列",
+        sub: "排队等待",
+        start: false,
+      });
+      menuOptions = opts;
+      menuEl.textContent = "";
+      for (const opt of opts) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "menu-item";
+        const l = document.createElement("span");
+        l.textContent = opt.label;
+        item.append(l);
+        if (opt.sub) {
+          const s = document.createElement("span");
+          s.className = "menu-sub";
+          s.textContent = opt.sub;
+          item.append(s);
+        }
+        item.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          void onClick(opt.variantUrl ? opt : null, opt.start !== false);
+        });
+        menuEl.append(item);
+      }
+      menuEl.classList.add("has-opts");
+    };
+    buildMenu([]);
     try {
       chrome.runtime.sendMessage({ type: "video-sources" }, (resp) => {
         if (chrome.runtime.lastError || !resp || !resp.ok || !Array.isArray(resp.items)) return;
-        const opts = [];
-        for (const it of resp.items) {
-          if (Array.isArray(it.variants) && it.variants.length > 1) {
-            for (const v of it.variants.slice(0, 5)) {
-              opts.push({
-                label: v.label || v.resolution || "画质",
-                sub: v.bandwidth ? `${Math.round(v.bandwidth / 1000)}k` : "",
-                variantUrl: v.url,
-                parentUrl: it.url,
-              });
-            }
-            break;
-          }
-        }
-        if (!opts.length && resp.items.length > 1) {
-          for (const it of resp.items.slice(0, 4)) {
-            const sub = it.bytes ? `${(it.bytes / 1048576).toFixed(1)}M` : it.type.toUpperCase();
-            opts.push({
-              label: (it.filename || "视频流").slice(0, 18),
-              sub,
-              variantUrl: it.url,
-              parentUrl: it.url,
-            });
-          }
-        }
-        menuOptions = opts;
-        menuEl.textContent = "";
-        if (!opts.length) {
-          menuEl.classList.remove("has-opts");
-          return;
-        }
-        for (const opt of opts) {
-          const item = document.createElement("button");
-          item.type = "button";
-          item.className = "menu-item";
-          const l = document.createElement("span");
-          l.textContent = opt.label;
-          item.append(l);
-          if (opt.sub) {
-            const s = document.createElement("span");
-            s.className = "menu-sub";
-            s.textContent = opt.sub;
-            item.append(s);
-          }
-          item.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            void onClick(opt);
-          });
-          menuEl.append(item);
-        }
-        menuEl.classList.add("has-opts");
+        buildMenu(resp.items);
       });
     } catch (_) {}
   }
@@ -393,7 +400,7 @@
     if (toastEl) toastEl.classList.remove("on");
   }
 
-  async function onClick(picked) {
+  async function onClick(picked, startNow = true) {
     const v = active;
     if (!v || busy) return;
     busy = true;
@@ -403,6 +410,7 @@
         chrome.runtime.sendMessage(
           {
             type: "video-download",
+            start: startNow,
             srcUrl: v.currentSrc || v.src || "",
             pageUrl: location.href,
             title: (document.title || "").slice(0, 120),
@@ -427,7 +435,13 @@
     setState(ok ? "ok" : "err");
     if (ok) {
       showToast(
-        resp.exists ? "任务已存在" : resp.via === "ytdlp" ? "已添加视频下载任务" : "已创建下载任务"
+        resp.exists
+          ? "任务已存在"
+          : !startNow
+            ? "已加入下载队列"
+            : resp.via === "ytdlp"
+              ? "已添加视频下载任务"
+              : "已创建下载任务"
       );
     } else {
       showToast(ERR_TEXT[(resp && resp.error) || ""] || "下载任务添加失败，请重试");

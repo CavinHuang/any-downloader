@@ -6,6 +6,7 @@ import { formatTaskError, t } from "../i18n";
 import { store } from "../store";
 import { showToast } from "../toast";
 import { categoryOf, sourceOf } from "../fileTypes";
+import { estimateRemainingSecs, fmtFinishClock, fmtRemaining } from "../utils/eta";
 import { Icon, IconName } from "./Icon";
 
 export function TaskRow({
@@ -13,6 +14,10 @@ export function TaskRow({
   onDetail,
   selected,
   onToggleSelect,
+  queuePos,
+  queueTotal,
+  queuePaused,
+  onQueueChanged,
 }: {
   task: Task;
   onDetail: () => void;
@@ -20,6 +25,10 @@ export function TaskRow({
   selected: boolean;
   /** shift=true 时由 App 做范围选择 */
   onToggleSelect: (shift: boolean) => void;
+  queuePos?: number;
+  queueTotal?: number;
+  queuePaused?: boolean;
+  onQueueChanged?: () => void;
 }) {
   const live = useSyncExternalStore(store.subscribe, () => store.liveOf(task.id));
   const segs = live?.segs ?? null;
@@ -59,8 +68,9 @@ export function TaskRow({
   const indet = !total && active; // A11：总大小未知且进行中 → indeterminate（multi 不渲染，一律单条）
   const category = categoryOf(task);
   const extension = name.match(/\.([a-z0-9]{1,6})$/i)?.[1]?.toUpperCase() ?? "FILE";
-  const remaining = active && task.kind !== "hls" && total != null && bps > 0
-    ? Math.max(0, (total - (downloaded || 0)) / bps) : null;
+  const isStream = task.kind === "hls" || task.kind === "dash";
+  const remaining = estimateRemainingSecs(task, live);
+  const finishClock = remaining != null ? fmtFinishClock(remaining) : null;
 
   const openFile = guard(async () => {
     if (task.status === "done" && isExe && !window.confirm(t("exeWarn"))) return;
@@ -96,7 +106,12 @@ export function TaskRow({
       <div className="c-file">
         <button className="name" title={name} onClick={onDetail}>{name}</button>
         <div className="sub">
-          <span className={`status-pill status ${task.status}`}><span className={`dot ${task.status}`} />{t(`status_${task.status}` as never)}</span>
+          <span className={`status-pill status ${task.status}`}>
+            <span className={`dot ${task.status}`} />
+            {task.status === "queued" && queuePos != null
+              ? t(queuePaused ? "queuedPausedPos" : "queuedPos").replace("{n}", String(queuePos))
+              : t(`status_${task.status}` as never)}
+          </span>
           <span className="source" title={task.url}>{sourceOf(task.url)}</span>
           {task.status === "failed" && task.error ? (
             <span className="err" title={formatTaskError(task.error)}>
@@ -119,7 +134,7 @@ export function TaskRow({
             </span>
           )}
           <span className="pct">
-            {task.kind === "hls" && total
+            {isStream && total
               ? `${downloaded || 0}/${total} ${t("segsUnit")}`
               : total
                 ? `${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}`
@@ -181,11 +196,37 @@ export function TaskRow({
         )}
       </div>
       <div className="c-speed">{active && bps > 0 ? fmtSpeed(bps) : "—"}</div>
-      <div className="c-eta">{remaining == null ? "—" : fmtRemaining(remaining)}</div>
+      <div
+        className="c-eta"
+        title={
+          remaining != null && finishClock
+            ? `${t("etaRemainingBrief").replace("{dur}", fmtRemaining(remaining))} · ${t("etaFinishAt").replace("{time}", finishClock)}`
+            : undefined
+        }
+      >
+        {remaining != null && finishClock ? (
+          <>
+            <span className="eta-remaining">{fmtRemaining(remaining)}</span>
+            <span className="eta-clock">{t("etaFinishAt").replace("{time}", finishClock)}</span>
+          </>
+        ) : (
+          "—"
+        )}
+      </div>
       <fieldset className="c-actions" disabled={busy} aria-busy={busy} onClick={(e) => e.stopPropagation()}>
         {active ? (
           <>
             <ActionBtn icon="pause" label={t("pause")} onClick={guard(() => api.pauseTask(task.id))} />
+            <ActionBtn
+              icon="clock"
+              label={t("moveToQueue")}
+              onClick={guard(async () => {
+                await api.moveToQueue(task.id);
+                const q = await api.queueStatus().catch(() => null);
+                onQueueChanged?.();
+                showToast(t(q?.paused ? "movedToQueuePaused" : "movedToQueue"), "info");
+              })}
+            />
             <ActionBtn icon="close" label={t("cancel")} onClick={guard(() => api.cancelTask(task.id))} />
             <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
@@ -200,6 +241,45 @@ export function TaskRow({
             />
             <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
+        ) : task.status === "queued" ? (
+          <>
+            <ActionBtn
+              primary
+              icon="play"
+              label={t("startNow")}
+              onClick={guard(async () => {
+                await api.startDownload(task.id);
+                onQueueChanged?.();
+              })}
+            />
+            <ActionBtn
+              icon="arrowUp"
+              label={t("moveUp")}
+              disabled={!queuePos || queuePos <= 1}
+              onClick={guard(async () => {
+                await api.reorderQueue(task.id, "up");
+                onQueueChanged?.();
+              })}
+            />
+            <ActionBtn
+              icon="arrowDown"
+              label={t("moveDown")}
+              disabled={!queuePos || !queueTotal || queuePos >= queueTotal}
+              onClick={guard(async () => {
+                await api.reorderQueue(task.id, "down");
+                onQueueChanged?.();
+              })}
+            />
+            <ActionBtn
+              icon="pause"
+              label={t("pause")}
+              onClick={guard(async () => {
+                await api.pauseTask(task.id);
+                onQueueChanged?.();
+              })}
+            />
+            <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
+          </>
         ) : (
           <>
             {task.status === "failed" || task.status === "canceled" ? (
@@ -210,25 +290,29 @@ export function TaskRow({
                 onClick={guard(async () => {
                   await api.retryTask(task.id);
                   await api.startDownload(task.id);
+                  onQueueChanged?.();
                 })}
               />
             ) : (
-              <>
-                {task.status === "queued" && (
-                  <ActionBtn
-                    icon="arrowUp"
-                    label={t("moveTop")}
-                    onClick={guard(() => api.reorderQueue(task.id, "top"))}
-                  />
-                )}
-                <ActionBtn
-                  primary
-                  icon="play"
-                  label={t("start")}
-                  onClick={guard(() => api.startDownload(task.id))}
-                />
-              </>
+              <ActionBtn
+                primary
+                icon="play"
+                label={t("start")}
+                onClick={guard(async () => {
+                  await api.startDownload(task.id);
+                  onQueueChanged?.();
+                })}
+              />
             )}
+            <ActionBtn
+              icon="clock"
+              label={t("moveToQueue")}
+              onClick={guard(async () => {
+                await api.moveToQueue(task.id);
+                onQueueChanged?.();
+                showToast(t("movedToQueue"), "info");
+              })}
+            />
             <ActionBtn icon="more" label={t("detail")} onClick={onDetail} />
           </>
         )}
@@ -242,14 +326,22 @@ function ActionBtn({
   onClick,
   primary,
   icon,
+  disabled,
 }: {
   label: string;
   onClick: () => void;
   primary?: boolean;
   icon: IconName;
+  disabled?: boolean;
 }) {
   return (
-    <button className={primary ? "icon-button action-primary" : "icon-button"} onClick={onClick} title={label} aria-label={label}>
+    <button
+      className={primary ? "icon-button action-primary" : "icon-button"}
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+    >
       <Icon name={icon} size={16} />
     </button>
   );
@@ -263,11 +355,4 @@ function displayName(url: string): string {
   } catch {
     return url;
   }
-}
-
-function fmtRemaining(seconds: number): string {
-  const minutes = Math.max(1, Math.ceil(seconds / 60));
-  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))} ${t("secondsShort")}`;
-  if (minutes < 60) return `${minutes} ${t("minutesShort")}`;
-  return `${Math.floor(minutes / 60)} ${t("hoursShort")} ${minutes % 60} ${t("minutesShort")}`;
 }

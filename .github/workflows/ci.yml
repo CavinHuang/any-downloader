@@ -30,6 +30,12 @@ jobs:
         run: python scripts/test_brand_icons.py
       - name: Build UI
         run: npm ci --prefix ui && npm run build --prefix ui
+      - name: Run JS and UI unit tests
+        run: |
+          node scripts/test_sniff_alignment.js
+          node scripts/test_adapters.js
+          node scripts/test_video_resolver.js
+          npm --prefix ui run test:store
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

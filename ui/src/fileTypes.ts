@@ -24,7 +24,7 @@ const RULES: [RegExp, Category][] = [
 ];
 
 export function categoryOf(task: Task): Category {
-  if (task.kind === "hls") return "video";
+  if (task.kind === "hls" || task.kind === "dash") return "video";
   const name = task.filename || task.url.split("?")[0];
   return RULES.find(([rule]) => rule.test(name))?.[1] ?? "other";
 }

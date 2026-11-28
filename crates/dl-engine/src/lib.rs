@@ -1,11 +1,13 @@
 //! 下载引擎：任务生命周期、下载驱动编排、事件流。无 UI 依赖，可在 CLI 下独立运行与压测。
 
 pub mod checksum;
+pub mod dash;
 pub mod driver;
 pub mod engine;
 pub mod hls;
 pub mod hosts;
 pub mod postprocess;
+pub mod site_adapt;
 pub mod ytdlp_task;
 
 pub use driver::{DownloadOptions, MAX_SEGMENTS};

@@ -1,6 +1,7 @@
 //! M1 集成测试：分段下载、断线内部重试、journal 崩溃恢复（暂停续传）、
 //! 内容变更重启、无 Range 降级、限速生效（DESIGN §11 测试策略）。
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dl_engine::{DownloadOptions, Engine};
@@ -1546,4 +1547,283 @@ async fn probe_retries_transient_503_and_succeeds() {
     assert!(req_num.load(Ordering::Relaxed) >= 2);
     let got = std::fs::read(out.path().join("retry503.bin")).unwrap();
     assert_eq!(got, *payload);
+}
+
+#[tokio::test]
+async fn auto_queue_runs_sequentially_and_immediate_start_bypasses_limit() {
+    let data = make_data(256 * 1024, 19);
+    let servers: Vec<_> = (0..4)
+        .map(|_| Server::start(Source::mem(data.clone()), ServerOptions::default()).unwrap())
+        .collect();
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    engine
+        .set_setting("default_dir", out.path().to_str().unwrap())
+        .await
+        .unwrap();
+    engine.set_setting("max_concurrent", "1").await.unwrap();
+    engine.spawn_queue_scheduler();
+
+    let mut ids = Vec::new();
+    for (i, srv) in servers[..3].iter().enumerate() {
+        let t = engine
+            .create_task(CreateTask {
+                filename: Some(format!("seq_{i}.bin")),
+                ..CreateTask::of(srv.url())
+            })
+            .await
+            .unwrap();
+        ids.push(t.id);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(engine.running_count() <= 1, "默认顺序排队并发不得超过 1");
+        let list = engine.list_tasks(None).await.unwrap();
+        if let Some(failed) = list.iter().find(|t| t.status == TaskStatus::Failed) {
+            panic!("auto-queued task failed: {:?}", failed.error);
+        }
+        if ids.iter().all(|id| {
+            list.iter()
+                .any(|t| &t.id == id && t.status == TaskStatus::Done)
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "auto sequential queue timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 队列暂停时新建入队任务应保持 Queued，但调用 start() 应绕过暂停直接完成
+    engine.pause_queue().await.unwrap();
+    let t4 = engine
+        .create_task(CreateTask {
+            filename: Some("seq_3.bin".into()),
+            ..CreateTask::of(servers[3].url())
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let held = engine.get_task(&t4.id).await.unwrap().unwrap();
+    assert_eq!(held.status, TaskStatus::Queued);
+
+    engine.start(&t4.id).await.unwrap();
+    let deadline4 = Instant::now() + Duration::from_secs(10);
+    loop {
+        let cur = engine.get_task(&t4.id).await.unwrap().unwrap();
+        if cur.status == TaskStatus::Done {
+            break;
+        }
+        assert_ne!(cur.status, TaskStatus::Failed);
+        assert!(Instant::now() < deadline4, "immediate start timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(std::fs::read(out.path().join("seq_3.bin")).unwrap(), data);
+}
+
+fn start_controllable_server(
+    data: Arc<Vec<u8>>,
+    hold_path: &'static str,
+    hold: Arc<std::sync::atomic::AtomicBool>,
+    hit_flag: Arc<std::sync::atomic::AtomicBool>,
+) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicBool>) {
+    use std::io::{Read, Write};
+    use std::sync::atomic::Ordering;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_bg = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let data = Arc::clone(&data);
+                    let hold = Arc::clone(&hold);
+                    let hit_flag = Arc::clone(&hit_flag);
+                    std::thread::spawn(move || {
+                        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let mut lines = req.lines();
+                        let first_line = lines.next().unwrap_or("");
+                        let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+                        let mut range: Option<(u64, u64)> = None;
+                        for line in lines {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.eq_ignore_ascii_case("range") {
+                                    if let Some(r) = v.trim().strip_prefix("bytes=") {
+                                        if let Some((a, b)) = r.split_once('-') {
+                                            if let (Ok(sa), Ok(sb)) =
+                                                (a.parse::<u64>(), b.parse::<u64>())
+                                            {
+                                                range = Some((sa, sb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if path == hold_path && range.map(|r| r != (0, 0)).unwrap_or(true) {
+                            hit_flag.store(true, Ordering::Relaxed);
+                            let deadline = Instant::now() + Duration::from_secs(10);
+                            while hold.load(Ordering::Relaxed) && Instant::now() < deadline {
+                                std::thread::sleep(Duration::from_millis(20));
+                            }
+                        }
+                        match range {
+                            Some((a, b)) => {
+                                let end = b.min((data.len() - 1) as u64);
+                                let slice = &data[a as usize..=end as usize];
+                                let hdr = format!(
+                                    "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {a}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len(),
+                                    slice.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(slice);
+                                }
+                            }
+                            None => {
+                                let hdr = format!(
+                                    "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len()
+                                );
+                                if s.write_all(hdr.as_bytes()).is_ok() {
+                                    let _ = s.write_all(&data);
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+    (addr, stop)
+}
+
+#[tokio::test]
+async fn move_to_queue_yields_active_task_to_next_queued_and_resumes_after() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let data = Arc::new(make_data(256 * 1024, 23));
+    let hold_a = Arc::new(AtomicBool::new(true));
+    let hit_a = Arc::new(AtomicBool::new(false));
+    let (addr_a, stop_a) = start_controllable_server(
+        Arc::clone(&data),
+        "/a.bin",
+        Arc::clone(&hold_a),
+        Arc::clone(&hit_a),
+    );
+    let srv_b = Server::start(Source::mem((*data).clone()), ServerOptions::default()).unwrap();
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    engine
+        .set_setting("default_dir", out.path().to_str().unwrap())
+        .await
+        .unwrap();
+    engine.set_setting("max_concurrent", "1").await.unwrap();
+    engine.pause_queue().await.unwrap();
+    engine.spawn_queue_scheduler();
+
+    let a = engine
+        .create_task(CreateTask {
+            filename: Some("a.bin".into()),
+            ..CreateTask::of(format!("http://{addr_a}/a.bin"))
+        })
+        .await
+        .unwrap();
+    let b = engine
+        .create_task(CreateTask {
+            filename: Some("b.bin".into()),
+            ..CreateTask::of(srv_b.url())
+        })
+        .await
+        .unwrap();
+    engine.reorder_queue(&a.id, "top").await.unwrap();
+    engine.start_queue().await.unwrap();
+
+    let wait_a = Instant::now() + Duration::from_secs(10);
+    while !hit_a.load(Ordering::Relaxed) {
+        assert!(Instant::now() < wait_a, "task A did not start downloading");
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // B 仍在排队时将正在下载的 A 移入队列：队列保持运行，B 接棒完成，随后 A 自动恢复并完成
+    let moved = engine.move_to_queue(&a.id).await.unwrap();
+    assert_eq!(moved.status, TaskStatus::Queued);
+    assert!(!engine.queue_status().await.unwrap().paused);
+    hold_a.store(false, Ordering::Relaxed);
+
+    let wait_done = Instant::now() + Duration::from_secs(20);
+    loop {
+        let ta = engine.get_task(&a.id).await.unwrap().unwrap();
+        let tb = engine.get_task(&b.id).await.unwrap().unwrap();
+        assert_ne!(ta.status, TaskStatus::Failed);
+        assert_ne!(tb.status, TaskStatus::Failed);
+        if ta.status == TaskStatus::Done && tb.status == TaskStatus::Done {
+            break;
+        }
+        assert!(Instant::now() < wait_done, "A & B did not both finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stop_a.store(true, Ordering::Relaxed);
+    assert_eq!(std::fs::read(out.path().join("a.bin")).unwrap(), *data);
+}
+
+#[tokio::test]
+async fn move_to_queue_sole_active_task_pauses_queue_instead_of_bouncing() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let data = Arc::new(make_data(256 * 1024, 29));
+    let hold_a = Arc::new(AtomicBool::new(true));
+    let hit_a = Arc::new(AtomicBool::new(false));
+    let (addr_a, stop_a) = start_controllable_server(
+        Arc::clone(&data),
+        "/sole.bin",
+        Arc::clone(&hold_a),
+        Arc::clone(&hit_a),
+    );
+
+    let dbtmp = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let engine = new_engine(&dbtmp).await;
+    engine
+        .set_setting("default_dir", out.path().to_str().unwrap())
+        .await
+        .unwrap();
+    engine.set_setting("max_concurrent", "1").await.unwrap();
+    engine.spawn_queue_scheduler();
+
+    let a = engine
+        .create_task(CreateTask {
+            filename: Some("sole.bin".into()),
+            ..CreateTask::of(format!("http://{addr_a}/sole.bin"))
+        })
+        .await
+        .unwrap();
+
+    let wait_a = Instant::now() + Duration::from_secs(10);
+    while !hit_a.load(Ordering::Relaxed) {
+        assert!(
+            Instant::now() < wait_a,
+            "sole task did not start downloading"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    let moved = engine.move_to_queue(&a.id).await.unwrap();
+    hold_a.store(false, Ordering::Relaxed);
+    assert_eq!(moved.status, TaskStatus::Queued);
+    assert!(engine.queue_status().await.unwrap().paused);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let still_queued = engine.get_task(&a.id).await.unwrap().unwrap();
+    assert_eq!(still_queued.status, TaskStatus::Queued);
+    stop_a.store(true, Ordering::Relaxed);
 }

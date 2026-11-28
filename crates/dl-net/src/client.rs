@@ -49,19 +49,29 @@ pub fn remember_own_ua(url: &str) {
     set.insert(k);
 }
 
-fn apply_proxy(
+pub const DIRECT_PROXY: &str = "direct";
+
+pub fn is_direct_proxy(proxy: Option<&str>) -> bool {
+    proxy
+        .map(str::trim)
+        .is_some_and(|p| p.eq_ignore_ascii_case(DIRECT_PROXY))
+}
+
+pub fn apply_proxy(
     builder: reqwest::ClientBuilder,
     proxy: Option<&str>,
 ) -> Res<reqwest::ClientBuilder> {
-    if let Some(p) = proxy {
-        // 手动代理；支持 http://、https://、socks5://、socks5h://（远端 DNS，推荐默认）
-        let proxy = reqwest::Proxy::all(p).map_err(|e| {
-            DownloadError::new(ErrorKind::ProxyConnectFailed, format!("bad proxy url: {e}"))
-        })?;
-        Ok(builder.proxy(proxy))
-    } else {
-        Ok(builder)
+    let Some(p) = proxy.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(builder);
+    };
+    if p.eq_ignore_ascii_case(DIRECT_PROXY) {
+        return Ok(builder.no_proxy());
     }
+    // 手动代理；支持 http://、https://、socks5://、socks5h://（远端 DNS，推荐默认）
+    let proxy = reqwest::Proxy::all(p).map_err(|e| {
+        DownloadError::new(ErrorKind::ProxyConnectFailed, format!("bad proxy url: {e}"))
+    })?;
+    Ok(builder.proxy(proxy))
 }
 
 pub fn build_client(proxy: Option<&str>) -> Res<reqwest::Client> {
@@ -157,4 +167,181 @@ pub fn classify_status(status: u16) -> Option<ErrorKind> {
 pub fn retry_after_secs(header: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
     let v = header?.to_str().ok()?;
     v.trim().parse::<u64>().ok()
+}
+
+#[allow(dead_code)]
+fn parse_scutil_proxy_output(out: &str) -> Option<String> {
+    let mut map = std::collections::HashMap::<&str, &str>::new();
+    for line in out.lines() {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        map.insert(k.trim(), v.trim());
+    }
+    if map.get("HTTPSEnable").copied() == Some("1") {
+        if let (Some(h), Some(p)) = (map.get("HTTPSProxy"), map.get("HTTPSPort")) {
+            if !h.is_empty() && !p.is_empty() {
+                return Some(format!("http://{h}:{p}"));
+            }
+        }
+    }
+    if map.get("HTTPEnable").copied() == Some("1") {
+        if let (Some(h), Some(p)) = (map.get("HTTPProxy"), map.get("HTTPPort")) {
+            if !h.is_empty() && !p.is_empty() {
+                return Some(format!("http://{h}:{p}"));
+            }
+        }
+    }
+    if map.get("SOCKSEnable").copied() == Some("1") {
+        if let (Some(h), Some(p)) = (map.get("SOCKSProxy"), map.get("SOCKSPort")) {
+            if !h.is_empty() && !p.is_empty() {
+                return Some(format!("socks5h://{h}:{p}"));
+            }
+        }
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn normalize_win_proxy_server(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains('=') {
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("socks5://")
+            || lower.starts_with("socks5h://")
+        {
+            return Some(trimmed.to_string());
+        }
+        return Some(format!("http://{trimmed}"));
+    }
+    let mut http = None;
+    let mut https = None;
+    let mut socks = None;
+    for part in trimmed.split(';') {
+        let Some((scheme, addr)) = part.split_once('=') else {
+            continue;
+        };
+        let addr = addr.trim();
+        if addr.is_empty() {
+            continue;
+        }
+        match scheme.trim().to_ascii_lowercase().as_str() {
+            "https" => https = Some(format!("http://{addr}")),
+            "http" => http = Some(format!("http://{addr}")),
+            "socks" => socks = Some(format!("socks5h://{addr}")),
+            _ => {}
+        }
+    }
+    https.or(http).or(socks)
+}
+
+/// 探测当前系统激活的代理地址（环境变量 → macOS `scutil --proxy` / Windows 注册表）。
+pub fn detect_system_proxy() -> Option<String> {
+    for key in [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("scutil").arg("--proxy").output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Some(p) = parse_scutil_proxy_output(&text) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(key) =
+            hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        {
+            let enabled: u32 = key.get_value("ProxyEnable").unwrap_or(0);
+            if enabled == 1 {
+                if let Ok(server) = key.get_value::<String, _>("ProxyServer") {
+                    if let Some(p) = normalize_win_proxy_server(&server) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_modes_build_clients() {
+        assert!(is_direct_proxy(Some("direct")));
+        assert!(is_direct_proxy(Some(" DIRECT ")));
+        assert!(!is_direct_proxy(Some("http://127.0.0.1:7890")));
+        assert!(!is_direct_proxy(None));
+
+        assert!(build_client(None).is_ok());
+        assert!(build_client(Some("direct")).is_ok());
+        assert!(build_client(Some("http://127.0.0.1:7890")).is_ok());
+        assert!(build_client(Some("socks5h://127.0.0.1:1080")).is_ok());
+    }
+
+    #[test]
+    fn system_proxy_parsers_handle_common_formats() {
+        let scutil = r#"
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 0
+}
+"#;
+        assert_eq!(
+            parse_scutil_proxy_output(scutil),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+
+        let scutil_socks = "SOCKSEnable : 1\nSOCKSProxy : 127.0.0.1\nSOCKSPort : 1080\n";
+        assert_eq!(
+            parse_scutil_proxy_output(scutil_socks),
+            Some("socks5h://127.0.0.1:1080".to_string())
+        );
+        assert_eq!(parse_scutil_proxy_output("HTTPEnable : 0"), None);
+
+        assert_eq!(
+            normalize_win_proxy_server("127.0.0.1:7890"),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        assert_eq!(
+            normalize_win_proxy_server("http=127.0.0.1:8080;https=127.0.0.1:8443"),
+            Some("http://127.0.0.1:8443".to_string())
+        );
+        assert_eq!(
+            normalize_win_proxy_server("socks=127.0.0.1:1080"),
+            Some("socks5h://127.0.0.1:1080".to_string())
+        );
+    }
 }

@@ -902,7 +902,7 @@ async function cookieHeaderFor(url) {
   }
 }
 
-async function pushTask(url, headers, filename, postprocess, dir) {
+async function pushTask(url, headers, filename, postprocess, dir, startNow = true) {
   // 统一小写规范化请求头并补 Cookie，彻底消除 cookie vs Cookie 重复键 bug
   const existingCookie =
     headers && Object.entries(headers).find(([k, v]) => k.toLowerCase() === "cookie" && v);
@@ -923,13 +923,16 @@ async function pushTask(url, headers, filename, postprocess, dir) {
     return { ok: false, error: (add.error && (add.error.code || add.error)) || "unknown" };
   }
   const taskId = add.result && add.result.id;
+  if (!startNow) {
+    return { ok: true, taskId, started: false, queued: true };
+  }
   // 即建即下：推送成功后立刻请求宿主开始下载（DESIGN §5.4 即建即下）
   const start = await nmCall("task.start", { id: taskId }, 5000);
   return { ok: true, taskId, started: !!start.ok };
 }
 
-async function pushToApp(rec) {
-  return pushTask(rec.url, rec.headers, rec.filename, rec.postprocess, rec.dir);
+async function pushToApp(rec, startNow = true) {
+  return pushTask(rec.url, rec.headers, rec.filename, rec.postprocess, rec.dir, startNow);
 }
 
 // ---------------------------------------------------------------- 站点适配层
@@ -1048,7 +1051,7 @@ async function adapterProbe(tabId) {
   return resp ? { ...resp, adapterId: adapterIds.join("+"), adapterIds } : { ok: false, error: "extract_failed" };
 }
 
-async function adapterPush(tabId, urls) {
+async function adapterPush(tabId, urls, startNow = true) {
   let entry = lastProbe.get(tabId);
   if (!entry) {
     const r = await adapterProbe(tabId);
@@ -1098,7 +1101,8 @@ async function adapterPush(tabId, urls) {
 
   let pushed = 0;
   let docTaskId = null;
-  // 图片先推（即建即下）；文档瞬时完成殿后——用户打开文章时图片基本就绪
+  const multiDownloads = startNow && imgs.length > 1;
+  // 图片先推（多图先入队再按并发上限依次开始）；文档瞬时完成殿后
   for (const r of [...imgs, ...docs]) {
     if (r.kind === "document") {
       const doc = r.meta.document;
@@ -1130,8 +1134,11 @@ async function adapterPush(tabId, urls) {
       dir: collection ? collection.dir : undefined,
       postprocess:
         dec && dec.seed ? [{ algo: dec.algo || "isaac64-xor", seed: dec.seed }] : null,
-    });
+    }, multiDownloads ? false : startNow);
     if (resp.ok || resp.error === "task_exists") pushed += 1;
+  }
+  if (multiDownloads && pushed > 0) {
+    await nmCall("queue.start", {}, 5000);
   }
   flashBadge(tabId, pushed > 0);
   return {
@@ -1149,6 +1156,7 @@ async function adapterPush(tabId, urls) {
 //     pushTask（即建即下 + Cookie 兜底）。
 async function videoDownload(tabId, msg) {
   if (tabId == null) return { ok: false, error: "no_tab" };
+  const startNow = msg.start !== false;
   const tmeta = await getTabMeta(tabId);
   const pageTitle = msg.title || tmeta.title || "";
   if (msg.variantUrl) {
@@ -1164,7 +1172,9 @@ async function videoDownload(tabId, msg) {
       msg.variantUrl,
       (rec && rec.headers) || recentHeaders.get(msg.variantUrl)?.headers,
       filename || undefined,
-      rec && rec.postprocess
+      rec && rec.postprocess,
+      undefined,
+      startNow
     );
     if (r && r.error === "task_exists") {
       flashBadge(tabId, true);
@@ -1198,7 +1208,7 @@ async function videoDownload(tabId, msg) {
     return r && r.ok ? { ...r, via } : r;
   };
   if (plan.via === "adapter") {
-    resp = await adapterPush(tabId, plan.urls);
+    resp = await adapterPush(tabId, plan.urls, startNow);
     resp = norm(resp, "adapter");
   } else if (plan.via === "direct" || plan.via === "sniff") {
     const rec = plan.via === "sniff" ? findByUrl(plan.url) : null;
@@ -1215,11 +1225,13 @@ async function videoDownload(tabId, msg) {
       plan.url,
       (rec && rec.headers) || recentHeaders.get(plan.url)?.headers,
       filename || undefined,
-      rec && rec.postprocess
+      rec && rec.postprocess,
+      undefined,
+      startNow
     );
     resp = norm(resp, plan.via);
   } else if (plan.via === "ytdlp") {
-    resp = await pushTask(plan.url);
+    resp = await pushTask(plan.url, undefined, undefined, undefined, undefined, startNow);
     resp = norm(resp, "ytdlp");
   }
   if (!resp) return { ok: false, error: "no_source" };
@@ -1384,39 +1396,51 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "用 Anything Downloader 下载此图片",
       contexts: ["image"],
     });
+    chrome.contextMenus.create({
+      id: "adl-queue",
+      title: "用 Anything Downloader 加入队列",
+      contexts: ["link", "video", "audio", "image"],
+    });
     // 站点适配：仅适配器命中的页面显示（微信文章/小红书/抖音/X + 文章站点）
+    const sitePatterns = [
+      "*://mp.weixin.qq.com/*",
+      "*://*.xiaohongshu.com/*",
+      "*://*.douyin.com/*",
+      "*://*.x.com/*",
+      "*://*.twitter.com/*",
+      "*://channels.weixin.qq.com/*",
+      "*://*.blog.csdn.net/*",
+      "*://zhuanlan.zhihu.com/*",
+      "*://www.jianshu.com/*",
+      "*://juejin.cn/*",
+      "*://*.cnblogs.com/*",
+      "*://blog.51cto.com/*",
+      "*://www.jb51.net/*",
+      "*://www.php.cn/*",
+      "*://segmentfault.com/*",
+      "*://my.oschina.net/*",
+      "*://*.medium.com/*",
+    ];
     chrome.contextMenus.create({
       id: "adl-site-page",
       title: "下载本页媒体（站点适配）",
       contexts: ["page"],
-      documentUrlPatterns: [
-        "*://mp.weixin.qq.com/*",
-        "*://*.xiaohongshu.com/*",
-        "*://*.douyin.com/*",
-        "*://*.x.com/*",
-        "*://*.twitter.com/*",
-        "*://channels.weixin.qq.com/*",
-        "*://*.blog.csdn.net/*",
-        "*://zhuanlan.zhihu.com/*",
-        "*://www.jianshu.com/*",
-        "*://juejin.cn/*",
-        "*://*.cnblogs.com/*",
-        "*://blog.51cto.com/*",
-        "*://www.jb51.net/*",
-        "*://www.php.cn/*",
-        "*://segmentfault.com/*",
-        "*://my.oschina.net/*",
-        "*://*.medium.com/*",
-      ],
+      documentUrlPatterns: sitePatterns,
+    });
+    chrome.contextMenus.create({
+      id: "adl-site-page-queue",
+      title: "本页媒体加入队列（站点适配）",
+      contexts: ["page"],
+      documentUrlPatterns: sitePatterns,
     });
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === "adl-site-page") {
+  if (info.menuItemId === "adl-site-page" || info.menuItemId === "adl-site-page-queue") {
     if (!tab || tab.id < 0) return;
     await adapterProbe(tab.id);
-    await adapterPush(tab.id);
+    await adapterPush(tab.id, undefined, info.menuItemId === "adl-site-page");
     return;
   }
   const url = info.linkUrl || info.srcUrl;
@@ -1428,7 +1452,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (rec && rec.headers && Object.keys(rec.headers).length) headers = rec.headers;
   }
   if (!headers) headers = recentHeaders.get(url)?.headers || null;
-  const resp = await pushTask(url, headers);
+  const resp = await pushTask(url, headers, undefined, undefined, undefined, info.menuItemId !== "adl-queue");
   flashBadge(tab?.id, resp.ok || (resp.error && resp.error.code === "task_exists"));
 });
 
@@ -1466,7 +1490,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg.type === "push") {
-    pushToApp(msg.rec).then(sendResponse);
+    pushToApp(msg.rec, msg.start !== false).then(sendResponse);
     return true; // 异步响应
   }
   if (msg.type === "hook-capture") {
@@ -1490,7 +1514,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: "no_tab" });
       return;
     }
-    adapterPush(tabId, msg.urls).then(sendResponse);
+    adapterPush(tabId, msg.urls, msg.start !== false).then(sendResponse);
     return true;
   }
   if (msg.type === "video-download") {

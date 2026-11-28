@@ -33,11 +33,7 @@ async fn tick(handle: &AppHandle, engine: &Engine) -> Result<(), String> {
     if off {
         return Ok(());
     }
-    let proxy = engine
-        .get_setting("proxy")
-        .await
-        .map_err(|e| e.to_string())?
-        .filter(|s| !s.trim().is_empty());
+    let proxy = engine.effective_proxy().await.map_err(|e| e.to_string())?;
 
     let local = local_version(engine).await;
     let Some((tag, url)) = fetch_latest(proxy.as_deref()).await? else {
@@ -129,14 +125,11 @@ async fn fetch_latest(proxy: Option<&str>) -> Result<Option<(String, String)>, S
 
 /// 从 `releases/latest/download/<asset>` 的 302 Location 提取最新 tag。
 async fn latest_tag(proxy: Option<&str>) -> Result<Option<String>, String> {
-    let mut build = reqwest::Client::builder()
+    let build = reqwest::Client::builder()
         .user_agent(concat!("AnythingDownloader/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(20));
-    if let Some(p) = proxy {
-        let proxy = reqwest::Proxy::all(p).map_err(|e| e.to_string())?;
-        build = build.proxy(proxy);
-    }
+    let build = dl_net::apply_proxy(build, proxy).map_err(|e| e.to_string())?;
     let client = build.build().map_err(|e| e.to_string())?;
     let resp = client
         .get(format!("{LATEST_URL}/{}", platform_asset()))
@@ -174,11 +167,7 @@ async fn download_verified(
     tag: &str,
     url: &str,
 ) -> Result<std::path::PathBuf, String> {
-    let proxy = engine
-        .get_setting("proxy")
-        .await
-        .map_err(|e| e.to_string())?
-        .filter(|s| !s.trim().is_empty());
+    let proxy = engine.effective_proxy().await.map_err(|e| e.to_string())?;
     let client = dl_net::client::build_client(proxy.as_deref()).map_err(|e| e.to_string())?;
     let dir = dl_engine::managed_bin_dir();
     tokio::fs::create_dir_all(&dir)

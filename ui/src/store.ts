@@ -12,11 +12,16 @@ export interface SegInfo {
 export interface Live {
   downloaded: number;
   bps: number;
+  /** EWMA-smoothed speed (B/s) for stable ETA prediction */
+  avgBps: number;
   segs: SegInfo[] | null;
   /** 上次分段快照时间戳（ms），供速度增量计算 */
   segsT?: number;
   /** 各分段实时速度（B/s，由相邻快照增量计算），与 segs 一一对应 */
   segSpeeds: number[] | null;
+  /** HLS/DASH 分片推进速率（units/s）与上次计数变化时间 */
+  unitRate?: number;
+  unitT?: number;
   /** 最近一次收到进度或状态刷新的时间戳（ms），用于衰减卡顿/陈旧速率 */
   updatedAt: number;
 }
@@ -27,6 +32,7 @@ class TaskStore {
   private listeners = new Set<Listener>();
   private snapshot: Task[] = [];
   private totalBps = 0;
+  private totalEtaSecs: number | null = null;
 
   subscribe = (l: Listener) => {
     this.listeners.add(l);
@@ -39,16 +45,31 @@ class TaskStore {
 
   getTotalBps = (): number => this.totalBps;
 
+  getTotalEtaSecs = (): number | null => this.totalEtaSecs;
+
   liveOf = (id: string): Live | undefined => this.live.get(id);
 
   private recomputeTotalBps() {
     let sum = 0;
+    let maxEta: number | null = null;
     for (const t of this.tasks.values()) {
+      const l = this.live.get(t.id);
       if (t.status === "downloading") {
-        sum += this.live.get(t.id)?.bps ?? 0;
+        sum += l?.bps ?? 0;
+      }
+      if (isActive(t.status) && l && t.total_bytes != null && t.total_bytes > 0) {
+        const isStream = t.kind === "hls" || t.kind === "dash";
+        const rate = isStream ? (l.unitRate ?? 0) : (l.avgBps || l.bps);
+        if (rate > 0) {
+          const rem = Math.max(0, (t.total_bytes - l.downloaded) / rate);
+          if (Number.isFinite(rem) && rem <= 365 * 86400) {
+            maxEta = maxEta == null ? rem : Math.max(maxEta, rem);
+          }
+        }
       }
     }
     this.totalBps = sum;
+    this.totalEtaSecs = maxEta;
   }
 
   private emit(rebuild = true) {
@@ -123,8 +144,8 @@ class TaskStore {
     const now = Date.now();
     let changed = false;
     for (const [id, cur] of this.live.entries()) {
-      if (cur.bps > 0 && now - cur.updatedAt > maxAgeMs) {
-        this.live.set(id, { ...cur, bps: 0, segSpeeds: null });
+      if ((cur.bps > 0 || cur.avgBps > 0 || (cur.unitRate ?? 0) > 0) && now - cur.updatedAt > maxAgeMs) {
+        this.live.set(id, { ...cur, bps: 0, avgBps: 0, unitRate: 0, segSpeeds: null });
         changed = true;
       }
     }
@@ -145,6 +166,30 @@ class TaskStore {
       }
       const prev = this.live.get(ev.task_id);
       const now = Date.now();
+      const avgBps =
+        ev.bps > 0
+          ? prev && prev.avgBps > 0
+            ? prev.avgBps * 0.75 + ev.bps * 0.25
+            : ev.bps
+          : 0;
+      const isStream = t.kind === "hls" || t.kind === "dash";
+      let unitRate = prev?.unitRate;
+      let unitT = prev?.unitT;
+      if (isStream) {
+        if (prev && ev.downloaded > prev.downloaded && prev.unitT) {
+          const dt = (now - prev.unitT) / 1000;
+          if (dt > 0.2) {
+            const inst = (ev.downloaded - prev.downloaded) / dt;
+            unitRate = unitRate && unitRate > 0 ? unitRate * 0.7 + inst * 0.3 : inst;
+            unitT = now;
+          }
+        } else if (!unitT) {
+          unitT = now;
+        }
+      } else {
+        unitRate = undefined;
+        unitT = undefined;
+      }
       // 分段速度：按段起点 start 匹配相邻两次快照的 written 增量，避免动态分裂后索引错位
       let segSpeeds: number[] | null = null;
       if (ev.segments && prev?.segs && prev.segsT) {
@@ -162,10 +207,13 @@ class TaskStore {
       this.live.set(ev.task_id, {
         downloaded: ev.downloaded,
         bps: ev.bps,
+        avgBps,
         // 分段快照：事件缺失时保留上次值（HLS/单连接恒为 null）
         segs: ev.segments ?? prev?.segs ?? null,
         segsT: now,
         segSpeeds: segSpeeds ?? prev?.segSpeeds ?? null,
+        unitRate,
+        unitT,
         updatedAt: now,
       });
       this.recomputeTotalBps();
@@ -188,6 +236,8 @@ class TaskStore {
             this.live.set(ev.task_id, {
               ...prev,
               bps: 0,
+              avgBps: 0,
+              unitRate: 0,
               segSpeeds: null,
               updatedAt: Date.now(),
             });

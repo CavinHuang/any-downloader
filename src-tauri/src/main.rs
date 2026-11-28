@@ -5,18 +5,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(windows)]
-mod cert;
 mod commands;
-#[cfg(target_os = "macos")]
-mod macos_sniff;
 mod nm;
+mod power;
 mod schedule;
-mod sniff;
-#[cfg(windows)]
-mod sysproxy;
-#[cfg(windows)]
-mod wechat_overlay;
 mod ytdlp_update;
 
 use dl_engine::Engine;
@@ -90,9 +82,51 @@ thread: {:?}
             let handle = app.handle().clone();
             let engine = tauri::async_runtime::block_on(Engine::open_default())
                 .expect("open engine database");
-            let recovered = tauri::async_runtime::block_on(engine.recover_stale_active_tasks());
+            let (recovered, resumable_ids) =
+                tauri::async_runtime::block_on(engine.recover_stale_active_task_ids());
             if recovered > 0 {
                 tracing::info!(recovered, "recovered stale active tasks to paused/failed");
+            }
+            let auto_resume = tauri::async_runtime::block_on(engine.get_setting("auto_resume_on_start"))
+                .ok()
+                .flatten()
+                .map(|v| v != "off")
+                .unwrap_or(true);
+            if !auto_resume {
+                let has_queued = tauri::async_runtime::block_on(
+                    engine.list_tasks(Some(dl_model::TaskStatus::Queued)),
+                )
+                .map(|list| !list.is_empty())
+                .unwrap_or(false);
+                if has_queued {
+                    let _ = tauri::async_runtime::block_on(engine.pause_queue());
+                }
+            }
+            if auto_resume && !resumable_ids.is_empty() {
+                let resume_engine = engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    let queue_paused = resume_engine
+                        .queue_status()
+                        .await
+                        .map(|q| q.paused)
+                        .unwrap_or(false);
+                    if !queue_paused {
+                        for id in resumable_ids {
+                            if let Ok(Some(t)) = resume_engine.get_task(&id).await {
+                                if t.status == dl_model::TaskStatus::Paused {
+                                    let _ = resume_engine.start_queued(&id).await;
+                                }
+                            }
+                        }
+                    }
+                    resume_engine.spawn_queue_scheduler();
+                });
+            } else {
+                let sched_engine = engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    sched_engine.spawn_queue_scheduler();
+                });
             }
 
             // 扩展通道：启动即把 NM 指向自带 dl-server（幂等、best-effort）
@@ -157,17 +191,16 @@ thread: {:?}
             }
             app.manage(bridge_handle);
 
-            // 剪贴板监听（可开关）：新出现直链 → 事件提示 UI（DESIGN §8）
+            // 剪贴板监听（可开关）：仅对真实可下载直链或支持识别的站点/视频链接弹窗提示
             {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     use tauri_plugin_clipboard_manager::ClipboardExt;
-                    let mut last = String::new();
+                    let mut last = handle.clipboard().read_text().unwrap_or_default();
                     loop {
                         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                        let enabled = handle
-                            .state::<AppState>()
-                            .engine
+                        let eng = &handle.state::<AppState>().engine;
+                        let enabled = eng
                             .get_setting("clipboard_monitor")
                             .await
                             .ok()
@@ -184,8 +217,20 @@ thread: {:?}
                             continue;
                         }
                         last = text.clone();
-                        for url in extract_urls(&text) {
-                            let _ = handle.emit("clipboard-url", serde_json::json!({ "url": url }));
+                        let hf_mirror = eng.get_setting("hf_mirror_site").await.ok().flatten();
+                        let candidates = dl_engine::site_adapt::extract_downloadable_urls(
+                            &text,
+                            hf_mirror.as_deref(),
+                        );
+                        for (url, kind) in candidates {
+                            if eng.has_active_url(&url).await {
+                                continue;
+                            }
+                            let _ = handle.emit(
+                                "clipboard-url",
+                                serde_json::json!({ "url": url, "kind": kind }),
+                            );
+                            break;
                         }
                     }
                 });
@@ -255,26 +300,19 @@ thread: {:?}
                 });
             }
 
-            // yt-dlp 自动更新（延迟首查 + 24h 轮询）与定时错峰调度
+            // yt-dlp 自动更新（延迟首查 + 24h 轮询）、防休眠守卫与定时错峰调度
             let engine_bg = engine.clone();
             ytdlp_update::spawn(handle.clone(), engine_bg.clone());
-            schedule::spawn(engine_bg);
+            schedule::spawn(engine_bg.clone());
+            app.manage(power::spawn(engine_bg));
 
             // 远程添加：恢复上次的开关状态
             app.manage(commands::RemoteState::default());
             commands::remote_autostart(&engine, &app.state::<commands::RemoteState>());
 
+            app.manage(commands::AppUpdateState::default());
+            app.manage(commands::SpeedTestState::default());
             app.manage(AppState { engine });
-
-            // 桌面嗅探（视频号）：崩溃恢复 PAC + 按设置自启 + 条目事件泵
-            {
-                let sniff_state = std::sync::Arc::new(sniff::SniffState::new());
-                app.manage(sniff_state.clone());
-                let app_state = AppState {
-                    engine: app.state::<AppState>().engine.clone(),
-                };
-                sniff::bootstrap(&handle, sniff_state, app_state);
-            }
 
             // 托盘：左键/菜单恢复窗口，菜单退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
@@ -287,16 +325,12 @@ thread: {:?}
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
                     "quit" => {
+                        app.state::<power::SleepController>().release();
                         // 优雅退出：先对运行中任务请求暂停（触发 journal checkpoint）
                         let n = app.state::<AppState>().engine.request_pause_all();
                         if n > 0 {
                             std::thread::sleep(std::time::Duration::from_millis(800));
                         }
-                        // 桌面嗅探退出清理（还原系统 PAC）
-                        sniff::shutdown_cleanup(
-                            app,
-                            &app.state::<std::sync::Arc<sniff::SniffState>>(),
-                        );
                         app.exit(0);
                     }
                     _ => {}
@@ -333,11 +367,21 @@ thread: {:?}
             commands::retry_task,
             commands::start_download,
             commands::pause_task,
+            commands::move_to_queue,
             commands::cancel_task,
             commands::get_settings,
             commands::set_setting,
+            commands::get_system_proxy,
+            commands::detect_network_ip,
+            commands::run_speed_test,
+            commands::cancel_speed_test,
+            commands::check_app_update,
+            commands::install_app_update,
             commands::default_download_dir,
             commands::probe_url,
+            commands::inspect_media_url,
+            commands::inspect_site_url,
+            commands::probe_site_mirrors,
             commands::reveal_task,
             commands::export_tasks,
             commands::import_tasks,
@@ -366,27 +410,9 @@ thread: {:?}
             commands::extension_bridge_status,
             commands::extension_bridge_clear,
             commands::extension_bridge_download,
-            sniff::sniff_status,
-            sniff::sniff_set_enabled,
-            sniff::sniff_cert_install,
-            sniff::sniff_cert_uninstall,
-            sniff::sniff_list,
-            sniff::sniff_clear,
-            sniff::sniff_download,
-            sniff::sniff_overlay_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// 从剪贴板文本提取 http(s) 直链（按空白切分、去尾部标点）。
-fn extract_urls(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| c == ',' || c == ')' || c == '"' || c == '<'))
-        .filter(|w| w.starts_with("http://") || w.starts_with("https://"))
-        .filter(|w| w.len() > 11)
-        .map(|w| w.to_string())
-        .collect()
 }
 
 fn show_main(app: &tauri::AppHandle) {

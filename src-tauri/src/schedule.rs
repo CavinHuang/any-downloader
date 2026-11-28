@@ -137,6 +137,8 @@ async fn tick(engine: &Engine, state: &Sched) -> Result<(), String> {
     if leaving {
         match cfg.outside {
             Outside::Pause => {
+                // 先暂停队列准入，防止逐个暂停期间后续排队任务顶上
+                let _ = engine.pause_queue().await;
                 // 逐任务暂停：运行中/探测中走 checkpoint，排队与等待重试转 paused；
                 // 合并/校验等收尾阶段不可暂停，让它们自然跑完
                 let mut paused = Vec::new();
@@ -170,10 +172,11 @@ async fn tick(engine: &Engine, state: &Sched) -> Result<(), String> {
                 let ids: Vec<String> = state.auto_paused.lock().unwrap().drain(..).collect();
                 let mut started = 0;
                 for id in ids {
-                    if engine.start(&id).await.is_ok() {
+                    if engine.start_queued(&id).await.is_ok() {
                         started += 1;
                     }
                 }
+                let _ = engine.start_queue().await;
                 tracing::info!(started, "window open: resumed scheduled tasks");
             }
             Outside::Limit => {

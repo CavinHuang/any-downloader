@@ -7,6 +7,7 @@ import { showToast } from "../toast";
 import { useOverlay } from "../useOverlay";
 import { Icon, IconName } from "./Icon";
 import { categoryOf } from "../fileTypes";
+import { estimateRemainingSecs, fmtFinishClock, fmtRemaining } from "../utils/eta";
 
 interface Variant {
   bandwidth: number;
@@ -75,16 +76,8 @@ export function DetailDrawer({
   const activeThreads = segs
     ? segs.filter((sg) => sg.written < sg.end - sg.start).length || segs.length
     : 0;
-  const etaSecs =
-    active && task.kind !== "hls" && total != null && live?.bps && live.bps > 0
-      ? Math.max(0, (total - (downloaded || 0)) / live.bps)
-      : null;
-  const fmtEta = (sec: number) => {
-    const mins = Math.max(1, Math.ceil(sec / 60));
-    if (sec < 60) return `${Math.max(1, Math.ceil(sec))} ${t("secondsShort")}`;
-    if (mins < 60) return `${mins} ${t("minutesShort")}`;
-    return `${Math.floor(mins / 60)} ${t("hoursShort")} ${mins % 60} ${t("minutesShort")}`;
-  };
+  const etaSecs = estimateRemainingSecs(task, live);
+  const etaClock = etaSecs != null ? fmtFinishClock(etaSecs) : null;
   const errCode = errorCodeOf(task.error);
 
   const doRename = async () => {
@@ -130,6 +123,25 @@ export function DetailDrawer({
     try {
       await api.startDownload(task.id);
       store.refresh();
+    } catch (e) {
+      setErrLine(String(e));
+    }
+  };
+
+  const pause = async () => {
+    try {
+      onChanged(await api.pauseTask(task.id));
+      await store.refresh();
+    } catch (e) {
+      setErrLine(String(e));
+    }
+  };
+
+  const moveToQueue = async () => {
+    try {
+      onChanged(await api.moveToQueue(task.id));
+      await store.refresh();
+      showToast(t("movedToQueue"), "info");
     } catch (e) {
       setErrLine(String(e));
     }
@@ -224,7 +236,9 @@ export function DetailDrawer({
               <span>
                 {total ? `${pct}% · ${fmtBytes(downloaded || 0)} / ${fmtBytes(total)}` : fmtBytes(downloaded || 0)}
                 {active && activeThreads > 1 ? ` · ${t("threadsN").replace("{n}", String(activeThreads))}` : ""}
-                {etaSecs != null ? ` · ${fmtEta(etaSecs)}` : ""}
+                {etaSecs != null && etaClock
+                  ? ` · ${fmtRemaining(etaSecs)} · ${t("etaFinishAt").replace("{time}", etaClock)}`
+                  : ""}
               </span>
               {active && live && live.bps > 0 && <strong>{fmtSpeed(live.bps)}</strong>}
             </div>
@@ -254,11 +268,37 @@ export function DetailDrawer({
                     const len = Math.max(1, sg.end - sg.start);
                     const isDone = sg.written >= len;
                     const segPct = isDone ? 100 : Math.min(99, Math.floor((sg.written / len) * 100));
+                    const fillPct = isDone
+                      ? 100
+                      : sg.written > 0
+                        ? Math.max(1.5, Math.min(99.5, (sg.written / len) * 100))
+                        : 0;
                     const spd = live?.segSpeeds?.[i] ?? 0;
                     return (
                       <div key={sg.start} className="seg-row">
                         <span className="seg-idx">#{i + 1}</span>
                         <span className="seg-range">{fmtBytes(sg.written)} / {fmtBytes(len)}</span>
+                        <div
+                          className="seg-bar"
+                          role="progressbar"
+                          aria-label={`#${i + 1}`}
+                          aria-valuenow={segPct}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                        >
+                          <div
+                            className={`seg-bar-fill${
+                              isDone
+                                ? " done"
+                                : task.status === "paused"
+                                  ? " paused"
+                                  : task.status === "failed"
+                                    ? " failed"
+                                    : ""
+                            }`}
+                            style={{ width: `${fillPct}%` }}
+                          />
+                        </div>
                         <span className="seg-pct">{isDone ? t("segDone") : `${segPct}%`}</span>
                         <span className="seg-spd">{isDone ? "✓" : spd > 0 ? fmtSpeed(spd) : "—"}</span>
                       </div>
@@ -282,6 +322,14 @@ export function DetailDrawer({
                 <code>{t(`status_${task.status}` as never)}</code>
               </td>
             </tr>
+            {etaSecs != null && etaClock && (
+              <tr>
+                <td>{t("etaFinishField")}</td>
+                <td>
+                  {etaClock}（{t("etaRemainingBrief").replace("{dur}", fmtRemaining(etaSecs))}）
+                </td>
+              </tr>
+            )}
             {task.error != null && (
               <tr>
                 <td>{t("errorLabel")}</td>
@@ -528,13 +576,25 @@ export function DetailDrawer({
             </button>
           )}
           <div className="spacer" />
+          {!done && task.status !== "queued" && (
+            <button type="button" onClick={moveToQueue}>
+              {t("moveToQueue")}
+            </button>
+          )}
+          {task.status === "queued" && (
+            <button type="button" onClick={pause}>
+              {t("pause")}
+            </button>
+          )}
           {task.status === "failed" || task.status === "canceled" ? (
             <button className="primary" onClick={retry}>
               {t("retry")}
             </button>
-          ) : task.status === "queued" ||
-            task.status === "paused" ||
-            task.status === "waiting_retry" ? (
+          ) : task.status === "queued" ? (
+            <button className="primary" onClick={start}>
+              {t("startNow")}
+            </button>
+          ) : task.status === "paused" || task.status === "waiting_retry" ? (
             <button className="primary" onClick={start}>
               {t("start")}
             </button>
