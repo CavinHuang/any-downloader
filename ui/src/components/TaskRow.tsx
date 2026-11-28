@@ -347,12 +347,32 @@ function ActionBtn({
   );
 }
 
-function displayName(url: string): string {
+export function displayTaskName(url: string): string {
   try {
     const u = new URL(url);
-    const seg = u.pathname.split("/").filter(Boolean).pop();
+    const host = u.hostname.toLowerCase();
+    const segs = u.pathname.split("/").filter(Boolean);
+    if (
+      host === "youtu.be" ||
+      host === "youtube.com" ||
+      host.endsWith(".youtube.com") ||
+      host === "youtube-nocookie.com" ||
+      host.endsWith(".youtube-nocookie.com")
+    ) {
+      const id =
+        u.searchParams.get("v") ||
+        (host === "youtu.be" ? segs[0] : ["shorts", "live", "embed", "v"].includes(segs[0]) ? segs[1] : null);
+      if (id && /^[A-Za-z0-9_-]{11}$/.test(id)) {
+        return `YouTube (${id})`;
+      }
+    }
+    const seg = segs.pop();
     return decodeURIComponent(seg || u.hostname);
   } catch {
     return url;
   }
+}
+
+function displayName(url: string): string {
+  return displayTaskName(url);
 }

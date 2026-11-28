@@ -486,6 +486,7 @@ async function ingestManifestText(tabId, url, text, explicitHeaders, explicitTit
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
+    if (ADL.isUnplayableMseChunkUrl(details.url)) return;
     if (!MEDIA_RE.test(details.url) && !IMAGE_RE.test(details.url)) return;
     const type = guessType(details.url);
     if (!groupAllowed(type)) return;
@@ -535,6 +536,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 chrome.webRequest.onCompleted.addListener(
   async (details) => {
     if (details.tabId < 0) return;
+    if (ADL.isUnplayableMseChunkUrl(details.url)) return;
     if (details.statusCode != null && (details.statusCode < 200 || details.statusCode >= 300)) {
       const m = byTab.get(details.tabId);
       if (m && m.delete(details.url)) {
@@ -1231,7 +1233,8 @@ async function videoDownload(tabId, msg) {
     );
     resp = norm(resp, plan.via);
   } else if (plan.via === "ytdlp") {
-    resp = await pushTask(plan.url, undefined, undefined, undefined, undefined, startNow);
+    const cleanTitle = ADL.cleanPlatformTitle(pageTitle) || undefined;
+    resp = await pushTask(plan.url, undefined, cleanTitle, undefined, undefined, startNow);
     resp = norm(resp, "ytdlp");
   }
   if (!resp) return { ok: false, error: "no_source" };
@@ -1436,6 +1439,29 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+function isYoutubeVideoPageUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    const segs = u.pathname.split("/").filter(Boolean);
+    if (host === "youtu.be") {
+      return Boolean(segs[0] && /^[A-Za-z0-9_-]{11}$/.test(segs[0]));
+    }
+    if (
+      host === "youtube.com" ||
+      host.endsWith(".youtube.com") ||
+      host === "youtube-nocookie.com" ||
+      host.endsWith(".youtube-nocookie.com")
+    ) {
+      return (
+        /^[A-Za-z0-9_-]{11}$/.test(u.searchParams.get("v") || "") ||
+        (["shorts", "live", "embed", "v"].includes(segs[0]) && /^[A-Za-z0-9_-]{11}$/.test(segs[1] || ""))
+      );
+    }
+  } catch (_) {}
+  return false;
+}
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "adl-site-page" || info.menuItemId === "adl-site-page-queue") {
     if (!tab || tab.id < 0) return;
@@ -1452,9 +1478,34 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (rec && rec.headers && Object.keys(rec.headers).length) headers = rec.headers;
   }
   if (!headers) headers = recentHeaders.get(url)?.headers || null;
-  const resp = await pushTask(url, headers, undefined, undefined, undefined, info.menuItemId !== "adl-queue");
+  let filenameHint;
+  if (tab && tab.title && url === tab.url && isYoutubeVideoPageUrl(url)) {
+    filenameHint = ADL.cleanPlatformTitle(tab.title) || undefined;
+  }
+  const resp = await pushTask(url, headers, filenameHint, undefined, undefined, info.menuItemId !== "adl-queue");
   flashBadge(tab?.id, resp.ok || (resp.error && resp.error.code === "task_exists"));
 });
+
+async function withYoutubePageItem(tabId, items) {
+  const meta = await getTabMeta(tabId).catch(() => null);
+  const out = [...items];
+  if (meta && meta.url && isYoutubeVideoPageUrl(meta.url) && !out.some((x) => x.url === meta.url)) {
+    const title = ADL.cleanPlatformTitle(meta.title) || "YouTube Video";
+    out.unshift({
+      url: meta.url,
+      tabId,
+      tabUrl: meta.url,
+      pageTitle: meta.title || title,
+      filename: title,
+      type: "video",
+      mime: "video/mp4",
+      bytes: null,
+      headers: null,
+      at: Date.now(),
+    });
+  }
+  return out;
+}
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "ping") {
@@ -1466,8 +1517,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.type === "list") {
     const items = visibleTabItems(msg.tabId);
-    sendResponse({ items });
-    return;
+    withYoutubePageItem(msg.tabId, items)
+      .then((out) => sendResponse({ items: out }))
+      .catch(() => sendResponse({ items }));
+    return true;
   }
   if (msg.type === "manifest-sniff") {
     const tabId = _sender.tab && _sender.tab.id;
@@ -1581,7 +1634,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const map = tabMap(tabId);
         let added = 0;
         const addRec = (u, type) => {
-          if (map.has(u)) return;
+          if (ADL.isUnplayableMseChunkUrl(u) || map.has(u)) return;
           map.set(u, {
             url: u,
             tabId,
@@ -1609,11 +1662,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         updateBadge(tabId);
         // 立即落盘并随响应返回列表：popup 不再二次读 storage（防 500ms 防抖竞态）
         await flushSniff();
+        const outItems = await withYoutubePageItem(tabId, [...map.values()]);
         sendResponse({
           ok: true,
           added,
-          total: map.size,
-          items: [...map.values()],
+          total: outItems.length,
+          items: outItems,
           blobVideos: result.blobVideos,
         });
       } catch (e) {

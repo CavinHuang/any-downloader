@@ -16,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 /// 进度行模板前缀（--progress-template 自定义，避免与普通日志混淆）。
 const PROGRESS_PREFIX: &str = "adl|";
+/// 标题打印前缀（--print before_dl:adl_title|%(title)s，下载前实时回填真实标题）。
+const TITLE_PREFIX: &str = "adl_title|";
 
 /// 进度模板字段。total_bytes 与 total_bytes_estimate 必须都带上：yt-dlp 二者
 /// 互斥（Content-Length 已知 → 只有 total_bytes；未知（HLS/SABR）→ 只有
@@ -107,6 +109,8 @@ pub enum YtdlpEvent {
         total: Option<u64>,
         bps: u64,
     },
+    /// 下载前捕获到的真实视频标题（来自 --print before_dl:adl_title|%(title)s）。
+    Title(String),
     /// 原始日志行（stderr 与非进度 stdout）。
     Log(String),
 }
@@ -128,15 +132,40 @@ impl std::fmt::Display for YtdlpError {
     }
 }
 
-/// 快速可用性探测：`yt-dlp --version` 成功退出即视为可用。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hide_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// 快速可用性探测：`yt-dlp --version` 成功退出即视为可用（支持附带 extra PATH）。
 /// 挂 10s 超时——配置成 GUI 程序/坏路径导致 spawn 挂死时任务不能永远停在 Probing。
+pub async fn available_in_path(exe: &str, path_prepend: &[PathBuf]) -> bool {
+    let mut cmd = Command::new(exe);
+    hide_window(&mut cmd);
+    cmd.arg("--version");
+    if !path_prepend.is_empty() {
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = path_prepend
+            .iter()
+            .cloned()
+            .chain(std::env::split_paths(&current));
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            cmd.env("PATH", joined);
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(10), cmd.output())
+        .await
+        .map(|res| matches!(res, Ok(out) if out.status.success()))
+        .unwrap_or(false)
+}
+
 pub async fn available(exe: &str) -> bool {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        Command::new(exe).arg("--version").output().await
-    })
-    .await
-    .map(|res| matches!(res, Ok(out) if out.status.success()))
-    .unwrap_or(false)
+    available_in_path(exe, &[]).await
 }
 
 /// yt-dlp 链接探测输入规格（单视频格式列表 / 播放列表展开）。
@@ -195,6 +224,7 @@ pub async fn inspect(spec: InspectSpec) -> Result<InspectResult, YtdlpError> {
     args.extend(spec.extra_args.iter().cloned());
 
     let mut cmd = Command::new(&spec.exe);
+    hide_window(&mut cmd);
     apply_proxy_policy(&mut args, &mut cmd, &spec.proxy);
     cmd.args(&args)
         .stdout(std::process::Stdio::piped())
@@ -423,13 +453,21 @@ pub async fn run(
     let mut args: Vec<String> = vec![
         spec.url.clone(),
         "-o".into(),
-        // -o 的值是模板：字面 % 会被当成 %(field)s 引出，必须转义成 %%
-        escape_percent(&spec.out_path.display().to_string()),
+        // -o 的值是模板：字面 % 会被当成 %(field)s 引出，必须转义成 %%；追加 .%(ext)s 保证真实容器扩展名
+        format!(
+            "{}.%(ext)s",
+            escape_percent(&spec.out_path.display().to_string())
+        ),
         "--newline".into(),
         "--no-part".into(),
         // 不写视频原始 mtime：produced() 依赖文件 mtime 区分本次产出与残留
         "--no-mtime".into(),
         "--no-playlist".into(),
+        "--no-simulate".into(),
+        "--no-quiet".into(),
+        "--progress".into(),
+        "--print".into(),
+        format!("before_dl:{TITLE_PREFIX}%(title)s"),
         "--progress-template".into(),
         format!("{PROGRESS_PREFIX}{PROGRESS_FIELDS}"),
     ];
@@ -440,6 +478,7 @@ pub async fn run(
     args.extend(spec.extra_args.iter().cloned());
 
     let mut cmd = Command::new(&spec.exe);
+    hide_window(&mut cmd);
     apply_proxy_policy(&mut args, &mut cmd, &spec.proxy);
     cmd.args(&args)
         .stdout(std::process::Stdio::piped())
@@ -530,9 +569,16 @@ pub async fn run(
     })
 }
 
-/// 一行日志的去重处理：adl| 进度行（yt-dlp 理论上输出到 stdout，stderr 侧也
-/// 兼容解析）→ Progress；普通日志 → 尾部摘要缓冲 + Log 事件。
+/// 一行日志的去重处理：adl_title|... → Title；adl|... 进度行 → Progress；
+/// 普通日志 → 尾部摘要缓冲 + Log 事件。
 fn handle_line(l: &str, tail: &mut VecDeque<String>, on_event: &mut impl FnMut(YtdlpEvent)) {
+    if let Some(raw_title) = l.trim().strip_prefix(TITLE_PREFIX) {
+        let t = raw_title.trim();
+        if !t.is_empty() && !t.eq_ignore_ascii_case("NA") && !t.eq_ignore_ascii_case("None") {
+            on_event(YtdlpEvent::Title(t.to_string()));
+        }
+        return;
+    }
     if let Some(p) = parse_progress(l) {
         on_event(p);
     } else if !l.trim().is_empty() {
@@ -990,5 +1036,23 @@ mod tests {
             &ProxyPolicy::System(Some("http://127.0.0.1:7890".into())),
         );
         assert_eq!(args3, vec!["--proxy", "http://127.0.0.1:7890"]);
+    }
+
+    #[test]
+    fn handle_line_extracts_title_without_polluting_tail() {
+        let mut tail = VecDeque::new();
+        let mut events = Vec::new();
+        handle_line("adl_title|Me at the zoo", &mut tail, &mut |ev| {
+            events.push(ev);
+        });
+        handle_line("adl_title|NA", &mut tail, &mut |ev| {
+            events.push(ev);
+        });
+        assert!(tail.is_empty());
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            YtdlpEvent::Title(t) => assert_eq!(t, "Me at the zoo"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

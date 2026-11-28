@@ -906,7 +906,10 @@ async fn merge(
 async fn remux_with_ffmpeg(concat: &Path, out: &Path, hint: Option<&str>) -> Result<(), String> {
     let ffmpeg = find_ffmpeg_with(hint).ok_or_else(|| "ffmpeg not found".to_string())?;
     let _ = std::fs::remove_file(out); // 残留会使 ffmpeg -y 之外的场景失败
-    let output = tokio::process::Command::new(ffmpeg)
+    let mut cmd = tokio::process::Command::new(ffmpeg);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let output = cmd
         .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(concat)
         .args(["-c", "copy", "-movflags", "+faststart"])

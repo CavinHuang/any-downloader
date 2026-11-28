@@ -189,5 +189,23 @@ console.log("pickVideoSource:");
   eq(r.url, "https://cdn.example.com/v/current.mp4", "10 direct 先于 sniff");
 }
 
+// 11. YouTube 页面忽略 googlevideo.com/videoplayback MSE 分片，回退到 yt-dlp 页面托管 + 标题清洗
+{
+  const r = ADL.pickVideoSource({
+    srcUrl: "blob:https://www.youtube.com/abcd-1234",
+    pageUrl: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    recs: [
+      { url: "https://rr3---sn-abc.googlevideo.com/videoplayback?itag=248&range=0-1000", type: "video", bytes: 5000000, at: 5000 },
+    ],
+    adapterResources: [],
+    duration: 19,
+    ytdlpHosts: HOSTS,
+  });
+  eq(r.via, "ytdlp", "11a YouTube 忽略 videoplayback 分片并走 ytdlp");
+  eq(r.url, "https://www.youtube.com/watch?v=jNQXAC9IVRw", "11b YouTube 回传页面地址");
+  eq(ADL.cleanPlatformTitle("(2) Me at the zoo - YouTube"), "Me at the zoo", "11c 清洗 YouTube 页面标题");
+  eq(ADL.cleanPlatformTitle("YouTube"), "", "11d 忽略泛化站点标题 YouTube");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

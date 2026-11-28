@@ -23,6 +23,13 @@ pub struct PageSniffItem {
 }
 
 pub async fn sniff_page(client: &reqwest::Client, page_url: &str) -> Res<Vec<PageSniffItem>> {
+    Ok(sniff_page_with_title(client, page_url).await?.1)
+}
+
+pub async fn sniff_page_with_title(
+    client: &reqwest::Client,
+    page_url: &str,
+) -> Res<(Option<String>, Vec<PageSniffItem>)> {
     let parsed = url::Url::parse(page_url)
         .map_err(|e| DownloadError::new(ErrorKind::InvalidUrl, format!("invalid url: {e}")))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -66,14 +73,17 @@ pub async fn sniff_page(client: &reqwest::Client, page_url: &str) -> Res<Vec<Pag
     if !interstitial::is_html_mime(mime.as_deref()) {
         if let Some(kind) = classify_kind(&final_url, mime.as_deref()) {
             let filename = cd_name.unwrap_or_else(|| filename_of(&final_url, mime.as_deref()));
-            return Ok(vec![PageSniffItem {
-                url: final_url,
-                filename,
-                kind: kind.to_string(),
-                mime,
-                bytes: cl,
-                source: "direct".to_string(),
-            }]);
+            return Ok((
+                Some(filename.clone()),
+                vec![PageSniffItem {
+                    url: final_url,
+                    filename,
+                    kind: kind.to_string(),
+                    mime,
+                    bytes: cl,
+                    source: "direct".to_string(),
+                }],
+            ));
         }
     }
 
@@ -86,7 +96,65 @@ pub async fn sniff_page(client: &reqwest::Client, page_url: &str) -> Res<Vec<Pag
         }
     }
     let html = interstitial::decode_body(&raw, ce.as_deref());
-    Ok(extract_page_items(&final_url, &html))
+    Ok((
+        extract_page_title(&html),
+        extract_page_items(&final_url, &html),
+    ))
+}
+
+pub fn extract_page_title(html: &str) -> Option<String> {
+    let mut raw_title = None;
+    for tag in iter_tags(html, "meta") {
+        let prop = extract_attr(tag, "property")
+            .or_else(|| extract_attr(tag, "name"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if prop == "og:title" || prop == "twitter:title" {
+            if let Some(c) = extract_attr(tag, "content") {
+                let decoded = interstitial::decode_html_entities(c.trim());
+                let trimmed = decoded.trim();
+                if !trimmed.is_empty() {
+                    raw_title = Some(trimmed.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    if raw_title.is_none() {
+        let lower = html.to_ascii_lowercase();
+        if let Some(start) = lower.find("<title") {
+            if let Some(gt) = html[start..].find('>') {
+                let body_start = start + gt + 1;
+                if let Some(end) = lower[body_start..].find("</title>") {
+                    let decoded = interstitial::decode_html_entities(
+                        html[body_start..body_start + end].trim(),
+                    );
+                    let trimmed = decoded.trim();
+                    if !trimmed.is_empty() {
+                        raw_title = Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut title = raw_title?;
+    for suffix in [
+        " - YouTube",
+        " | YouTube",
+        "_哔哩哔哩_bilibili",
+        " - 哔哩哔哩",
+        " - 抖音",
+    ] {
+        if let Some(stripped) = title.strip_suffix(suffix) {
+            title = stripped.trim().to_string();
+        }
+    }
+    let low = title.to_ascii_lowercase();
+    if title.is_empty() || low == "youtube" || low == "watch" {
+        return None;
+    }
+    let clean = dl_filename::sanitize(&title);
+    (!clean.is_empty()).then_some(clean)
 }
 
 pub fn extract_page_items(base_url: &str, html: &str) -> Vec<PageSniffItem> {
@@ -480,5 +548,26 @@ mod tests {
             .find(|i| i.source == "json-ld")
             .expect("json-ld item");
         assert_eq!(jld.kind, "video");
+    }
+
+    #[test]
+    fn extract_page_title_strips_youtube_suffix_and_generic_titles() {
+        let html_og = r#"<html><head>
+            <meta property="og:title" content="Me at the zoo">
+            <title>Me at the zoo - YouTube</title>
+        </head></html>"#;
+        assert_eq!(
+            extract_page_title(html_og).as_deref(),
+            Some("Me at the zoo")
+        );
+
+        let html_tag = "<html><head><title>Rick Astley - Never Gonna Give You Up - YouTube</title></head></html>";
+        assert_eq!(
+            extract_page_title(html_tag).as_deref(),
+            Some("Rick Astley - Never Gonna Give You Up")
+        );
+
+        let html_generic = "<html><head><title>YouTube</title></head></html>";
+        assert_eq!(extract_page_title(html_generic), None);
     }
 }

@@ -255,12 +255,43 @@ pub(crate) fn is_valid_format_selector(s: &str) -> bool {
         })
 }
 
+/// 依据平台规则构造保底显示名称（例如 youtube_dQw4w9WgXcQ）。
+pub fn fallback_display_name(url: &str) -> Option<String> {
+    platform_id(url).map(|(plat, id)| format!("{plat}_{id}"))
+}
+
 pub(crate) struct YtdlpEnv {
     pub exe: String,
     pub ffmpeg_dir: Option<std::path::PathBuf>,
     pub path_prepend: Vec<std::path::PathBuf>,
     pub extra_args: Vec<String>,
     pub proxy: dl_ytdlp::ProxyPolicy,
+    pub has_ffmpeg: bool,
+}
+
+fn push_unique_dir(out: &mut Vec<std::path::PathBuf>, dir: std::path::PathBuf) {
+    if dir.is_dir() && !out.iter().any(|p| p == &dir) {
+        out.push(dir);
+    }
+}
+
+fn detect_ffmpeg_available(
+    ffmpeg_dir: Option<&std::path::PathBuf>,
+    path_prepend: &[std::path::PathBuf],
+) -> bool {
+    let bin = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    if ffmpeg_dir.is_some_and(|d| d.join(bin).is_file()) {
+        return true;
+    }
+    if path_prepend.iter().any(|d| d.join(bin).is_file()) {
+        return true;
+    }
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&current).any(|d| d.join(bin).is_file())
 }
 
 fn to_ytdlp_proxy(proxy: Option<&str>) -> dl_ytdlp::ProxyPolicy {
@@ -280,7 +311,8 @@ pub(crate) async fn resolve_ytdlp_env(
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|x| x.to_path_buf()));
-    let managed = crate::managed_bin_dir().join(crate::managed_ytdlp_name());
+    let managed_dir = crate::managed_bin_dir();
+    let managed = managed_dir.join(crate::managed_ytdlp_name());
     let bundled = exe_dir
         .as_ref()
         .map(|d| {
@@ -303,7 +335,55 @@ pub(crate) async fn resolve_ytdlp_env(
             None => ("yt-dlp".into(), false),
         },
     };
-    if !dl_ytdlp::available(&exe).await {
+    let ffmpeg_dir = engine
+        .get_setting("ffmpeg_path")
+        .await?
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .and_then(|p| {
+            if p.is_dir() {
+                Some(p)
+            } else {
+                p.parent().map(|x| x.to_path_buf())
+            }
+        });
+
+    let mut path_prepend = Vec::new();
+    if let Some(d) = &exe_dir {
+        let has_sidecar = if cfg!(windows) {
+            d.join("yt-dlp.exe").exists()
+                || d.join("deno.exe").exists()
+                || d.join("ffmpeg.exe").exists()
+        } else {
+            d.join("yt-dlp").exists() || d.join("deno").exists() || d.join("ffmpeg").exists()
+        };
+        if has_sidecar {
+            push_unique_dir(&mut path_prepend, d.clone());
+        }
+    }
+    if let Some(ff) = &ffmpeg_dir {
+        push_unique_dir(&mut path_prepend, ff.clone());
+    }
+    push_unique_dir(&mut path_prepend, managed_dir);
+
+    #[cfg(unix)]
+    {
+        for std_dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            push_unique_dir(&mut path_prepend, std::path::PathBuf::from(std_dir));
+        }
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            push_unique_dir(&mut path_prepend, home.join(".deno/bin"));
+            push_unique_dir(&mut path_prepend, home.join(".local/bin"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from) {
+            push_unique_dir(&mut path_prepend, profile.join(".deno\\bin"));
+        }
+    }
+
+    if !dl_ytdlp::available_in_path(&exe, &path_prepend).await {
         let hint = if via_setting {
             format!("yt-dlp 不可用（{exe}）：请检查设置中的路径")
         } else {
@@ -311,27 +391,8 @@ pub(crate) async fn resolve_ytdlp_env(
         };
         return Err(dl_error::DownloadError::new(ErrorKind::Internal, hint));
     }
-    let ffmpeg_dir = engine
-        .get_setting("ffmpeg_path")
-        .await?
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .and_then(|p| p.parent().map(|x| x.to_path_buf()));
 
-    let mut path_prepend = Vec::new();
-    if let Some(d) = &exe_dir {
-        let has_sidecar = if cfg!(windows) {
-            d.join("yt-dlp.exe").exists() || d.join("deno.exe").exists()
-        } else {
-            d.join("yt-dlp").exists() || d.join("deno").exists()
-        };
-        if has_sidecar {
-            path_prepend.push(d.clone());
-        }
-    }
-    if let Some(ff) = &ffmpeg_dir {
-        path_prepend.push(ff.clone());
-    }
+    let has_ffmpeg = detect_ffmpeg_available(ffmpeg_dir.as_ref(), &path_prepend);
 
     let mut extra_args = Vec::new();
     if let Ok(Some(ck)) = engine.get_setting("yt_dlp_cookies").await {
@@ -347,6 +408,7 @@ pub(crate) async fn resolve_ytdlp_env(
         path_prepend,
         extra_args,
         proxy: to_ytdlp_proxy(proxy),
+        has_ffmpeg,
     })
 }
 
@@ -418,6 +480,9 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     let raw_name = base_name(task.filename.as_deref(), &task.url, dl_model::now_ms());
     let stem = out_stem(&raw_name);
     let out_path = std::path::Path::new(&dir).join(&stem);
+    let had_explicit_name = task.filename.as_deref().map(str::trim).is_some_and(|s| {
+        !s.is_empty() && !s.eq_ignore_ascii_case("video") && !s.eq_ignore_ascii_case("watch")
+    });
 
     let env = resolve_ytdlp_env(&ctx.engine, ctx.opts.proxy.as_deref())
         .await
@@ -439,15 +504,23 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     extra_args.push(frag_threads.to_string());
 
     // 画质/格式选择：任务指定 format > 设置项 yt_dlp_quality > yt-dlp 默认最佳
-    let preset_fmt = match ctx.engine.get_setting("yt_dlp_quality").await {
-        Ok(Some(v)) => match v.as_str() {
-            "2160" => Some("bv*[height<=2160]+ba/b[height<=2160]/b"),
-            "1080" => Some("bv*[height<=1080]+ba/b[height<=1080]/b"),
-            "720" => Some("bv*[height<=720]+ba/b[height<=720]/b"),
-            "audio" => Some("bestaudio[ext=m4a]/bestaudio/best"),
-            _ => None,
-        },
-        _ => None,
+    // 若系统/环境无 ffmpeg，则退避为单流 muxed 格式（b[height<=H]/b），避免产出一半无法混流的分离音视频文件
+    let quality_setting = ctx
+        .engine
+        .get_setting("yt_dlp_quality")
+        .await
+        .ok()
+        .flatten();
+    let preset_fmt = match (quality_setting.as_deref(), env.has_ffmpeg) {
+        (Some("2160"), true) => Some("bv*[height<=2160]+ba/b[height<=2160]/b"),
+        (Some("2160"), false) => Some("b[height<=2160]/b"),
+        (Some("1080"), true) => Some("bv*[height<=1080]+ba/b[height<=1080]/b"),
+        (Some("1080"), false) => Some("b[height<=1080]/b"),
+        (Some("720"), true) => Some("bv*[height<=720]+ba/b[height<=720]/b"),
+        (Some("720"), false) => Some("b[height<=720]/b"),
+        (Some("audio"), _) => Some("bestaudio[ext=m4a]/bestaudio/best"),
+        (_, false) => Some("b"),
+        (_, true) => None,
     };
     if let Some(fmt) = task
         .format
@@ -460,27 +533,25 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     }
 
     // —— 采集增强选项（设置驱动，缺省关；docs/MEDIA-ADAPTERS.md P0）：
-    //    字幕（全语言转 srt）、缩略图+元数据嵌入（需 ffmpeg，安装器已内置）。
+    //    字幕（全语言转 srt）、缩略图+元数据嵌入（需 ffmpeg）。
     let subs = match ctx.engine.get_setting("yt_dlp_subs").await {
         Ok(Some(v)) => v == "on",
         _ => false,
     };
     if subs {
-        for a in [
-            "--write-subs",
-            "--sub-langs",
-            "all",
-            "--convert-subs",
-            "srt",
-        ] {
-            extra_args.push(a.into());
+        extra_args.push("--write-subs".into());
+        extra_args.push("--sub-langs".into());
+        extra_args.push("all".into());
+        if env.has_ffmpeg {
+            extra_args.push("--convert-subs".into());
+            extra_args.push("srt".into());
         }
     }
     let meta = match ctx.engine.get_setting("yt_dlp_meta").await {
         Ok(Some(v)) => v == "on",
         _ => false,
     };
-    if meta {
+    if meta && env.has_ffmpeg {
         for a in ["--embed-thumbnail", "--embed-metadata"] {
             extra_args.push(a.into());
         }
@@ -497,6 +568,9 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
     };
 
     let ectx = ctx.clone();
+    let discovered_title: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let title_sink = Arc::clone(&discovered_title);
     let result = dl_ytdlp::run(spec, ctx.cancel.clone(), move |ev| match ev {
         dl_ytdlp::YtdlpEvent::Progress {
             downloaded,
@@ -510,6 +584,19 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
                 bps,
                 segments: None,
             });
+        }
+        dl_ytdlp::YtdlpEvent::Title(raw_title) => {
+            if !had_explicit_name {
+                let clean = dl_filename::sanitize(raw_title.trim());
+                if !clean.is_empty() {
+                    *title_sink.lock().unwrap() = Some(clean.clone());
+                    let eng = ectx.engine.clone();
+                    let tid = ectx.task_id.clone();
+                    tokio::spawn(async move {
+                        let _ = eng.update_filename_hint(&tid, &clean).await;
+                    });
+                }
+            }
         }
         dl_ytdlp::YtdlpEvent::Log(l) => {
             tracing::info!(target: "ytdlp", "{l}");
@@ -536,14 +623,21 @@ pub(crate) async fn run_ytdlp(ctx: Arc<Ctx>, task: &dl_model::Task) -> Result<()
 
     // 产出扩展名回填最终名：yt-dlp 决定容器格式（mp4/mkv/webm…），任务名
     // 只提供 stem，保证「显示名 = 落盘名 = 真实格式」。
+    let final_stem = discovered_title
+        .lock()
+        .unwrap()
+        .as_deref()
+        .map(out_stem)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| stem.clone());
     let ext = produced
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default();
     let final_name = if ext.is_empty() {
-        stem.clone()
+        final_stem
     } else {
-        format!("{stem}.{ext}")
+        format!("{final_stem}.{ext}")
     };
 
     // 产出 → .dlpart → 复用 finalize（冲突处理/改名/journal 清理一致）

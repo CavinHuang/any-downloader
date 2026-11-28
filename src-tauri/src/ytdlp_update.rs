@@ -96,11 +96,10 @@ async fn local_version(engine: &Engine) -> Option<String> {
 }
 
 async fn run_version(exe: &str) -> Option<String> {
-    let out = tokio::process::Command::new(exe)
-        .arg("--version")
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = tokio::process::Command::new(exe);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let out = cmd.arg("--version").output().await.ok()?;
     if !out.status.success() {
         return None;
     }

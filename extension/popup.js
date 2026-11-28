@@ -95,7 +95,24 @@ function fmtSpeed(bps) {
 
 function displayNameOfUrl(url) {
   try {
-    const seg = new URL(url).pathname.split("/").filter(Boolean).pop();
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    const segs = u.pathname.split("/").filter(Boolean);
+    if (
+      host === "youtu.be" ||
+      host === "youtube.com" ||
+      host.endsWith(".youtube.com") ||
+      host === "youtube-nocookie.com" ||
+      host.endsWith(".youtube-nocookie.com")
+    ) {
+      const id =
+        u.searchParams.get("v") ||
+        (host === "youtu.be" ? segs[0] : ["shorts", "live", "embed", "v"].includes(segs[0]) ? segs[1] : null);
+      if (id && /^[A-Za-z0-9_-]{11}$/.test(id)) {
+        return `YouTube (${id})`;
+      }
+    }
+    const seg = segs.pop();
     return decodeURIComponent(seg || url);
   } catch {
     return url;

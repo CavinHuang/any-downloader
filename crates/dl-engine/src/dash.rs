@@ -1080,7 +1080,10 @@ async fn mux_video_audio(
         )
     })?;
     let _ = std::fs::remove_file(out);
-    let output = tokio::process::Command::new(ffmpeg)
+    let mut cmd = tokio::process::Command::new(ffmpeg);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let output = cmd
         .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(video)
         .arg("-i")

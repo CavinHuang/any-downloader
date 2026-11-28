@@ -368,7 +368,7 @@ pub async fn sniff_page_url(
 ) -> Result<Vec<dl_net::page_sniff::PageSniffItem>, String> {
     let proxy = state.engine.effective_proxy().await.ok().flatten();
     let client = dl_net::build_client(proxy.as_deref()).map_err(str_err)?;
-    let mut items = dl_net::page_sniff::sniff_page(&client, &url)
+    let (page_title, mut items) = dl_net::page_sniff::sniff_page_with_title(&client, &url)
         .await
         .unwrap_or_default();
 
@@ -376,12 +376,34 @@ pub async fn sniff_page_url(
         .ok()
         .and_then(|u| u.host_str().map(dl_engine::is_ytdlp_host))
         .unwrap_or(false);
+    if is_ytdlp {
+        items.retain(|it| {
+            let Ok(u) = reqwest::Url::parse(&it.url) else {
+                return false;
+            };
+            let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+            let path = u.path().to_ascii_lowercase();
+            if host == "googlevideo.com" || host.ends_with(".googlevideo.com") {
+                return false;
+            }
+            if (host.contains("youtube.com") || host.contains("youtube-nocookie.com"))
+                && path.starts_with("/embed/")
+            {
+                return false;
+            }
+            true
+        });
+    }
     if is_ytdlp && !items.iter().any(|it| it.url == url) {
+        let display = page_title
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| dl_engine::ytdlp_task::fallback_display_name(&url))
+            .unwrap_or_else(|| "video".to_string());
         items.insert(
             0,
             dl_net::page_sniff::PageSniffItem {
                 url: url.clone(),
-                filename: "video".to_string(),
+                filename: display,
                 kind: "ytdlp".to_string(),
                 mime: None,
                 bytes: None,
@@ -690,8 +712,10 @@ pub async fn run_after_done(
         "shutdown" => {
             #[cfg(target_os = "windows")]
             {
+                use std::os::windows::process::CommandExt;
                 let _ = std::process::Command::new("shutdown")
                     .args(["/s", "/t", "60"])
+                    .creation_flags(0x0800_0000)
                     .spawn();
             }
             #[cfg(target_os = "macos")]
@@ -710,8 +734,10 @@ pub async fn run_after_done(
         "sleep" => {
             #[cfg(target_os = "windows")]
             {
+                use std::os::windows::process::CommandExt;
                 let _ = std::process::Command::new("rundll32.exe")
                     .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                    .creation_flags(0x0800_0000)
                     .spawn();
             }
             #[cfg(target_os = "macos")]

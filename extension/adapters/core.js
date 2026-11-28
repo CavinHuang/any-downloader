@@ -387,6 +387,36 @@ ADL.xSyndicationResources = (d, statusId) => {
 //            建任务时按域名自动转 TaskKind::Ytdlp）
 // 返回 {via:"adapter", urls:[...]} / {via:"direct"|"sniff"|"ytdlp", url} /
 // {via:"none"}。
+ADL.cleanPlatformTitle = (raw) => {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+  s = s.replace(/^\(\d+\)\s+/, "");
+  for (const suffix of [
+    " - YouTube",
+    " | YouTube",
+    "_哔哩哔哩_bilibili",
+    " - 哔哩哔哩",
+    " / X",
+  ]) {
+    if (s.endsWith(suffix)) {
+      s = s.slice(0, -suffix.length).trim();
+    }
+  }
+  const low = s.toLowerCase();
+  if (!s || low === "youtube" || low === "watch") return "";
+  return ADL.cleanName(s, 100);
+};
+
+ADL.isUnplayableMseChunkUrl = (rawUrl) => {
+  try {
+    const u = new URL(rawUrl);
+    const h = u.hostname.toLowerCase();
+    return (h === "googlevideo.com" || h.endsWith(".googlevideo.com")) && u.pathname.includes("/videoplayback");
+  } catch (_) {
+    return false;
+  }
+};
+
 ADL.pickVideoSource = ({ srcUrl, pageUrl, recs, adapterResources, duration, ytdlpHosts }) => {
   const vids = (adapterResources || []).filter((r) => r && r.kind === "video" && r.url);
   if (vids.length) {
@@ -407,8 +437,10 @@ ADL.pickVideoSource = ({ srcUrl, pageUrl, recs, adapterResources, duration, ytdl
     });
     if (best) return { via: "adapter", urls: [best.url] };
   }
-  if (/^https?:/i.test(srcUrl || "")) return { via: "direct", url: srcUrl };
-  const rs = recs || [];
+  if (/^https?:/i.test(srcUrl || "") && !ADL.isUnplayableMseChunkUrl(srcUrl)) {
+    return { via: "direct", url: srcUrl };
+  }
+  const rs = (recs || []).filter((r) => r && r.url && !ADL.isUnplayableMseChunkUrl(r.url));
   const hls = rs
     .filter((r) => r && r.type === "hls" && r.url)
     .sort((a, b) => (b.at || 0) - (a.at || 0));

@@ -1434,6 +1434,26 @@ impl Engine {
         self.require(id).await
     }
 
+    /// 活动下载期间回填真实视频标题（由 yt-dlp 提取到标题后异步更新列表显示名称）。
+    pub(crate) async fn update_filename_hint(&self, id: &str, filename: &str) -> Res<()> {
+        let clean = dl_filename::sanitize(filename.trim());
+        if clean.is_empty() {
+            return Ok(());
+        }
+        let Some(cur) = self.db.get_task(id).await? else {
+            return Ok(());
+        };
+        if cur.filename.as_deref() == Some(clean.as_str()) {
+            return Ok(());
+        }
+        self.db.rename_task(id, &clean).await?;
+        self.emit(EngineEvent::StateChanged {
+            task_id: id.to_string(),
+            status: cur.status,
+        });
+        Ok(())
+    }
+
     /// 热更换下载链接（链接失效 403/404/410 时更换新直链并保留已下载断点文件继续续传）。
     pub async fn update_task_url(&self, id: &str, new_url: &str) -> Res<Task> {
         let task = self.require(id).await?;

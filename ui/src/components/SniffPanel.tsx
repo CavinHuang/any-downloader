@@ -88,7 +88,7 @@ export function SniffPanel({ onClose }: { onClose: () => void }) {
         chosen.map(async (it) => {
           const task = await api.addTask({
             url: it.url,
-            filename: it.kind === "ytdlp" ? undefined : it.filename || undefined,
+            filename: it.filename && it.filename !== "video" ? it.filename : undefined,
             headers: { referer: pageUrl.trim() },
           });
           if (singleImmediate) {

@@ -6,6 +6,7 @@ import { store } from "../store";
 import { showToast } from "../toast";
 import { useOverlay } from "../useOverlay";
 import { Icon, IconName } from "./Icon";
+import { displayTaskName } from "./TaskRow";
 import { categoryOf } from "../fileTypes";
 import { estimateRemainingSecs, fmtFinishClock, fmtRemaining } from "../utils/eta";
 
@@ -29,7 +30,7 @@ export function DetailDrawer({
   const live = useSyncExternalStore(store.subscribe, () => store.liveOf(task.id));
   const active = isActive(task.status);
   const done = task.status === "done";
-  const label = task.filename || task.url;
+  const label = task.filename || displayTaskName(task.url);
   const isExe = /\.(exe|msi|apk|dmg)$/i.test(task.filename ?? "");
 
   const [name, setName] = useState(task.filename ?? "");
